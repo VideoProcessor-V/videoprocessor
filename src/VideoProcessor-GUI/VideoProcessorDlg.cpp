@@ -5482,16 +5482,16 @@ void CVideoProcessorDlg::EnableHdrInferenceSdrVeto(bool enabled)
 
 // F-8 (owner rule vp-either-or-overlaps): Bill's original newlldv heuristic or VP's inference,
 // one tracker option (HdrInferenceOptions::originalHeuristic).
-void CVideoProcessorDlg::SelectOriginalNewLldvHeuristic(bool original, const HdrInferenceChoice::Resolved& fromConfig)
+void CVideoProcessorDlg::SelectOriginalNewLldvHeuristic(bool original, const HdrInferenceChoice::Resolved& fromConfig, bool fromCli)
 {
-	HdrInferenceOptions options = m_hdrInference.Options();
-	options.originalHeuristic = original;
-	m_hdrInference.SetOptions(options);
+	if (fromCli) { m_hdrInferenceCliOverride = true; m_hdrInferenceCliOriginal = original; }
+	const bool eff = (m_hdrInferenceCliOverride && !fromConfig.originalPathway) ? m_hdrInferenceCliOriginal : original;
+	HdrInferenceOptions options = m_hdrInference.Options(); options.originalHeuristic = eff; m_hdrInference.SetOptions(options);
 	m_hdrInferenceProblem = fromConfig.problem;
 	m_dvTunnelOriginalPathway = fromConfig.originalPathway; if (m_dvTunnelOriginalPathway) MagewellBackend::SetRecoverFaults(false);
 	if (m_dvTunnelOriginalPathway)
 		DebugLog::Log("dv_tunnel_handoff: not used (the Original pathway keeps Bill's tunnel gate)");
-	DebugLog::Log("hdr_inference: %s", HdrInferenceChoice::StartupLine(original, fromConfig).c_str());
+	DebugLog::Log("hdr_inference: %s", HdrInferenceChoice::StartupLine(eff, fromConfig).c_str());
 }
 
 // F-8: Bill's IsNewLldvModeSelected, restored for the USE of his candidate (original mode only).

@@ -278,7 +278,7 @@ vec3 preserve_extended(vec3 result, vec3 original, float lift)
     // u = clamp((max(original) - 1.0) / max(extended_ceiling - 1.0, 1e-4), 0, 1) so eff_gain = gain at the
     // white edge (zero cliff) and eff_gain = 1.0 at extended_ceiling (true WTW preserved monotonically).
     vec3 p;
-    if (y > 1.0) {
+    if (anyAbove && y > 1.0) {
         p = vec3(1.0);
     } else {
         vec3 d = original - vec3(y);
@@ -294,7 +294,7 @@ vec3 preserve_extended(vec3 result, vec3 original, float lift)
     float over = max(max(original.r, max(original.g, original.b)) - 1.0, 0.0);
     float u = clamp(over / max(extended_ceiling - 1.0, 1e-4), 0.0, 1.0);
     float s = u * u * (3.0 - 2.0 * u);
-    float eff_gain = (anyAbove && gain != 1.0) ? mix(gain, 1.0, s) : gain;
+    float eff_gain = (anyAbove && gain != 1.0 && extended_ceiling > 1.0 + 1e-4) ? mix(gain, 1.0, s) : gain;
     vec3 c = compensate_gain(p, lift, eff_gain);
     float f = (anyAbove && eff_gain < 1.0) ? compensate_gain(vec3(1.0), lift, eff_gain).x : 1.0;
     vec3 e = (original - p) * f;

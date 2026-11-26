@@ -222,7 +222,7 @@ public:
 	void SubtitleRepositioning(SubtitleRepositionMode mode);
 	void EnableNewLldvHeuristic(bool enabled = true);
 	void EnableHdrInferenceSdrVeto(bool enabled = true);
-	void SelectOriginalNewLldvHeuristic(bool original, const HdrInferenceChoice::Resolved& fromConfig);   // F-8: [vpv] hdr_inference
+	void SelectOriginalNewLldvHeuristic(bool original, const HdrInferenceChoice::Resolved& fromConfig, bool fromCli = false);   // F-8: [vpv] hdr_inference
 	void EnableDolbyVisionTunnel(bool enabled = true);
 	void EnableDolbyVisionTunnelHandoff(bool enabled = true);
 	void EnableBoundedInvalidCaptureRecovery(bool enabled);
@@ -446,7 +446,7 @@ protected:
 	bool m_dvTunnelHandoffEnabled = true;
 	// W4 #4 either/or: the Original pathway uses Bill's tunnel gate exactly (no hand-off probe,
 	// no YCbCr decline); set from the configuration at start-up (SelectOriginalNewLldvHeuristic).
-	bool m_dvTunnelOriginalPathway = false;
+	bool m_dvTunnelOriginalPathway = false; bool m_hdrInferenceCliOverride = false; bool m_hdrInferenceCliOriginal = false;
 	bool DvTunnelHandoffActive() const { return m_dvTunnelHandoffEnabled && !m_dvTunnelOriginalPathway; }
 	bool m_dvTunnelHandedOff = false;
 	uint64_t m_dvTunnelHandedOffGeneration = 0;

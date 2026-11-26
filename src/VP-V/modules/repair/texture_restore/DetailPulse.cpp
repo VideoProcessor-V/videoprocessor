@@ -2017,7 +2017,7 @@ for (int q = 0; q < 4; q++) {
 		pl_tex memoLowTex = nullptr;
 		{
 			std::string why;
-			if (TryAcquireBandMemo(params, sequence, c, luma, false, memoBand, memoLowTex, why))
+			if (TryAcquireBandMemo(params, sequence, c, luma, false, false, memoBand, memoLowTex, why))
 				++bandMemoHits;
 			else
 			{

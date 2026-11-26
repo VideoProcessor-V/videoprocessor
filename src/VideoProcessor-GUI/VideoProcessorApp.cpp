@@ -2131,7 +2131,7 @@ BOOL CVideoProcessorApp::InitInstance()
 				dlg.EnableHdrInferenceSdrVeto(booleanValue);
 			}
 			if (wcscmp(pArgs[i], L"/hdr_inference") == 0 && (i + 1) < iNumOfArgs)   // F-8
-				dlg.SelectOriginalNewLldvHeuristic(_wcsicmp(pArgs[i + 1], L"original") == 0, HdrInferenceChoice::Load());
+				dlg.SelectOriginalNewLldvHeuristic(_wcsicmp(pArgs[i + 1], L"original") == 0, HdrInferenceChoice::Load(), i > static_cast<int>(configuredArguments.size()));
 			if (ReadBooleanOption(pArgs.data(), i, iNumOfArgs,
 				L"/dolby_vision_tunnel", booleanValue))
 			{

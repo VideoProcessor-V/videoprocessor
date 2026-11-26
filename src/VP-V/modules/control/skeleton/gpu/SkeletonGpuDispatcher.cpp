@@ -634,10 +634,11 @@ namespace Vpv
 				t.picture.right != picture.right || t.picture.bottom != picture.bottom;
 			if (!t.extendedDone || pictureChanged)
 			{
-				t.picture = picture;
+				t.extendedDone = false;
 				// W23-SK-M3: time the extend pass with the owning product's timer, and record ComputeOnce (W23-SK-H2).
 				if (!VpLaneProducts::ExtendTap(m_dispatch, t.tap, t.extended, picture, timer))
 					return Fail("the extend pass failed");
+				t.picture = picture;
 				VPV_COMPUTE_ONCE_AT("lane_tap_extend", t.seq, 0);
 				t.extendedDone = true;
 				++m_counters.extends;

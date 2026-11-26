@@ -151,7 +151,7 @@ namespace VpvGpu
 	// One code of the signal in the plane texture's normalised units (as texture_restore / VpDebander).
 	inline double CodeUnit(pl_tex tex, const pl_bit_encoding& bits, int colorDepth)
 	{
-		if (!tex) return 1.0;
+		if (!tex || !tex->params.format) return 0.0;
 		const int sampleDepth = bits.sample_depth > 0 ? bits.sample_depth : tex->params.format->component_depth[0];
 		if (tex->params.format->type == PL_FMT_FLOAT)
 		{

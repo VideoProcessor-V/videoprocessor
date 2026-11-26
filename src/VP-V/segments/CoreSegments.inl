@@ -30,7 +30,7 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 	renderAheadPresenter.SetOriginalPathway(settings.pipelineOriginalPathway, RenderAheadNow());
 	if (settings.pipelineOriginalPathway || settings.ditherNeed != "auto") { outputFinish.ReleaseGpu(d3d11 ? d3d11->gpu : nullptr); SyncFallback(FallbackCatalog::Released("dither need")); }
 	if (outputMerger && (settings.pipelineOriginalPathway || !settings.outputSegmentsMerged)) outputMerger->Configure(pipelineSlots, false, 30, fallbacks);
-	if (!settings.frameAnalysisStore || settings.pipelineOriginalPathway) ReleaseFallback(FrameAnalysis::kFallbackId);
+	if (!settings.frameAnalysisStore || settings.pipelineOriginalPathway) ReleaseFallback(FrameAnalysis::kFallbackId); if (!pipelineSlots.Runs(PipelineSlots::Id::RepairDeband)) ReleaseFallback("product.debander");
 	if (settings.pipelineOriginalPathway)
 	{
 		VpMotion::ReleaseVpTimeline(dejudderPolicy, [this](const char* what) { LogVpTimeline(what); });

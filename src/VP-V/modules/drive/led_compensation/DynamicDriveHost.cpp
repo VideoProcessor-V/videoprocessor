@@ -389,6 +389,8 @@ namespace LedDrive
 
 	DynamicDriveHost::DynamicDriveHost(std::mutex& rendererStateMutex) :
 		stateMutex(rendererStateMutex),
+		explicitOriginal(false),
+		candidateProjectorAllowed(true),
 		lifecycleWorker(std::make_unique<LifecycleWorker>())
 	{
 	}
@@ -437,12 +439,36 @@ namespace LedDrive
 		const bool nextOriginal = hasExplicitPathway ? explicitOriginalPathway :
 			(candidateConfig != nullptr && OriginalPathwayForConfig([candidateConfig](const char* section, const char* key, std::string& out)
 				{ return candidateConfig->TryGetString(section, key, out); }));
-		explicitOriginal = nextOriginal;
-		candidateProjectorAllowed = !nextOriginal && candidateProjectorAllowedIn;
+		explicitOriginal.store(nextOriginal, std::memory_order_release);
+		candidateProjectorAllowed.store(!nextOriginal && candidateProjectorAllowedIn, std::memory_order_release);
 		Vpv::RunningPathway::Store(nextOriginal);
 		Vpv::RunningPathway::NotifyHostPathway(rendererHost, nextOriginal);
 		if (!snapshotConfig)
+		{
+			if (nextOriginal)
+			{
+				deferredSnapshot = false;
+				if (!rejection.empty())
+				{
+					rejection.clear();
+					std::atomic_store(&statusRejection, std::shared_ptr<const std::string>());
+				}
+				params = DynamicDriveParams();
+				aliasConflict.clear();
+				signature.clear();
+				std::shared_ptr<LedDriveModule> previous = std::atomic_load(&module);
+				if (previous)
+					lifecycleWorker->EnqueueStop(previous);
+				std::atomic_store(&module, std::shared_ptr<LedDriveModule>());
+				if (context.frame)
+				{
+					context.frame->Clear();
+					context.frame->PublishRejection(std::string());
+					context.frame->PublishParams(DynamicDriveParams());
+				}
+			}
 			return;
+		}
 		// W23-REG-H3 / W23-C2-S2-H3: on Original, stop/clear immediately (never defer); on VP-V, never
 		// publish onto an outgoing Original/uninitialized Impl — defer until post-Initialize Attach().
 		const bool deferUntilAttach = !nextOriginal && (rebuilding || !implInitialized) && (!context.projectorAllowed || !implInitialized);
@@ -458,8 +484,8 @@ namespace LedDrive
 		bool allowPublish = false;
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
-			const bool isOriginal = explicitOriginal || Vpv::RunningPathway::Original();
-			const bool allowAttach = context.projectorAllowed && candidateProjectorAllowed && !isOriginal;
+			const bool isOriginal = explicitOriginal.load(std::memory_order_acquire) || Vpv::RunningPathway::Original();
+			const bool allowAttach = context.projectorAllowed && candidateProjectorAllowed.load(std::memory_order_acquire) && !isOriginal;
 			allowPublish = allowAttach;
 			if (!allowAttach)
 			{
@@ -559,7 +585,7 @@ namespace LedDrive
 	{
 		// Original == Bill: inert on pipeline_original_pathway: on — no [led_drive.*] parsing,
 		// no validation rejections/fallbacks, no gamma boost/shadow lift, stop any active LED module.
-		if (explicitOriginal || Vpv::RunningPathway::Original() ||
+		if (explicitOriginal.load(std::memory_order_acquire) || Vpv::RunningPathway::Original() ||
 			OriginalPathwayForConfig([&config](const char* section, const char* key, std::string& out)
 			{ return config.TryGetString(section, key, out); }))
 		{

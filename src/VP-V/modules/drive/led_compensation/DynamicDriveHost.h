@@ -122,7 +122,7 @@ namespace LedDrive
 		// the DirectShow filter's FileHost, the only place the drive is parked between files).
 		void ApplySnapshot(const std::shared_ptr<const ConfigFile>& configuration,
 			const std::string& sourceKind, const HostContext& context, bool deferUntilAttach = false);
-		// W23-NEON-H1 / W23-REG-H3: sync running pathway and apply/defer snapshot once accepted.
+		// W23-NEON-H1 / W23-REG-H3: sync running pathway and apply/defer snapshot once accepted (caller holds stateMutex).
 		void ApplyAcceptedSnapshot(const void* rendererHost, const ConfigFile* candidateConfig,
 			bool hasExplicitPathway, bool explicitOriginalPathway,
 			const std::shared_ptr<const ConfigFile>& snapshotConfig, const std::string& sourceKind,
@@ -183,9 +183,9 @@ namespace LedDrive
 		bool suspended = false;
 		// W23-REG-H3: a snapshot deferred while an outgoing Original/uninitialized Impl awaits rebuild.
 		bool deferredSnapshot = false;
-		// W23-C2-S2-H3: authoritative pathway & drive.projector_control allowance from ApplyAcceptedSnapshot (under stateMutex).
-		bool explicitOriginal = false;
-		bool candidateProjectorAllowed = true;
+		// W23-C2-S2-H3: authoritative pathway & drive.projector_control allowance from ApplyAcceptedSnapshot (atomic; written under stateMutex).
+		std::atomic<bool> explicitOriginal;
+		std::atomic<bool> candidateProjectorAllowed;
 		// file_led_holdover_ms while the applied snapshot says source=file; 0 for the capture
 		// app, whose drive is never parked (LedDriveHoldover.h).
 		uint32_t holdoverMs = 0;

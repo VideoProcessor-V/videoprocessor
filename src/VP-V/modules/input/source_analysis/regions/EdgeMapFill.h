@@ -107,6 +107,16 @@ namespace Vpv
 				return false;
 			}
 			const pl_tex in = static_cast<pl_tex>(src.gpu.resource);
+			VpSkeleton::TexShape shape;
+			shape.w = uint32_t(in->params.w);
+			shape.h = uint32_t(in->params.h);
+			shape.fmt = VpSkeleton::TexFormat::R32F;
+			std::string why;
+			if (!req.gpu->Allocate(shape, out.gpu, why))
+			{
+				out.declineReason = "edge_map: " + why;
+				return false;
+			}
 			const Vpv::Capture::SourcePlaneSet* facts = Vpv::Capture::SourcePlanes::FactsOf(src);
 			if (facts == nullptr)
 			{
@@ -118,16 +128,6 @@ namespace Vpv
 			if (!(cu > 0.0))
 			{
 				out.declineReason = "edge_map: invalid source plane code unit";
-				return false;
-			}
-			VpSkeleton::TexShape shape;
-			shape.w = uint32_t(in->params.w);
-			shape.h = uint32_t(in->params.h);
-			shape.fmt = VpSkeleton::TexFormat::R32F;
-			std::string why;
-			if (!req.gpu->Allocate(shape, out.gpu, why))
-			{
-				out.declineReason = "edge_map: " + why;
 				return false;
 			}
 			pl_shader_desc desc[2]{};
