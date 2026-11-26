@@ -83,33 +83,8 @@ namespace Vpv
 		f.originalPathway = (b & 32u) != 0;
 		return f;
 	}
-	std::atomic<bool> m_originalPathway{false};   // the pathway the active settings selected at the last arrival
-	// Stores the switches (the renderer's two are passed in). Returns true when the pathway fact CHANGED (the caller
-	// tells the ingress binding: Vpv::Ingress::NoteOriginalPathway).
-	bool SyncIngressSwitches(const FixSwitches& f, std::atomic<bool>& queueTimingFixes, std::atomic<bool>& motionHistoryFixes)
-	{
-		m_pulldownFixes.store(f.pulldownFixes, std::memory_order_relaxed);
-		m_timingContinuityFixes.store(f.timingContinuityFixes, std::memory_order_relaxed);
-		m_cadenceClassFixes.store(f.cadenceClassFixes, std::memory_order_relaxed);
-		queueTimingFixes.store(f.queueTimingFixes, std::memory_order_relaxed);
-		motionHistoryFixes.store(f.motionHistoryFixes, std::memory_order_relaxed);
-		const bool prevOriginal = m_originalPathway.exchange(f.originalPathway, std::memory_order_acq_rel);
-		// W23-DV-H4: live VP-V <-> Original switch clears pulldown & FilmClock cleanly on the capture thread so
-		// Original leaks zero stale cadence/acquiring state and returning to VP-V starts fresh without a 1s clamp.
-		if (f.originalPathway)
-		{
-			ClearPulldownWhenOff();
-			m_captureStaleGapPending = false;
-			m_captureStaleGapCause = nullptr;
-			m_pulldownFrameFacts = CadenceFacts{};
-		}
-		else if (prevOriginal)
-		{
-			m_pulldownResetRequested.store(true, std::memory_order_release);
-			m_pulldownForceGap = true;
-		}
-		return prevOriginal != f.originalPathway;
-	}
+	std::atomic<bool> m_originalPathway{false};
+	bool SyncIngressSwitches(const FixSwitches& f, std::atomic<bool>& queueTimingFixes, std::atomic<bool>& motionHistoryFixes);
 	bool m_pulldownForceGap = false;          // capture thread: a toggle restarted the film clock (06-interp L1)
 	// Q1 (queue stress 2026-10-18, queue_timing_fixes): stale-frame arrivals and their
 	// delivery gap (capture thread).
@@ -147,48 +122,9 @@ namespace Vpv
 	// it before it resets its Impl (Retire, FinalizeRetirementForShutdown, Build, the destructor).
 	CallbackGate m_ingressGate;
 
-	// W1-A4 (88 resync/flush audit, PARTIAL: pulldownAcquiring sticks true): a fresh start of the pulldown detector, the film
-	// clock and the signature (the resync reset), and the warm-engine flag with them: the flag is the detector's own
-	// verdict, so a detector with no history has nothing to be acquiring. Capture thread.
-	void ResetPulldown()
-	{
-		m_pulldown.Reset();
-		m_pulldownClock.Reset();
-		m_pulldownSignature = 0;
-		m_captureSignature.Reset();
-		m_pulldownFilmQpc = 0;
-		m_pulldownFilmIsFrameStart = false;
-		m_pulldownCadenceLatenessMaxMs.store(0.0, std::memory_order_relaxed);
-		m_pulldownAcquiring.store(false, std::memory_order_relaxed);
-	}
-
-	// W2-C1 (open item from W1-A4): a contained throw in IngressPulldown (IngressFaultThunk). The detector and the film clock start
-	// over on the next frame through the renderer's reset request, as before; the acquiring flag is cleared now, with the request, as
-	// ResetPulldown does on the next frame: a faulted frame's verdict is not a demand, and no further frame may arrive to rewrite it.
-	// (The renderer and live-queue reset paths in LibplaceboVideoRenderer.cpp clear it only on that next frame: hook freeze, rule 32.)
-	// Capture thread.
-	void RequestPulldownResetAfterFault()
-	{
-		m_pulldownResetRequested.store(true, std::memory_order_release);
-		m_pulldownAcquiring.store(false, std::memory_order_relaxed);
-	}
-
-	// W1-A4: a frame arrives while pulldown detection is off, or without a display mode (the signal's mode lost). Nothing runs the
-	// detector then, so its last verdict (the cadence lock, and the acquiring flag the motion engine's standing demand reads)
-	// would otherwise outlive the cause. Clears both, and the detector's stale history with them. Returns true when a LOCK /
-	// cadence was in use (the caller marks the "pulldown off" gap, as before); an acquiring-only state held no film timing, so
-	// it needs none. Capture thread.
-	bool ClearPulldownWhenOff()
-	{
-		const bool wasAcquiring = m_pulldownAcquiring.exchange(false, std::memory_order_relaxed);
-		const bool wasLocked = m_pulldownCadence.load(std::memory_order_relaxed) != 0 || m_pulldown.Locked();
-		if (wasLocked || wasAcquiring)
-		{
-			ResetPulldown();
-			m_pulldownCadence.store(0, std::memory_order_relaxed);
-		}
-		return wasLocked;
-	}
+	void ResetPulldown();
+	void RequestPulldownResetAfterFault();
+	bool ClearPulldownWhenOff();
 		};
 	}
 }

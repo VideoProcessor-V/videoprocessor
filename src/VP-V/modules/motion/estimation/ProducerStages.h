@@ -241,61 +241,12 @@ namespace MotionAhead
 		class OrderedPublishGate
 		{
 		public:
-			bool Accept(uint64_t generation, uint64_t fromSeq, uint64_t toSeq)
-			{
-				if (toSeq <= fromSeq)
-					return false;
-				std::lock_guard<std::mutex> lock(mutex_);
-				if (!haveGeneration_ || generation != generation_)
-				{
-					if (haveGeneration_ && generation < generation_)
-						return false;
-					haveGeneration_ = true;
-					generation_ = generation;
-					havePublished_ = true;
-					lastTo_ = toSeq;
-					return true;
-				}
-				if (havePublished_ && toSeq <= lastTo_)
-					return false;
-				havePublished_ = true;
-				lastTo_ = toSeq;
-				return true;
-			}
-
-			void Reset()
-			{
-				std::lock_guard<std::mutex> lock(mutex_);
-				haveGeneration_ = false;
-				generation_ = 0;
-				havePublished_ = false;
-				lastTo_ = 0;
-			}
-
-			void SetGeneration(uint64_t generation)
-			{
-				std::lock_guard<std::mutex> lock(mutex_);
-				haveGeneration_ = true;
-				generation_ = generation;
-				havePublished_ = false;
-				lastTo_ = 0;
-			}
-
-			uint64_t Generation() const
-			{
-				std::lock_guard<std::mutex> lock(mutex_);
-				return generation_;
-			}
-			uint64_t LastPublishedTo() const
-			{
-				std::lock_guard<std::mutex> lock(mutex_);
-				return lastTo_;
-			}
-			bool HasPublished() const
-			{
-				std::lock_guard<std::mutex> lock(mutex_);
-				return havePublished_;
-			}
+			bool Accept(uint64_t generation, uint64_t fromSeq, uint64_t toSeq);
+			void Reset();
+			void SetGeneration(uint64_t generation);
+			uint64_t Generation() const;
+			uint64_t LastPublishedTo() const;
+			bool HasPublished() const;
 
 		private:
 			mutable std::mutex mutex_;
@@ -395,7 +346,7 @@ namespace MotionAhead
 				if (dropped)
 				{
 					spaceCv_.notify_all();
-					if (queue_.empty() && !busy_)
+					if (queue_.empty() && !busy_ && externalBusy_ == 0)
 						idleCv_.notify_all();
 				}
 				return dropped;
@@ -437,7 +388,7 @@ namespace MotionAhead
 			{
 				std::lock_guard<std::mutex> lock(mutex_);
 				busy_ = busy;
-				if (!busy_ && externalBusy_ == 0 && queue_.empty())
+				if (!busy_ && externalBusy_ == 0 && (queue_.empty() || closed_))
 					idleCv_.notify_all();
 			}
 
@@ -452,7 +403,7 @@ namespace MotionAhead
 				std::lock_guard<std::mutex> lock(mutex_);
 				if (externalBusy_ > 0)
 					--externalBusy_;
-				if (!busy_ && externalBusy_ == 0 && queue_.empty())
+				if (!busy_ && externalBusy_ == 0 && (queue_.empty() || closed_))
 					idleCv_.notify_all();
 			}
 

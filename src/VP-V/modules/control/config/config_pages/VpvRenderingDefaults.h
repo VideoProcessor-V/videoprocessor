@@ -748,16 +748,12 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
             { "appearance", "off" }, { "appearance_honour_l11", "on" }, { "appearance_screen_white_measured", "off" }, { "appearance_room", "cinema" },   // CF-1 CAM-4
             { "intent_black", "off" }, { "intent_display", "off" },
             // W4 profile-defaults-parity (GEM-033, defaults verified against VpvRendererFields.h / AdaptiveDownscale.h):
-            { "adaptive_motion", "off" }, { "chroma_upscale_vp", "off" }, { "fbo_float32", "auto" },
-            { "repeat_render_reuse", "off" }, { "source_resolution_frame_bound", "on" }, { "temporal_dither", "auto" } };
+            { "adaptive_motion", "off" }, { "chroma_upscale_vp", "off" }, { "fbo_float32", "auto" }, { "repeat_render_reuse", "off" }, { "source_resolution_frame_bound", "on" }, { "temporal_dither", "auto" } };
         for (const auto& entry : choiceDefaults)
             if (key == QLatin1String(entry.first)) { out = QString::fromLatin1(entry.second); return true; }
-        // Numbers with a placeholder showing their default: empty, so
-        // the placeholder (not "Auto") is what an unset field shows.
         if ((key.startsWith(QStringLiteral("dejudder_")) || key.startsWith(QStringLiteral("dither_")) ||
                 key.startsWith(QStringLiteral("adaptive_")) || key == QStringLiteral("sdr_white_headroom") ||
-                key == QStringLiteral("sdr_knee_start") || key == QStringLiteral("sdr_knee_strength") ||
-                key == QStringLiteral("ssim_bitrate_floor") || key == QStringLiteral("upscale_sharp_antiring") || key == QStringLiteral("render_ahead_utilisation") ||
+                key == QStringLiteral("sdr_knee_start") || key == QStringLiteral("sdr_knee_strength") || key == QStringLiteral("ssim_bitrate_floor") || key == QStringLiteral("upscale_sharp_antiring") || key == QStringLiteral("render_ahead_utilisation") ||
                 key.startsWith(QStringLiteral("source_resolution_auto_")) ||
                 key.startsWith(QStringLiteral("source_resolution_evidence_")) ||
                 // Hunt 3 (CFG2): the latch timing fields show 20 / 1.5 / 0.25.

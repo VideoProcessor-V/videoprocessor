@@ -11,6 +11,13 @@
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/control/skeleton/SkeletonFacts.h>
 #include <VP-V/modules/output/dither/DitherNeedGpu.h>
+#include <VP-V/modules/control/config/VpvRendererFields.h>
+#include <VP-V/core/OutputHookOrder.h>
+#include <VP-V/core/SlotSwitchSettings.h>
+#include <VP-V/modules/output/presentation/PresentationOwner.h>
+#include <VP-V/modules/scaling/rebase/EntranceGpuDrain.h>
+#include <VP-V/segments/CoreSegmentCaches.h>
+#include <DebugLog.h>
 
 #include <algorithm>
 #include <cmath>
@@ -407,12 +414,7 @@ namespace OutputSegments
 
 	OutputFinishSegment::~OutputFinishSegment()
 	{
-		if (ditherNeedGpu)
-		{
-			ditherNeedGpu->guard.Release();
-			ditherNeedGpu->ClearDemand(this);
-		}
-		VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserDitherNeed);
+		ReleaseGpu(nullptr);
 	}
 
 	void OutputFinishSegment::ReleaseDitherNeedBind()
@@ -634,25 +636,30 @@ namespace OutputSegments
 			VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserDitherNeed);
 		}
 
-		const LightLevel::Lut& lut = st.lutCache.Get(req.lightSettings, req.lightContext);
+		// W23-REG-M2: branch on !req.domainSupported BEFORE st.lutCache.Get() so ReleaseGpuResources()
+		// cannot invalidate a bound Lut reference or waste CPU rebuilding the LUT only to destroy it.
+		const LightLevel::Lut* lutPtr = nullptr;
 		if (!req.domainSupported)
 		{
-			// W23-NEON-H3: unsupported domain must neither reuse prior VPDN maps nor allocate/retain LUT+dispatch VRAM.
 			st.ReleaseGpuResources(req.gpu);
 			st.SyncVram(this);
 		}
-		else if (req.gpu != nullptr)
+		else
 		{
-			st.gpu = req.gpu;
-			if (!st.dispatch)
+			lutPtr = &st.lutCache.Get(req.lightSettings, req.lightContext);
+			if (req.gpu != nullptr)
 			{
-				st.dispatch = pl_dispatch_create(req.gpu->log, req.gpu);
-				GpuAttribution::Watch(st.dispatch, "dither_need_gpu");
-			}
-			if (st.lutCache.LastRebuilt() || !st.lutTex || !st.lutOutTex)
-			{
-				DitherNeedGpuState::UploadLut1024(req.gpu, st.lutTex, LightLevel::PackTexels(lut));
-				DitherNeedGpuState::UploadLut1024(req.gpu, st.lutOutTex, LightLevel::PackOutputTexels(lut));
+				st.gpu = req.gpu;
+				if (!st.dispatch)
+				{
+					st.dispatch = pl_dispatch_create(req.gpu->log, req.gpu);
+					GpuAttribution::Watch(st.dispatch, "dither_need_gpu");
+				}
+				if (st.lutCache.LastRebuilt() || !st.lutTex || !st.lutOutTex)
+				{
+					DitherNeedGpuState::UploadLut1024(req.gpu, st.lutTex, LightLevel::PackTexels(*lutPtr));
+					DitherNeedGpuState::UploadLut1024(req.gpu, st.lutOutTex, LightLevel::PackOutputTexels(*lutPtr));
+				}
 			}
 		}
 
@@ -662,10 +669,10 @@ namespace OutputSegments
 			const bool gridMatchesOverride = !req.overrideInputs ||
 				(req.overrideGrid.gw == st.lastSteppedGridW && req.overrideGrid.gh == st.lastSteppedGridH &&
 					(req.overrideGrid.B > 0 ? req.overrideGrid.B : 16) == st.lastSteppedBlockPx);
-			if (req.domainSupported && req.sourceSequence > 0 && st.hasSteppedSequence &&
+			if (req.domainSupported && lutPtr != nullptr && req.sourceSequence > 0 && st.hasSteppedSequence &&
 				st.lastSteppedSourceSequence == req.sourceSequence &&
 				!req.discontinuity &&
-				st.lastSteppedLutFingerprint == lut.fingerprint &&
+				st.lastSteppedLutFingerprint == lutPtr->fingerprint &&
 				st.lastSteppedColorBits == req.colorBits &&
 				st.lastSteppedSourceBits == req.sourceBits &&
 				st.lastSteppedABase == req.aBase &&
@@ -764,7 +771,7 @@ namespace OutputSegments
 			gpuMissing |= DitherNeed::kNoSetTexture;
 
 		DitherNeedSeam::Feed feed;
-		feed.lut = (st.lutTex && st.lutOutTex) ? &lut : nullptr;
+		feed.lut = (lutPtr != nullptr && st.lutTex && st.lutOutTex) ? lutPtr : nullptr;
 		feed.quality = req.quality;
 		feed.grainAgeSeconds = grainAge;
 		feed.evidenceAgeSeconds = evidenceAge;
@@ -801,7 +808,7 @@ namespace OutputSegments
 		fa.missing = 0;
 		fa.needed = true;
 		fa.colorBits = req.colorBits;
-		fa.lutFingerprint = lut.fingerprint;
+		fa.lutFingerprint = lutPtr != nullptr ? lutPtr->fingerprint : std::string();
 
 		const DitherNeed::Gpu::BlockPass::StepResult step = st.pass.Step(req.gpu, st.dispatch, args, fa, req.requireBind);
 		st.SyncVram(this);
@@ -825,11 +832,11 @@ namespace OutputSegments
 			if (attachRelease)
 				attachRelease([this]() { ReleaseDitherNeedBind(); });
 		}
-		if (req.sourceSequence > 0)
+		if (req.sourceSequence > 0 && lutPtr != nullptr)
 		{
 			st.hasSteppedSequence = true;
 			st.lastSteppedSourceSequence = req.sourceSequence;
-			st.lastSteppedLutFingerprint = lut.fingerprint;
+			st.lastSteppedLutFingerprint = lutPtr->fingerprint;
 			st.lastSteppedGridW = args.gridW;
 			st.lastSteppedGridH = args.gridH;
 			st.lastSteppedBlockPx = args.blockPx;
@@ -1004,5 +1011,128 @@ namespace OutputSegments
 	bool OutputFinishSegment::Member(const pl_hook* hook) const
 	{
 		return std::find(members.begin(), members.end(), hook) != members.end();
+	}
+
+	PipelineSlotsPlan BuildPipelineSlotsPlan(const ::VpvRenderer::Fields& settings)
+	{
+		PipelineSlotsPlan out;
+		if (settings.pipelineOriginalPathway)
+			out.next.ApplyOriginalPathway();
+		std::string problems = settings.pipelineSettingsProblems;
+		std::string token;
+		auto flush = [&]()
+		{
+			if (token.empty())
+				return;
+			const PipelineSlots::Id id = PipelineSlots::FromName(token.c_str());
+			if (id == PipelineSlots::Id::Count)
+				problems += "pipeline_slots_off: unknown slot '" + token + "'; ";
+			else if (!PipelineSlots::SwitchHonoured(id))
+				problems += "pipeline_slots_off: " + token + " has no slot switch yet; ";
+			else
+				out.next.SetEnabled(id, false);
+			token.clear();
+		};
+		for (char ch : settings.pipelineSlotsOff)
+		{
+			if (ch == ',' || ch == ' ' || ch == ';' || ch == '\t')
+				flush();
+			else
+				token += ch;
+		}
+		flush();
+		if (!problems.empty())
+		{
+			problems.resize(problems.size() - 2);
+			out.fallbacks.push_back(FallbackCatalog::Engaged("pipeline settings", "ignored: " + problems));
+		}
+		else
+			out.fallbacks.push_back(FallbackCatalog::Released("pipeline settings"));
+		std::string reason;
+		if (!settings.pipelineOriginalPathway && !out.next.SetOrderByNames(settings.pipelineOrder, &reason))
+			out.fallbacks.push_back(FallbackCatalog::Engaged("pipeline order", "designed order kept: " + reason));
+		else
+			out.fallbacks.push_back(FallbackCatalog::Released("pipeline order"));
+		if (settings.presentEveryVsyncWithheld)
+			out.fallbacks.push_back(FallbackCatalog::Engaged(PresentationOwner::FallbackId(), PresentationOwner::WithheldText()));
+		else
+			out.fallbacks.push_back(FallbackCatalog::Released(PresentationOwner::FallbackId()));
+		out.fallbacks.push_back(FallbackCatalog::AmbientAdaptReplaced(settings.ambientAdaptReplaced));
+		out.fallbacks.push_back(FallbackCatalog::SaturationReplaced(settings.saturationReplaced, settings.saturationConfigured));
+		out.next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);
+		(void)out.next.ActiveEntrance();
+		out.logState = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
+			out.next.IsDefaultOrder() ? "designed order" : "custom order";
+		std::string entrance;
+		for (PipelineSlots::Id id : out.next.ActiveEntrance())
+			entrance += (entrance.empty() ? "" : " > ") + std::string(PipelineSlots::Get(id).name);
+		out.logState += "; entrance: " + (entrance.empty() ? std::string("none") : entrance);
+		const std::string slotSwitches = SlotSwitchSettings::Describe(SlotSwitchSettings::FromText(settings.pipelineSlotsOff),
+			settings.pipelineOriginalPathway);
+		if (!slotSwitches.empty())
+			out.logState += "; " + slotSwitches;
+		out.logState += settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway ?
+			"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
+		EntranceGpuDrain::Mode drainMode = EntranceGpuDrain::Mode::Off;
+		EntranceGpuDrain::Parse(settings.entranceGpuDrain, drainMode);
+		if (drainMode != EntranceGpuDrain::Mode::Off && !settings.pipelineOriginalPathway &&
+			out.next.Runs(PipelineSlots::Id::ScalingRebase))
+		{
+			out.logState += std::string("; entrance GPU drain: ") + EntranceGpuDrain::Name(drainMode);
+			out.fallbacks.push_back(FallbackCatalog::Engaged("entrance GPU drain", EntranceGpuDrain::StatusReason(drainMode)));
+		}
+		else
+			out.fallbacks.push_back(FallbackCatalog::Released("entrance GPU drain"));
+		return out;
+	}
+
+	void OrderSlotHooksInPlace(std::vector<const pl_hook*>& frameHooks,
+		const std::vector<std::pair<const pl_hook*, PipelineSlots::Id>>& frameSlotHooks,
+		const PipelineSlots::Registry& pipelineSlots)
+	{
+		if (frameSlotHooks.size() < 2)
+			return;
+		std::vector<OutputHookOrder::Tagged<const pl_hook*>> tagged;
+		tagged.reserve(frameHooks.size());
+		for (const pl_hook* hook : frameHooks)
+		{
+			OutputHookOrder::Tagged<const pl_hook*> t;
+			t.hook = hook;
+			for (const auto& entry : frameSlotHooks)
+				if (entry.first == hook) { t.kind = OutputHookOrder::Kind::Slot; t.slot = entry.second; break; }
+			tagged.push_back(t);
+		}
+		frameHooks = OutputHookOrder::OrderSlotsInPlace(tagged,
+			[&pipelineSlots](PipelineSlots::Id id) { return pipelineSlots.Order(id); });
+	}
+
+	void TraceFrameHookListIfEnabled(const void* renderer, const pl_render_params& frameParams,
+		const std::vector<std::pair<const pl_hook*, PipelineSlots::Id>>& frameSlotHooks,
+		const CustomHookChain::Chain& customHooks, const pl_hook* submittedNls, bool (*readEnv)())
+	{
+		if (!Vpv::Segments::CoreSegmentCaches::Instance().TraceHookListEnabled(renderer, readEnv))
+			return;
+		std::string list;
+		for (int i = 0; i < frameParams.num_hooks; ++i)
+		{
+			const pl_hook* hook = frameParams.hooks[i];
+			std::string tag = "other";
+			for (const auto& entry : frameSlotHooks)
+				if (entry.first == hook) { tag = PipelineSlots::Get(entry.second).name; break; }
+			if (tag == "other")
+			{
+				if (hook != nullptr && hook == submittedNls) tag = "nls";
+				else if (customHooks.IsQuantizerHook(hook)) tag = "quantiser";
+				else if (customHooks.IsPrescalerHook(hook)) tag = "prescaler";
+			}
+			list += (i ? ", " : "") + tag;
+		}
+		static const void* lastRenderer = nullptr;
+		static std::string lastList;
+		if (renderer == lastRenderer && list == lastList)
+			return;
+		lastRenderer = renderer;
+		lastList = list;
+		DebugLog::Log("VP hook list: n=%d [%s]", frameParams.num_hooks, list.c_str());
 	}
 }

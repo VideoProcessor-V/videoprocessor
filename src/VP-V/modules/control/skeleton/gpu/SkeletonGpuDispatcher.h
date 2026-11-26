@@ -101,7 +101,8 @@ namespace Vpv
 			void Abandon();
 			// Video memory the dispatcher holds OUTSIDE the product textures (the governor does not see it): the tap ring
 			// (tap + extended plane, R16, per in-flight frame) and the kernels' working textures. Analytic (no allocation).
-			uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const;
+			// W23-REG-M1: optional targetTapSlots lets callers pre-budget the upcoming tap ring size before Configure().
+			uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm, size_t targetTapSlots = 0) const;
 			// W23-SK-H1: private video memory CURRENTLY allocated at `dims` (0 when lazy/unallocated or dims changed).
 			uint64_t ActualPrivateBytes(VpSkeleton::Dims dims) const;
 			// G5 + FIX-S0-COST (S0, registered fix lead8/FIX-S0-COST.md): the measured device time of a product per FRAME in ms

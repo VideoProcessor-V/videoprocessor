@@ -195,51 +195,26 @@ namespace ComputeOnce
 		void Note(const std::string& unit, const std::string& variant, int64_t seq, const Caller& caller)
 		{
 			std::lock_guard<std::mutex> lock(mutex_);
-			if (seq < 0)
-			{
-				GapRow& g = gaps_[unit];
-				g.unit = unit;
-				++g.calls;
-				detail::AddCaller(g.callers, caller);
-				return;
-			}
+			if (seq < 0) { GapRow& g = gaps_[unit]; g.unit = unit; ++g.calls; detail::AddCaller(g.callers, caller); return; }
 			const RowKey rk(unit, variant);
 			UnitRow& row = rows_[rk];
-			if (row.unit.empty())
+			if (row.unit.empty()) { row.unit = unit; row.variant = variant; }
+			auto rnIt = rowNewest_.find(rk);
+			if (rnIt != rowNewest_.end() && seq + kKeepFrames < rnIt->second)
 			{
-				row.unit = unit;
-				row.variant = variant;
+				for (auto it = cells_.lower_bound(CellKey(rk, INT64_MIN)); it != cells_.end() && it->first.first == rk;)
+					it = cells_.erase(it);
+				rnIt->second = seq;
 			}
+			else if (rnIt == rowNewest_.end() || seq > rnIt->second) rowNewest_[rk] = seq;
+			if (seq > newest_) newest_ = seq;
 			++row.calls;
 			detail::AddCaller(row.callers, caller);
 			Cell& cell = cells_[CellKey(rk, seq)];
-			++cell.calls;
-			if (cell.calls == 1)
-			{
-				++row.frames;
-				cell.first = caller;
-			}
-			else
-			{
-				if (cell.calls == 2)
-				{
-					++row.dupFrames;
-					detail::AddCaller(row.dupCallers, cell.first);
-				}
-				detail::AddCaller(row.dupCallers, caller);
-			}
+			if (++cell.calls == 1) { ++row.frames; cell.first = caller; }
+			else { if (cell.calls == 2) { ++row.dupFrames; detail::AddCaller(row.dupCallers, cell.first); } detail::AddCaller(row.dupCallers, caller); }
 			row.maxPerFrame = (std::max)(row.maxPerFrame, cell.calls);
-			// W23-SK-H3: on sequence restart / seek backwards beyond the keep window, reset newest_ and
-			// drop old-era cells so Prune() never evicts freshly noted low-sequence frames (blinding Detector 2).
-			if (newest_ >= 0 && seq >= 0 && seq + kKeepFrames < newest_)
-			{
-				cells_.clear();
-				newest_ = seq;
-			}
-			else if (seq > newest_)
-				newest_ = seq;
-			if (cells_.size() > kPruneAbove)
-				Prune();
+			if (cells_.size() > kPruneAbove) Prune();
 		}
 
 		std::vector<UnitRow> Rows() const
@@ -264,6 +239,7 @@ namespace ComputeOnce
 			std::lock_guard<std::mutex> lock(mutex_);
 			rows_.clear();
 			cells_.clear();
+			rowNewest_.clear();
 			gaps_.clear();
 			newest_ = -1;
 		}
@@ -283,14 +259,18 @@ namespace ComputeOnce
 		};
 		void Prune()
 		{
-			const int64_t keepFrom = newest_ - kKeepFrames;
 			for (auto it = cells_.begin(); it != cells_.end();)
-				it = it->first.second < keepFrom ? cells_.erase(it) : std::next(it);
+			{
+				const auto rnIt = rowNewest_.find(it->first.first);
+				const int64_t rowHead = rnIt != rowNewest_.end() ? rnIt->second : newest_;
+				it = it->first.second < (rowHead - kKeepFrames) ? cells_.erase(it) : std::next(it);
+			}
 		}
 
 		mutable std::mutex mutex_;
 		std::map<RowKey, UnitRow> rows_;
 		std::map<CellKey, Cell> cells_;
+		std::map<RowKey, int64_t> rowNewest_;
 		std::map<std::string, GapRow> gaps_;
 		int64_t newest_ = -1;
 	};

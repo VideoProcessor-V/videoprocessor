@@ -1355,21 +1355,36 @@ public:
         return out;
     }
 
-    // W23-SK-B1: pin a lane ring/live slot for the lifetime of an AcquireResult (calls SlotSet::Unpin on release,
-    // keeping both the LaneState buffers and the slot pin alive so the producer cannot overwrite a pinned ring slot).
-    std::shared_ptr<const void> PinSlotRead(ProductId id, uint64_t seq) const
+    // W23-SK-B1 + W23-REG-H6: atomically pin the lane ring/live slot FIRST via SlotSet::PinRef, then derive
+    // Ring/Live pointers & waitValue from the pinned slot — zero TOCTOU window and zero silent unpinned fallback.
+    struct PinnedProductRead {
+        ProductRead read;
+        std::shared_ptr<const void> pin;
+    };
+    PinnedProductRead ReadAndPinOf(ProductId id, uint64_t seq) const
     {
+        PinnedProductRead res;
         const std::shared_ptr<LaneState> st = renderState_;
         if (!st)
-            return {};
+            return res;
         const int idx = st->IndexOf(id);
         if (idx < 0)
-            return {};
+            return res;
+        if (IsFailed(id, seq)) {
+            res.read.state = ProductRead::Failed;
+            return res;
+        }
+        for (const LivePending& e : livePending_)
+            if (e.id == id && e.seq == seq) {
+                res.read.state = ProductRead::Pending;
+                return res;
+            }
+        const bool ahead = haveRenderSeq_ && seq > renderSeq_ && st->graph.nodes[size_t(idx)].backend == Backend::Cpu;
         AncestorRef ref{};
         int liveIndex = -1;
         SlotSet& set = st->table->At(size_t(idx));
-        if (!set.PinRef(seq, &ref, &liveIndex, false))
-            return std::shared_ptr<const void>(st);
+        if (!set.PinRef(seq, &ref, &liveIndex, !ahead))
+            return res;   // PinRef failed -> ProductRead::None (never hand out an unpinned slot pointer)
         struct SlotPinGuard {
             std::shared_ptr<LaneState> state;
             size_t tableIndex = 0;
@@ -1386,7 +1401,31 @@ public:
         guard->tableIndex = size_t(idx);
         guard->seq = seq;
         guard->liveIndex = liveIndex;
-        return std::shared_ptr<const void>(std::move(guard));
+        res.pin = std::shared_ptr<const void>(std::move(guard));
+
+        // Slot is now pinned: populate ReadInfo & CPU pointer strictly from the pinned slot (liveIndex vs ref.slotIndex).
+        const ReadInfo ri = set.Read(seq, ahead);
+        if (liveIndex >= 0) {
+            res.read.state = ProductRead::Live;
+            res.read.info.kind = ReadInfo::Live;
+            res.read.info.index = uint32_t(liveIndex);
+            res.read.info.waitValue = 0;
+            res.read.info.header = ri.kind == ReadInfo::Live ? ri.header : nullptr;
+        } else {
+            res.read.state = ProductRead::Ring;
+            res.read.info.kind = ReadInfo::Ring;
+            res.read.info.index = uint32_t(ref.slotIndex);
+            res.read.info.waitValue = ri.kind == ReadInfo::Ring ? ri.waitValue : 0;
+            res.read.info.header = ri.kind == ReadInfo::Ring ? ri.header : nullptr;
+        }
+        const CpuBuffers* b = st->bufs[size_t(idx)].get();
+        if (b != nullptr) {
+            res.read.cpu = res.read.state == ProductRead::Ring
+                ? b->Ring(size_t(res.read.info.index))
+                : b->Live(size_t(res.read.info.index));
+            res.read.cpuBytes = b->Bytes();
+        }
+        return res;
     }
 
     // The source view of frame `seq` (render thread, lock-free mirror; no keepAlive: the render holds the frame).

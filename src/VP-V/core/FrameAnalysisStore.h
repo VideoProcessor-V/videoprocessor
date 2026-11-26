@@ -613,7 +613,7 @@ namespace FrameAnalysis
 
 		mutable std::mutex m_mutex;
 		std::vector<Slot> m_slots;
-		uint64_t m_epoch = 0;
+		uint64_t m_epoch = 1;
 		bool m_enabled = true;
 		bool m_haveCause = false;
 		Discontinuity m_lastCause = Discontinuity::SourceChange;

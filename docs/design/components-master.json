@@ -1902,6 +1902,7 @@
         "src/VideoProcessor-Lib/ProfileSchemaHooks.h",
         "src/VP-V/modules/control/config/VpvStartupSchema.h",
         "src/VP-V/modules/control/config/VpvSchemaKeys.h",
+        "src/VP-V/modules/control/config/VpvSchemaValidation.cpp",
         "src/VP-V/modules/control/config/VpvProfileQueueAdvice.h",
         "src/VP-V/modules/control/config/VpvProfileQueueAdvice.cpp",
         "src/VideoProcessor-Lib/RendererProfileConfig.h",

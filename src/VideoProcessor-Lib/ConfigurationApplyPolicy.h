@@ -201,13 +201,7 @@ namespace ConfigurationApplyPolicy
 		if (HasPrefix(normalized, "output_display") ||
 			IsRenderingProfileSection(normalized) ||
 			IsViewportProfileSection(normalized) ||
-			IsScalingProfileSection(normalized) ||
-			// VPV-HOOK (W23-CFG-B1): VP-V sections apply live on Save/Apply (non-live [vpv] keys escalate in ClassifyChange).
-			normalized == "vpv" || normalized == "vpv.camera" || normalized == "vpv.skeleton" ||
-			normalized == "ambient" ||
-			normalized == "led_drive" || HasPrefix(normalized, "led_drive.") ||
-			normalized == "dynamic_drive" || HasPrefix(normalized, "dynamic_drive.") ||
-			normalized == "projector" || HasPrefix(normalized, "projector."))
+			IsScalingProfileSection(normalized))
 			return Action::ApplyProfiles;
 
 		// Every known renderer, input, profile, shader, LLDV, presentation, and
@@ -248,16 +242,6 @@ namespace ConfigurationApplyPolicy
             (NormalizeSection(change.key) == "present_every_vsync" ||
              NormalizeSection(change.key) == "presentation_queue_depth"))
             return directShowRendererActive ? Action::SaveOnly : Action::RestartRenderer;
-        // VPV-HOOK (W23-CFG-B1): structural [vpv] keys (incl. pipeline_original_pathway) require renderer rebuild/restart.
-        if (NormalizeSection(change.section) == "vpv")
-        {
-            const std::string key = NormalizeSection(change.key);
-            if (key == "pipeline_original_pathway" || key == "pipeline_order" ||
-                key == "pipeline_entrance_once" || key == "output_segments_merged" ||
-                key == "frame_analysis_store" || key == "resync_event" ||
-                key == "entrance_gpu_drain")
-                return Action::RestartRenderer;
-        }
 		if (IsShortcutAffectingChange(change)) return Action::ReloadShortcuts;
 		if (IsOutputExperimentChange(change)) return Action::RestartCapture;
 		const std::string section = NormalizeSection(change.section);

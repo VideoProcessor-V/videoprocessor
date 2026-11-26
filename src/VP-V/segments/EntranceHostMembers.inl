@@ -58,6 +58,7 @@ bool LibplaceboVideoRenderer::Impl::EntranceOncePhasePicture(const pl_frame& sou
 {
 	entrance.SetCurrentA(sequence);
 	if (heldA) *heldA = nullptr;
+	dejudderExtras.entranceOnceInterpFailed = false;
 	if (EntranceOnceCrossfading())
 	{
 		entrance.OnceFallback("source-resolution crossfade");
@@ -112,6 +113,7 @@ bool LibplaceboVideoRenderer::Impl::EntranceOncePhasePicture(const pl_frame& sou
 	{
 		entrance.OnceFallback("interpolation on the processed planes failed (" + frameInterpolator->LastError() + ")");
 		if (heldA) *heldA = pa;
+		dejudderExtras.entranceOnceInterpFailed = true;
 		return false;
 	}
 	frame = drawnA;

@@ -230,7 +230,7 @@ if (tile < int(tiles) && g.y < ts) {
 				if (entry.seq > expect)
 					break;   // gap in (from, to]: not consecutively covered
 				U7AheadEntry::Verdict v = entry.verdict;
-				if (entry.fromFrameJudge && v != U7AheadEntry::Verdict::Cancelled && v != U7AheadEntry::Verdict::Confirmed)
+				if (entry.fromFrameJudge && v == U7AheadEntry::Verdict::Pending)
 				{
 					if (frameJudge.Cancelled(entry.seq))
 						v = U7AheadEntry::Verdict::Cancelled;
@@ -488,7 +488,7 @@ if (tile < int(tiles) && g.y < ts) {
 			// flashes stay Cancelled and unconfirmed pending flashes are never falsely promoted to Confirmed.
 			for (U7AheadEntry& entry : u7AheadHistory)
 			{
-				if (!entry.fromFrameJudge || entry.verdict == U7AheadEntry::Verdict::Cancelled || entry.verdict == U7AheadEntry::Verdict::Confirmed)
+				if (!entry.fromFrameJudge || entry.verdict != U7AheadEntry::Verdict::Pending)
 					continue;
 				if (frameJudge.Cancelled(entry.seq))
 					entry.verdict = U7AheadEntry::Verdict::Cancelled;

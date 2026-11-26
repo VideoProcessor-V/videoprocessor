@@ -193,6 +193,8 @@ namespace EntranceSegment
 	// slot is listed, placeholders included (repair A, 4K route, refine, chroma).
 	std::vector<SegmentRunner::StageInfo> EntranceStageInfo(const PipelineSlots::Registry& registry);
 	SegmentRunner::Flow EntranceEntry();
+	pl_rect2df NormalisedActivePicture(int nativeWidth, int nativeHeight, bool hasPicture,
+		int rasterW, int rasterH, int left, int top, int right, int bottom, const pl_rect2df& crop);
 	constexpr const char* kS1FallbackId = "entrance segment S1";
 
 	// The stage a slot runs inside S1 (None: a slot outside S1).

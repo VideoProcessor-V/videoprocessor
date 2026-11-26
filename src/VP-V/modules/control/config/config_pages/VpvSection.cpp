@@ -4094,7 +4094,11 @@ namespace Vpv
 				localIdx.Rebuild(root);
 				index = &localIdx;
 			}
-			for (const std::string& key : ManagedKeys(TierTable()))
+			// W23-REG-H5: include upscale_sharp_antiring in ApplyManagedInImpl AND handle reversible
+			// disabling/restoring of IsVpvOnlyKey rows across live VP-V <-> Original toggles.
+			std::set<std::string> keys = ManagedKeys(TierTable());
+			keys.insert("upscale_sharp_antiring");
+			for (const std::string& key : keys)
 			{
 				const QString name = host.upstreamControlName(QString::fromStdString(key));
 				if (name.isEmpty()) continue;
@@ -4119,6 +4123,30 @@ namespace Vpv
 						w->setToolTip(w->property("vpvToolTip").toString());
 						w->setProperty("vpvManaged", false);
 					}
+				}
+			}
+			// W23-REG-H5: restore/re-disable VP-V-only rows on upstream pages when toggling Original <-> VP-V live.
+			const QString origPrefix = QStringLiteral("Disabled on the Original pathway (VP-V addition; overridden at runtime).");
+			for (QWidget* w : root->findChildren<QWidget*>())
+			{
+				if (!w || w->objectName().startsWith(QStringLiteral("vpv."))) continue;
+				const QVariant kProp = w->property("vpvOrigKey");
+				if (!kProp.isValid()) continue;
+				const bool origDis = w->property("vpvOrigDisabled").toBool();
+				if (!vpvOn && !origDis)
+				{
+					w->setProperty("vpvOrigWasEnabled", w->isEnabled());
+					w->setProperty("vpvOrigToolTip", w->toolTip());
+					w->setProperty("vpvOrigDisabled", true);
+					w->setEnabled(false);
+					if (!w->toolTip().startsWith(origPrefix))
+						w->setToolTip(origPrefix + (w->toolTip().isEmpty() ? QString() : QStringLiteral("\n\n") + w->toolTip()));
+				}
+				else if (vpvOn && origDis)
+				{
+					w->setEnabled(w->property("vpvOrigWasEnabled").toBool());
+					w->setToolTip(w->property("vpvOrigToolTip").toString());
+					w->setProperty("vpvOrigDisabled", false);
 				}
 			}
 		}
@@ -5089,15 +5117,33 @@ namespace Vpv
 		}();
 		const bool vpvOn = !ConfigOriginalPathwayOn(
 			[&api](const QString& s, const QString& k) { return api.value(s, k); });
+		const QString origPrefix = QStringLiteral("Disabled on the Original pathway (VP-V addition; overridden at runtime).");
+		if (IsVpvOnlyKey(key))
+			widget->setProperty("vpvOrigKey", key);
 		if (!vpvOn)
 		{
-			// W23-CFG-M2: disable VP-V-only rows on Tone Mapping when Original pathway is selected.
+			// W23-CFG-M2 + W23-REG-H5: reversibly disable VP-V-only rows on Tone Mapping when Original pathway is selected.
 			if (!IsVpvOnlyKey(key)) return;
-			const QString origPrefix = QStringLiteral("Disabled on the Original pathway (VP-V addition; overridden at runtime).");
+			if (!widget->property("vpvOrigDisabled").toBool())
+			{
+				widget->setProperty("vpvOrigWasEnabled", widget->isEnabled());
+				widget->setProperty("vpvOrigToolTip", widget->toolTip());
+				widget->setProperty("vpvOrigDisabled", true);
+			}
+			else if (!widget->toolTip().startsWith(origPrefix))
+			{
+				widget->setProperty("vpvOrigToolTip", widget->toolTip());
+			}
 			widget->setEnabled(false);
 			if (!widget->toolTip().startsWith(origPrefix))
 				widget->setToolTip(origPrefix + (widget->toolTip().isEmpty() ? QString() : QStringLiteral("\n\n") + widget->toolTip()));
 			return;
+		}
+		if (widget->property("vpvOrigDisabled").toBool())
+		{
+			widget->setEnabled(widget->property("vpvOrigWasEnabled").toBool());
+			widget->setToolTip(widget->property("vpvOrigToolTip").toString());
+			widget->setProperty("vpvOrigDisabled", false);
 		}
 		if (!kManagedToggles.count(key.toStdString())) return;
 		const QString prefix = QStringLiteral("Managed by VP-V: change it on the VP-V page (or switch VP-V to the "

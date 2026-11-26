@@ -1643,6 +1643,10 @@ namespace VpvRendererSettings
 		changed(current.occlusionMask != next.occlusionMask, "occlusion_mask");
 		changed(current.repeatRenderReuse != next.repeatRenderReuse, "repeat_render_reuse");
 		changed(current.dejudderGlobalPrior != next.dejudderGlobalPrior, "dejudder_global_prior");
+		changed(current.edgeBlanking.left != next.edgeBlanking.left, "blank_left");
+		changed(current.edgeBlanking.top != next.edgeBlanking.top, "blank_top");
+		changed(current.edgeBlanking.right != next.edgeBlanking.right, "blank_right");
+		changed(current.edgeBlanking.bottom != next.edgeBlanking.bottom, "blank_bottom");
 		changed(current.dejudderMotionScaleLo != next.dejudderMotionScaleLo, "dejudder_motion_scale_lo");
 		changed(current.dejudderMotionScaleHi != next.dejudderMotionScaleHi, "dejudder_motion_scale_hi");
 		changed(current.dejudderVectorSmooth != next.dejudderVectorSmooth, "dejudder_vector_smooth");

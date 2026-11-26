@@ -2388,18 +2388,11 @@ CVideoProcessorDlg::CVideoProcessorDlg():
 				DebugLog::Log("Room lights: %s (%s)", m_ambientValue.c_str(), Ambient::Name(m_ambientConfigured.mode));
 		}
 		{
-			// Automatic calibration phase 2: a Dynamic Drive characterisation that
-			// was interrupted (VP crashed while it drove the projector) left a
-			// marker; restore full light, CNTR 50 and LDMM 0 before anything else
-			// opens the projector's port.
 			std::string configFolder = profileConfig.GetLoadedPath();
 			const size_t slash = configFolder.find_last_of("\\/");
 			configFolder = slash == std::string::npos ? std::string(".") : configFolder.substr(0, slash);
-			const std::string recovered = Calibration::RecoverInterruptedLedRun(configFolder,
-				LedDrive::ReadProjectorConfig(profileConfig), LedDrive::ReadLedDriveConfig(profileConfig).ledCeiling,
-				[] { return LedDrive::CreateWin32SerialPort(); });
-			if (!recovered.empty())
-				DebugLog::Log("%s", recovered.c_str());
+			const std::string recovered = Calibration::RecoverInterruptedLedRun(configFolder, LedDrive::ReadProjectorConfig(profileConfig), LedDrive::ReadLedDriveConfig(profileConfig).ledCeiling, [] { return LedDrive::CreateWin32SerialPort(); });
+			if (!recovered.empty()) DebugLog::Log("%s", recovered.c_str());
 		}
 		std::string profileError;
 		if (!m_profileRuntime.Initialize(profileConfig,
@@ -3454,9 +3447,7 @@ bool CVideoProcessorDlg::ApplySavedConfiguration(bool alreadyStaged)
 			"Configuration transaction accepted: action=apply-display state=published");
 		break;
 	default:
-		// VPV-HOOK (W23-CFG-B1): keep baseline snapshot fresh on SaveOnly so subsequent diffs never drift.
-		if (m_stagedConfiguration && !m_stagedConfiguration->snapshot.empty())
-			m_configurationSnapshot = m_stagedConfiguration->snapshot;
+		if (m_stagedConfiguration) m_configurationSnapshot = CaptureConfigurationSnapshot(*m_stagedConfiguration);
 		DebugLog::Log(
 			"Configuration transaction complete: identity=%s action=save-only runtime=retained shortcuts=retained",
 			m_stagedConfigurationIdentity.c_str());
@@ -4326,7 +4317,7 @@ bool CVideoProcessorDlg::StageSavedConfiguration(
 	const bool directShowActive = m_videoRenderer &&
 		m_activeRendererIsDirectShow;
 	m_stagedConfigurationAction =
-		ConfigurationApplyPolicy::ClassifyChanges(changedValues,
+		Vpv::ApplyPolicy::ClassifyChanges(changedValues,
 			directShowActive);
 	const bool fullscreenMonitorSelectionChanged = std::any_of(
 		changedValues.begin(), changedValues.end(),

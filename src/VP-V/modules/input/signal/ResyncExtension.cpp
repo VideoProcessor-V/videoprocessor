@@ -389,6 +389,8 @@ namespace Vpv
 					h->motionBound = VpMotion::VectorEngine::BindResyncFor(h->host, readersOn);
 			}
 			const uint32_t erasBefore = h->seal.Eras();
+			if (seq != 0 && seq == h->lastSealedSeq)
+				return false;   // W23-BLOCKER1: cadenceRepeat keeps seq sealed without duplicating Begin
 			h->seal.Seal(h->shadow.GetIndicator(), seq);
 			if (seq != 0)
 				h->lastSealedSeq = seq;

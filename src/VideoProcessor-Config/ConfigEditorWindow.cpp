@@ -325,14 +325,7 @@ QString effectCategory(const std::string& section)
         return QStringLiteral("Actions");
     if (normalized == "shortcuts") return QStringLiteral("Shortcuts");
     if (normalized == "logging") return QStringLiteral("Logging");
-    // VPV-HOOK (W23-CFG-B1): classify VP-V sections cleanly for the Save/Apply review banner.
-    if (normalized == "vpv" || ConfigurationApplyPolicy::HasPrefix(normalized, "vpv."))
-        return QStringLiteral("VP-V");
-    if (normalized == "led_drive" || ConfigurationApplyPolicy::HasPrefix(normalized, "led_drive.") ||
-        normalized == "dynamic_drive" || ConfigurationApplyPolicy::HasPrefix(normalized, "dynamic_drive.") ||
-        normalized == "projector" || ConfigurationApplyPolicy::HasPrefix(normalized, "projector."))
-        return QStringLiteral("Dynamic Drive");
-    if (normalized == "ambient") return QStringLiteral("Ambient");
+    if (const char* vpvCat = Vpv::ApplyPolicy::EffectCategory(normalized)) return QString::fromLatin1(vpvCat);
     if (normalized == "general" || normalized == "command_line" ||
         normalized == "renderer_alias" || normalized == "decklink" ||
         normalized == "p010_conversion" || normalized == "ppm_correction" ||
@@ -3825,7 +3818,7 @@ void ConfigEditorWindow::updateEffectSummary()
     const DocumentSnapshot currentSnapshot = captureDocumentSnapshot(*document_);
     const std::vector<ConfigurationApplyPolicy::Change> changed = changedDocumentValues(
         savedSnapshot_, currentSnapshot);
-    const auto action = ConfigurationApplyPolicy::ClassifyChanges(changed,
+    const auto action = Vpv::ApplyPolicy::ClassifyChanges(changed,
         snapshotUsesDirectShowRenderer(savedSnapshot_));
     QStringList sections;
     for (const ConfigurationApplyPolicy::Change& change : changed)
@@ -4455,7 +4448,7 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
     const DocumentSnapshot currentSnapshot = captureDocumentSnapshot(*document_);
     const std::vector<ConfigurationApplyPolicy::Change> changed = changedDocumentValues(
         savedSnapshot_, currentSnapshot);
-    const auto action = ConfigurationApplyPolicy::ClassifyChanges(changed,
+    const auto action = Vpv::ApplyPolicy::ClassifyChanges(changed,
         snapshotUsesDirectShowRenderer(savedSnapshot_));
     // Persist shortcut spelling in the same canonical form used by the
     // accelerator parser. Case is not a modifier: L and l are both L, while
@@ -9285,13 +9278,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 for (int candidate = 0; candidate < combo->count(); ++candidate) {
                     const QString data = combo->itemData(candidate).toString().toLower();
                     const bool legacyCubic = field.key == "frame_mixer" && data == "cubic";
-                    // Bill's retired-value rule for dithering applies to his control; VP-V's own list
-                    // (ordered_lut, error_diffusion_*, Auto) holds live values (VpvScalingRows.h).
                     const bool vpvDither = field.widget->property("vpvOwnChoices").toBool();
-                    const bool retired = legacyCubic || (field.key == "dithering" && !vpvDither &&
-                        (data == "ordered_lut" || data.startsWith("error_diffusion_") || data == "on" || data == "auto"));
-                    const bool staticAuto = data == "auto" && !vpvDither && !Vpv::IsVpvChoiceKey(field.key) &&
-                        (sectionPrefix == "vprenderer" || sectionPrefix == "vprenderer.scaling");
+                    const bool retired = legacyCubic || (field.key == "dithering" && !vpvDither && (data == "ordered_lut" || data.startsWith("error_diffusion_") || data == "on" || data == "auto"));
+                    const bool staticAuto = data == "auto" && !vpvDither && !Vpv::IsVpvChoiceKey(field.key) && (sectionPrefix == "vprenderer" || sectionPrefix == "vprenderer.scaling");
                     if (retired || staticAuto) {
                         if (auto* model = qobject_cast<QStandardItemModel*>(combo->model())) model->item(candidate)->setEnabled(false);
                         if (auto* view = qobject_cast<QListView*>(combo->view())) view->setRowHidden(candidate, true);
@@ -9901,7 +9890,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             if (auto* combo = qobject_cast<QComboBox*>(field.widget))
             {
                 if (QualityProfileMigration::ProcessingKey(field.key.toStdString())) continue;
-                // VP-V's rows keep their "Inherited / not set" item (DIV-CFG-04).
                 if (Vpv::IsVpvChoiceKey(field.key)) continue;
                 if (combo->count() == 0 || !combo->itemData(0).toString().isEmpty()) continue;
                 std::string expected;

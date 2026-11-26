@@ -922,8 +922,14 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 					const pl_shader_var cv[2] = {
 						{ pl_var_ivec2("active_lo"), activePxLo, true },
 						{ pl_var_ivec2("active_hi"), activePxHi, true } };
-					if (Pass(dispatch, "VideoProcessor deband: active crop clamp", kEmptyHdr, CROP_CLAMP_BODY, cd, 2, cv, 2, (w + 15) / 16, (h + 15) / 16))
-						guardSrc = out[slot][plane];
+					if (!Pass(dispatch, "VideoProcessor deband: active crop clamp", kEmptyHdr, CROP_CLAMP_BODY, cd, 2, cv, 2, (w + 15) / 16, (h + 15) / 16))
+					{
+						error = "the active crop clamp pass failed";
+						lastFailureError = error;
+						++failures;
+						return false;
+					}
+					guardSrc = out[slot][plane];
 				}
 				const pl_shader_desc gd[2] = { Sampled("bz_src", guardSrc, false), Storage("bz_out", guard[slot][plane]) };
 				// The owner kernel: one 16 x 16 workgroup per 16 px cell, the plane's components (bz_ncomp),

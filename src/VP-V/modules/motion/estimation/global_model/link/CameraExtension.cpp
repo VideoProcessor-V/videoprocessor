@@ -112,6 +112,8 @@ namespace Vpv
 			uint64_t adapterEra = 0;   // W1-C2a A3: the engine's validity epoch (FieldEra) the adapter last saw (0 = none yet)
 
 			uint64_t frames = 0;
+			int64_t lastBeginSeq = 0;
+			uint64_t lastAfterRenderSeq = 0;
 			std::chrono::steady_clock::time_point lastDump;
 			bool haveDump = false;
 
@@ -862,6 +864,9 @@ namespace Vpv
 			}
 			if (c.phase == RE::FramePhase::Begin)
 			{
+				if (c.seq > 0 && st->lastBeginSeq == c.seq)
+					return false;   // W23-BLOCKER1: cadenceRepeat does not double-count Begin
+				st->lastBeginSeq = c.seq;
 				++st->frames;
 				DriveFrame(*st, c.host, c.seq);
 				Refresh(*st);
@@ -869,8 +874,11 @@ namespace Vpv
 			else if (st->core)
 			{
 				const RE::DrawJob* job = RE::PayloadOf<RE::DrawJob>(c);
-				if (!job || (job->retireSourceFrame && job->runPostSubmitGap))
+				const bool runGap = !job || (job->rendered && c.seq > 0 && st->lastAfterRenderSeq != static_cast<uint64_t>(c.seq));
+				if (runGap)
 				{
+					if (c.seq > 0)
+						st->lastAfterRenderSeq = static_cast<uint64_t>(c.seq);
 					st->core->OnPostSubmitGap();
 					if (st->labelFill && st->liveBuilt)
 					{

@@ -116,30 +116,19 @@ namespace ShortcutObserverStatus
 		return FromConfig(config, OriginalPathwayOf(config));
 	}
 
-	// The executable's reader: the configuration file the dialog reads, every tick (`load` fills it;
-	// false = not readable now). The pathway in force is read once, from the first readable file: a
-	// [vpv] change takes effect at the next start (ConfigurationApplyPolicy: SaveOnly), so the default
-	// follows the pathway the process runs (R14-34: never a default hook while the Original pathway
-	// runs). The [shortcuts] keys follow the file, as the dialog applies them live.
+	// Executable reader: evaluates pathway & [shortcuts] every tick (Owner Option A live in-process switch).
 	class FileFactsReader
 	{
 	public:
 		using Loader = std::function<bool(ConfigFile&)>;
-
 		explicit FileFactsReader(Loader load) : m_load(std::move(load)) {}
-
 		bool operator()(Facts& facts)
 		{
 			ConfigFile config;
-			if (!m_load || !m_load(config))
-				return false;
-			// W23-NEON-M1: Owner Option A live in-process switch — evaluate pathway on every tick
-			// so switching VP-V <-> Original starts/stops the default global keyboard hook within 1 s.
-			const bool originalPathway = OriginalPathwayOf(config);
-			facts = FromConfig(config, originalPathway);
+			if (!m_load || !m_load(config)) return false;
+			facts = FromConfig(config, OriginalPathwayOf(config));
 			return true;
 		}
-
 	private:
 		Loader m_load;
 	};

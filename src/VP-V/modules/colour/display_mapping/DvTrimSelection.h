@@ -315,16 +315,18 @@ namespace DvTrimSelection
 		else
 		{
 			const double lo = cands[lower].targetPq;
-			s.targetMaxNits = DolbyVisionTrims::NitsFromPq(lo / 4095.0);
 			if (sourcePeak && dm.sourceMaxPq > lo)
 			{
 				s.weight = (s.displayPq - lo) / (dm.sourceMaxPq - lo);
 				s.params = Lerp(cands[lower].params, ExtParams(), s.weight);
+				// W23-REG-L2: interpolate targetMaxNits smoothly toward sourceMaxPq during fade-to-neutral.
+				s.targetMaxNits = DolbyVisionTrims::NitsFromPq((lo + (dm.sourceMaxPq - lo) * s.weight) / 4095.0);
 				s.reason = "above every trim target: fading to neutral at the mastering peak";
 			}
 			else
 			{
 				s.params = cands[lower].params;
+				s.targetMaxNits = DolbyVisionTrims::NitsFromPq(lo / 4095.0);
 				s.reason = "above every trim target: the highest-target trim";
 			}
 		}

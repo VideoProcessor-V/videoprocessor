@@ -15,67 +15,11 @@ static bool ReadHookListTraceEnv() { char f[4] = {}; return GetEnvironmentVariab
 void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& settings)
 {
 	Vpv::RunningPathway::Store(settings.pipelineOriginalPathway);   // Owner Option A: keep process pathway in sync with active renderer settings
-	PipelineSlots::Registry next;
-	if (settings.pipelineOriginalPathway)
-		next.ApplyOriginalPathway();
-	// Every refused value is visible (owner rule: no silent fallbacks), never log-only.
-	std::string problems = settings.pipelineSettingsProblems;
-	std::string token;
-	auto flush = [&]()
-	{
-		if (token.empty())
-			return;
-		const PipelineSlots::Id id = PipelineSlots::FromName(token.c_str());
-		if (id == PipelineSlots::Id::Count)
-			problems += "pipeline_slots_off: unknown slot '" + token + "'; ";
-		else if (!PipelineSlots::SwitchHonoured(id))
-			problems += "pipeline_slots_off: " + token + " has no slot switch yet; ";
-		else
-			next.SetEnabled(id, false);
-		token.clear();
-	};
-	for (char ch : settings.pipelineSlotsOff)
-	{
-		if (ch == ',' || ch == ' ' || ch == ';' || ch == '\t')
-			flush();
-		else
-			token += ch;
-	}
-	flush();
-	if (!problems.empty())
-	{
-		problems.resize(problems.size() - 2);   // the last "; "
-		EngageFallback("pipeline settings", "ignored: " + problems);
-	}
-	else
-		ReleaseFallback("pipeline settings");
-	std::string reason;
-	if (!settings.pipelineOriginalPathway && !next.SetOrderByNames(settings.pipelineOrder, &reason))
-		EngageFallback("pipeline order", "designed order kept: " + reason);   // an invalid order never runs
-	else
-		ReleaseFallback("pipeline order");
-	if (settings.presentEveryVsyncWithheld)   // PresentationOwner (owner decision 2): visible, never log-only
-		EngageFallback(PresentationOwner::FallbackId(), PresentationOwner::WithheldText());
-	else
-		ReleaseFallback(PresentationOwner::FallbackId());
-	{   // CF-1 CAM-4: appearance owns the room-light correction; ambient_adapt was forced off (VpvRendererSettings PostLoad), said here
-		const FallbackCatalog::Decision replaced = FallbackCatalog::AmbientAdaptReplaced(settings.ambientAdaptReplaced);
-		if (replaced.engaged)
-			EngageFallback(replaced.id.c_str(), replaced.reason);   // VPV-FALLBACK ambient_adapt: replaced by appearance
-		else
-			ReleaseFallback(replaced.id.c_str());
-		// FIX1 MUST 6: the saturation step is replaced by appearance (forced off in PostLoad), said here
-		const FallbackCatalog::Decision saturation = FallbackCatalog::SaturationReplaced(settings.saturationReplaced, settings.saturationConfigured);
-		if (saturation.engaged)
-			EngageFallback(saturation.id.c_str(), saturation.reason);   // VPV-FALLBACK saturation: replaced by appearance
-		else
-			ReleaseFallback(saturation.id.c_str());
-	}
-	// CF1-G7a: the calibration LUT stage's configured value (auto or not) from these settings, before the next frame's TakeLut.
+	OutputSegments::PipelineSlotsPlan plan = OutputSegments::BuildPipelineSlotsPlan(settings);
+	for (const FallbackCatalog::Decision& fb : plan.fallbacks)
+		SyncFallback(fb);
 	calibrationHost.NoteConfiguredStage(settings.calibrationLutStageConfigured == "auto");
-	next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
-	(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
-	pipelineSlots = next;
+	pipelineSlots = std::move(plan.next);
 	// T-AR3-N2 (AUDIT-R 1fa78cdb9 N2): the ingress fix switches of THESE settings, published once here for the capture and
 	// file threads (IngressHardwareArrival / OnTimedVideoFrame), instead of their reading activeSettings across threads.
 	if (!Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(this, Vpv::Ingress::IngressState::FixSwitchBitsOf(Vpv::Ingress::IngressState::FixSwitchesOf(settings))))
@@ -117,69 +61,21 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 	RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::SettingsApplied, this, nullptr, nullptr, settings.resyncEvent.c_str(), nullptr, settings.pipelineOriginalPathway ? 1 : 0, nullptr, static_cast<double>(settings.motionAheadFrames)); // VPV-HOOK
 	Vpv::Segments::CoreSegmentCaches::Instance().RefreshTraceFlag(this, &ReadHookListTraceEnv);
 	entrance.Invalidate();
-	std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
-		pipelineSlots.IsDefaultOrder() ? "designed order" : "custom order";
-	std::string entrance;
-	for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
-		entrance += (entrance.empty() ? "" : " > ") + std::string(PipelineSlots::Get(id).name);
-	state += "; entrance: " + (entrance.empty() ? std::string("none") : entrance);
-	const std::string slotSwitches = SlotSwitchSettings::Describe(SlotSwitchSettings::FromText(settings.pipelineSlotsOff),
-		settings.pipelineOriginalPathway);
-	if (!slotSwitches.empty())
-		state += "; " + slotSwitches;
-	state += settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway ?
-		"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
-	// entrance_gpu_drain: visible while it is on (Ctrl+I "engaged" line, Config status), never silent.
-	// Listed only when it can act: on, not the Original pathway, and scaling.rebase runs.
-	EntranceGpuDrain::Mode drainMode = EntranceGpuDrain::Mode::Off;
-	EntranceGpuDrain::Parse(settings.entranceGpuDrain, drainMode);
-	if (drainMode != EntranceGpuDrain::Mode::Off && !settings.pipelineOriginalPathway &&
-		pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase))
-	{
-		state += std::string("; entrance GPU drain: ") + EntranceGpuDrain::Name(drainMode);
-		EngageFallback("entrance GPU drain", EntranceGpuDrain::StatusReason(drainMode));   // a mode change updates the reason
-	}
-	else
-		ReleaseFallback("entrance GPU drain");
 	if (!settings.pipelineEntranceOnce || settings.pipelineOriginalPathway)
+		this->entrance.OnceSwitchedOff();
+	if (plan.logState != pipelineStateLogged)
 	{
-		this->entrance.OnceSwitchedOff();   // its textures are freed on the render thread, never from here
-	}
-	if (state != pipelineStateLogged)
-	{
-		pipelineStateLogged = state;
-		DebugLog::Log("Pipeline: %s", state.c_str());
+		pipelineStateLogged = plan.logState;
+		DebugLog::Log("Pipeline: %s", plan.logState.c_str());
 	}
 }
 
 void LibplaceboVideoRenderer::Impl::OrderFrameSlotHooks()
 {
-	// SID r2 (audit MED-1, rule 32; refs/107 s1 S3 RENDER-PASS, the frame's slot-hook assembly): the held re-base's notice
-	// ("source resolution held"), synced only when the monitor's held state changed (audit LOW-1), while auto runs.
-	{
-		FallbackCatalog::Decision held;
-		if (sourceAutoActive.load(std::memory_order_acquire) && vpv.sourceAnalysis.sourceMonitor.ConventionHoldChanged(held))
-			SyncFallback(held);
-	}
-	if (frameSlotHooks.size() < 2)
-		return;
-	std::vector<OutputHookOrder::Tagged<const pl_hook*>> tagged;
-	tagged.reserve(frameHooks.size());
-	for (const pl_hook* hook : frameHooks)
-	{
-		OutputHookOrder::Tagged<const pl_hook*> t;
-		t.hook = hook;
-		for (const auto& entry : frameSlotHooks)
-			if (entry.first == hook)
-			{
-				t.kind = OutputHookOrder::Kind::Slot;
-				t.slot = entry.second;
-				break;
-			}
-		tagged.push_back(t);
-	}
-	frameHooks = OutputHookOrder::OrderSlotsInPlace(tagged,
-		[this](PipelineSlots::Id id) { return pipelineSlots.Order(id); });
+	FallbackCatalog::Decision held;
+	if (sourceAutoActive.load(std::memory_order_acquire) && vpv.sourceAnalysis.sourceMonitor.ConventionHoldChanged(held))
+		SyncFallback(held);
+	OutputSegments::OrderSlotHooksInPlace(frameHooks, frameSlotHooks, pipelineSlots);
 }
 
 // M2 P4-4 (doc 52 section 4.1 item h): the reports after the render call - the merged output segments, the custom-hook failures,
@@ -219,34 +115,11 @@ void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
     }
 }
 
-// P4 f test recorder (VP_HOOK_LIST_TRACE=1, cached per host/session in CoreSegmentCaches: zero steady-state env reads).
 static void TraceFrameHookList(const void* renderer, const pl_render_params& frameParams,
     const std::vector<std::pair<const pl_hook*, PipelineSlots::Id>>& frameSlotHooks, const CustomHookChain::Chain& customHooks,
     const pl_hook* submittedNls)
 {
-    if (!Vpv::Segments::CoreSegmentCaches::Instance().TraceHookListEnabled(renderer, &ReadHookListTraceEnv)) return;
-    std::string list;
-    for (int i = 0; i < frameParams.num_hooks; ++i)
-    {
-        const pl_hook* hook = frameParams.hooks[i];
-        std::string tag = "other";
-        for (const auto& entry : frameSlotHooks)
-            if (entry.first == hook) { tag = PipelineSlots::Get(entry.second).name; break; }
-        if (tag == "other")
-        {
-            if (hook != nullptr && hook == submittedNls) tag = "nls";
-            else if (customHooks.IsQuantizerHook(hook)) tag = "quantiser";
-            else if (customHooks.IsPrescalerHook(hook)) tag = "prescaler";
-        }
-        list += (i ? ", " : "") + tag;
-    }
-    static const void* lastRenderer = nullptr;   // render thread only (renderMutex held)
-    static std::string lastList;
-    if (renderer == lastRenderer && list == lastList)
-        return;
-    lastRenderer = renderer;
-    lastList = list;
-    DebugLog::Log("VP hook list: n=%d [%s]", frameParams.num_hooks, list.c_str());
+    OutputSegments::TraceFrameHookListIfEnabled(renderer, frameParams, frameSlotHooks, customHooks, submittedNls, &ReadHookListTraceEnv);
 }
 
 // M2 P4 f (refs/110 s1.3): the frame's hook collection - output colour and Dynamic Drive, the adaptive downscale, the
@@ -325,6 +198,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     const char* const dvContainer = state.videoFrameEncoding == VideoFrameEncoding::R12B ? "R12B" :
         state.videoFrameEncoding == VideoFrameEncoding::R12L ? "R12L" : "";
     const bool dvVpMapping = dvStage.SyncContainer(state.dolbyVisionTunnel, dvContainer, activeSettings.dvDisplayMapping);
+    dvStage.SyncProjectionEpoch(pictureProcessingEpoch);
     colourFrame.dv.swap(dvStage.TrimsParameterBuffer());   // GEM-016: last frame's list capacity (PrepareToneAndTrims clears it)
     dvStage.PrepareToneAndTrims({ dvVpMapping ? activeSettings.dvToneMapping : dvOriginalTone, dvVpMapping && activeSettings.dvTrims, activeSettings.toneMapping,
         activeSettings.dvCompareCaptureFolder, pipelineSlots.Runs(PipelineSlots::Id::ColourDmCurve), renderImage, target,
@@ -632,12 +506,18 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
                 DebugLog::Log("De-judder occlusion mask: used on %llu source frames (hook applied %llu, failed %llu)",
                     dejudderMaskFrames, occlusionMaskHook.Applied(), occlusionMaskHook.Failed());
         }
-        // W23-IR-M1: surface occlusionMaskHook GPU failures visibly for both occlusion-mask and grain-map modes.
-        if ((install || grainInstall) && occlusionMaskHook.Failed() > 0)
-            SyncFallback(FallbackCatalog::Engaged("occlusion mask hook",
-                "occlusion / grain map hook failed (" + std::to_string(occlusionMaskHook.Failed()) + " frame(s))"));
-        else
-            ReleaseFallback("occlusion mask hook");
+        // W23-IR-M1 / W23-REG-M2: surface occlusionMaskHook GPU failures visibly via the registered
+        // "motion consumers" windowed tracker, firing only when Failed() increments so healthy frames expire cleanly.
+        const uint64_t occFailed = occlusionMaskHook.Failed();
+        if (occFailed < dejudderExtras.lastOcclusionMaskFailed)
+            dejudderExtras.lastOcclusionMaskFailed = 0;
+        if (occFailed > dejudderExtras.lastOcclusionMaskFailed)
+        {
+            dejudderExtras.lastOcclusionMaskFailed = occFailed;
+            SyncFallback(dejudderExtras.motionConsumerFailures.Note(GetTickCount64(), "occlusion / grain map hook failed"));
+        }
+        else if (install || grainInstall)
+            SyncFallback(dejudderExtras.motionConsumerFailures.Note(GetTickCount64(), nullptr));
     }
     // Stage 10: BTB/WTW through libplacebo for SDR. Decided on this
     // frame's source and target; libplacebo is then told the source is in

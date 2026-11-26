@@ -123,23 +123,7 @@ namespace TextureRestore
 	};
 
 	// W23-IR-H1: active picture in plane px, inclusive (x0, y0, x1, y1), matching DetailPulse::PictureBounds.
-	inline bool PictureBounds(const pl_rect2df& r, int w, int h, int out[4])
-	{
-		out[0] = 0; out[1] = 0; out[2] = w - 1; out[3] = h - 1;
-		const float x0 = (std::min)(r.x0, r.x1), x1 = (std::max)(r.x0, r.x1);
-		const float y0 = (std::min)(r.y0, r.y1), y1 = (std::max)(r.y0, r.y1);
-		if (!(x1 > x0) || !(y1 > y0) || w <= 0 || h <= 0)
-			return false;
-		const double eps = 1e-4;
-		const int lx = (std::max)(0, static_cast<int>(std::ceil(x0 * static_cast<double>(w) - eps)));
-		const int ly = (std::max)(0, static_cast<int>(std::ceil(y0 * static_cast<double>(h) - eps)));
-		const int hx = (std::min)(w - 1, static_cast<int>(std::floor(x1 * static_cast<double>(w) + eps)) - 1);
-		const int hy = (std::min)(h - 1, static_cast<int>(std::floor(y1 * static_cast<double>(h) + eps)) - 1);
-		if (hx < lx || hy < ly || (lx == 0 && ly == 0 && hx == w - 1 && hy == h - 1))
-			return false;
-		out[0] = lx; out[1] = ly; out[2] = hx; out[3] = hy;
-		return true;
-	}
+	bool PictureBounds(const pl_rect2df& r, int w, int h, int out[4]);
 
 	// SA1: the scratch arena scopes (one per Apply / ApplyForeign call) and the temporaries they ask for.
 	constexpr uint16_t kArenaScopeApply = 0x0101, kArenaScopeForeign = 0x0102;

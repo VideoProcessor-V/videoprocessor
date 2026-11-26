@@ -848,16 +848,8 @@ namespace EntranceSegment
 			return;
 		DetailPulse::Module& detailPulse = *b.detailPulse;
 		TextureRestore::Module& textureRestore = *b.textureRestore;
-		// W23-IR-H2: bind the host's live SkeletonMemo so DetailPulse and TextureRestore acquire shared
-		// kBandMemo / P11 band energies instead of always running private passes; sync product.* fallbacks.
-		const Vpv::Skeleton::FrameMemo frameMemo = Vpv::Skeleton::CurrentFrameMemo();
-		DetailPulse::Params detailPulseParams = *b.detailPulseParams;
-		TextureRestore::Params textureRestoreParams = *b.textureRestoreParams;
-		if (frameMemo.memo)
-		{
-			if (!detailPulseParams.memo) detailPulseParams.memo = frameMemo.memo.get();
-			if (!textureRestoreParams.memo) textureRestoreParams.memo = frameMemo.memo.get();
-		}
+		const DetailPulse::Params& detailPulseParams = *b.detailPulseParams;
+		const TextureRestore::Params& textureRestoreParams = *b.textureRestoreParams;
 		const pl_dispatch dispatch = host.Dispatch();
 		const pl_gpu gpu = host.Gpu();
 		auto syncPulseFail = [&]() {
@@ -1050,5 +1042,28 @@ namespace EntranceSegment
 				debandFailLogged = lookAheadDebander->LastFailureError();
 			}
 		}
+	}
+
+	pl_rect2df NormalisedActivePicture(int nativeWidth, int nativeHeight, bool hasPicture,
+		int rasterW, int rasterH, int left, int top, int right, int bottom, const pl_rect2df& crop)
+	{
+		pl_rect2df activePic{};
+		if (nativeWidth <= 0 || nativeHeight <= 0)
+			return activePic;
+		if (hasPicture && rasterW == nativeWidth && rasterH == nativeHeight && right > left && bottom > top)
+		{
+			activePic.x0 = static_cast<float>(left) / static_cast<float>(nativeWidth);
+			activePic.y0 = static_cast<float>(top) / static_cast<float>(nativeHeight);
+			activePic.x1 = static_cast<float>(right) / static_cast<float>(nativeWidth);
+			activePic.y1 = static_cast<float>(bottom) / static_cast<float>(nativeHeight);
+		}
+		else if (crop.x1 > crop.x0 && crop.y1 > crop.y0)
+		{
+			activePic.x0 = crop.x0 / static_cast<float>(nativeWidth);
+			activePic.y0 = crop.y0 / static_cast<float>(nativeHeight);
+			activePic.x1 = crop.x1 / static_cast<float>(nativeWidth);
+			activePic.y1 = crop.y1 / static_cast<float>(nativeHeight);
+		}
+		return activePic;
 	}
 }

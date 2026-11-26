@@ -48,6 +48,7 @@ const QueueTimingPolicy::IQueueTimingPolicy& LibplaceboVideoRenderer::QueuePolic
 
 void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double signalRateHz)
 {
+	if (m_impl && m_impl->pipelineSlots.OriginalPathway()) return;
 	const int budgetMs = m_queueDelayBudgetMs.load(std::memory_order_acquire);
 	const bool lowLatency = m_impl && m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
 	// The decision is the policy's (VP fixed total delay, or upstream's frame-count queue); the host

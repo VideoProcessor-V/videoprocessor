@@ -332,29 +332,10 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 			const double fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
 			const double quality = snap.reading ? vpv.sourceAnalysis.sourceMonitor.SharedQuality(snap, SourceIdentity::QualityConsumer::DetailPulse) : 1.0;   // U12
 			const double lines = nativeHeight * rebaseFactor;
-			// W23-IR-H1: populate normalised active picture rect from dejudderPicture (trusted picture set before PlanEntrance)
-			// or renderImage.crop so DetailPulse and TextureRestore never sample black bars into tile stats/noise floors or halos.
-			pl_rect2df activePic{};
-			const int nativeWidth = luma ? luma->params.w : 0;
-			if (nativeWidth > 0 && nativeHeight > 0)
-			{
-				if (dejudderPicture.available && dejudderPicture.rasterWidth == nativeWidth &&
-					dejudderPicture.rasterHeight == nativeHeight &&
-					dejudderPicture.right > dejudderPicture.left && dejudderPicture.bottom > dejudderPicture.top)
-				{
-					activePic.x0 = static_cast<float>(dejudderPicture.left) / static_cast<float>(nativeWidth);
-					activePic.y0 = static_cast<float>(dejudderPicture.top) / static_cast<float>(nativeHeight);
-					activePic.x1 = static_cast<float>(dejudderPicture.right) / static_cast<float>(nativeWidth);
-					activePic.y1 = static_cast<float>(dejudderPicture.bottom) / static_cast<float>(nativeHeight);
-				}
-				else if (renderImage.crop.x1 > renderImage.crop.x0 && renderImage.crop.y1 > renderImage.crop.y0)
-				{
-					activePic.x0 = renderImage.crop.x0 / static_cast<float>(nativeWidth);
-					activePic.y0 = renderImage.crop.y0 / static_cast<float>(nativeHeight);
-					activePic.x1 = renderImage.crop.x1 / static_cast<float>(nativeWidth);
-					activePic.y1 = renderImage.crop.y1 / static_cast<float>(nativeHeight);
-				}
-			}
+			const pl_rect2df activePic = EntranceSegment::NormalisedActivePicture(luma ? luma->params.w : 0, nativeHeight,
+				dejudderPicture.available, dejudderPicture.rasterWidth, dejudderPicture.rasterHeight,
+				dejudderPicture.left, dejudderPicture.top, dejudderPicture.right, dejudderPicture.bottom, renderImage.crop);
+			const Vpv::Skeleton::FrameMemo frameMemo = Vpv::Skeleton::CurrentFrameMemo();
 			if (activeSettings.detailPulseStabilise)
 			{
 				detailPulseRuns = true;
@@ -375,6 +356,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 				p.lumaSystem = image.repr.sys;
 				p.codeLevels = image.repr.levels;
 				p.softReset = activeSettings.cutSoftReset;   // cut_soft_reset (C5 batch B; shown below when off or inert, M3)
+				p.memo = frameMemo.memo.get();
 				char text[200];
 				if (detailPulseInactive.empty())
 					snprintf(text, sizeof(text), "Detail pulse stabilise: on (cap %.2f%s)", p.cap,
@@ -398,6 +380,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 				p.sequence = sourceSequence;
 				p.picture = activePic;
 				p.softReset = activeSettings.cutSoftReset;   // cut_soft_reset (C5 batch B; shown below when off or inert, M3)
+				p.memo = frameMemo.memo.get();
 				char text[200];
 				if (textureRestoreInactive.empty())
 					snprintf(text, sizeof(text), "Texture restore: statistical (cap %.2f%s)", p.cap,
@@ -421,22 +404,8 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		// A stage that stopped running (switched off, or a temporal mode) starts over when it returns.
 		if (wasPulse && !detailPulseRuns) detailPulse.Forget();
 		if (wasRestore && !textureRestoreRuns) textureRestore.Forget();
-		if (!detailPulseRuns)
-		{
-			detailPulseAheadSequence = 0;
-			detailPulseInactive.clear();
-			// W23-IR-B1: release all detail-pulse FallbackCatalog entries whenever stage is inactive.
-			ReleaseFallback("detail pulse");
-			ReleaseFallback("detail pulse scene judge");
-			ReleaseFallback("product.detail_pulse");
-		}
-		if (!textureRestoreRuns)
-		{
-			textureRestoreInactive.clear();
-			ReleaseFallback("texture restore");
-			ReleaseFallback("texture restore scene judge");
-			ReleaseFallback("product.texture_restore");
-		}
+		if (!detailPulseRuns) { detailPulseAheadSequence = 0; detailPulseInactive.clear(); ReleaseFallback("detail pulse"); ReleaseFallback("detail pulse scene judge"); ReleaseFallback("product.detail_pulse"); }
+		if (!textureRestoreRuns) { textureRestoreInactive.clear(); ReleaseFallback("texture restore"); ReleaseFallback("texture restore scene judge"); ReleaseFallback("product.texture_restore"); }
 		if (!pulseState.empty() && pulseState != detailPulseLogged)
 		{
 			detailPulseLogged = pulseState;
@@ -476,11 +445,6 @@ void LibplaceboVideoRenderer::Impl::ResetEntrancePlan()
 	detailPulseAheadSequence = 0;
 	detailPulseInactive.clear();
 	textureRestoreInactive.clear();
-	// W23-IR-B1: clear all detail-pulse / texture-restore fallbacks on Original switch / entrance reset.
-	ReleaseFallback("detail pulse");
-	ReleaseFallback("detail pulse scene judge");
-	ReleaseFallback("product.detail_pulse");
-	ReleaseFallback("texture restore");
-	ReleaseFallback("texture restore scene judge");
-	ReleaseFallback("product.texture_restore");
+	for (const char* id : { "detail pulse", "detail pulse scene judge", "product.detail_pulse", "texture restore", "texture restore scene judge", "product.texture_restore" })
+		ReleaseFallback(id);
 }

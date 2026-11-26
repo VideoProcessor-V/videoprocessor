@@ -45,6 +45,7 @@ namespace HookSegment { class Runner; }
 // Merged form (commit 2, output_segments_merged = on, default off): Fuse() replaces each run of
 // adjacent segment hooks at one stage with one libplacebo hook (vprenderer/HookSegment.h) that
 // hands each stage's output texture straight to the next. Gated by a tolerance test.
+namespace VpvRenderer { struct Fields; }
 namespace OutputSegments
 {
 	// ---- S2 -------------------------------------------------------------------------------
@@ -236,4 +237,18 @@ namespace OutputSegments
 		int draws = 0;
 		unsigned long long nlsRetryReleases = 0;
 	};
+
+	struct PipelineSlotsPlan
+	{
+		PipelineSlots::Registry next;
+		std::vector<FallbackCatalog::Decision> fallbacks;
+		std::string logState;
+	};
+	PipelineSlotsPlan BuildPipelineSlotsPlan(const ::VpvRenderer::Fields& settings);
+	void OrderSlotHooksInPlace(std::vector<const pl_hook*>& frameHooks,
+		const std::vector<std::pair<const pl_hook*, PipelineSlots::Id>>& frameSlotHooks,
+		const PipelineSlots::Registry& pipelineSlots);
+	void TraceFrameHookListIfEnabled(const void* renderer, const pl_render_params& frameParams,
+		const std::vector<std::pair<const pl_hook*, PipelineSlots::Id>>& frameSlotHooks,
+		const CustomHookChain::Chain& customHooks, const pl_hook* submittedNls, bool (*readEnv)());
 }

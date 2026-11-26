@@ -10,6 +10,7 @@
 #include <DebugLog.h>
 #include <DisplayRefreshRatePolicy.h>
 #include <GeneralRateLog.h>
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
@@ -657,9 +658,15 @@ namespace Vpv
 			// Interpolation renders the source path only (the interpolated planes go through
 			// the whole chain); a composed or RGB picture holds (owner).
 			const pl_tex cached = interpolating ? nullptr : dejudderExtras.dejudderCache.Texture(f.sourceSequence);
-			// W23-IR-M1: surface DejudderRendered::Cache::Apply GPU failures visibly instead of silently degrading to source warp.
-			if (!interpolating && !cached && dejudderExtras.dejudderCache.Failed() > 0 && activeSettings.dejudderWarpRendered)
+			// W23-IR-M1 / W23-REG-M2: surface DejudderRendered::Cache::Apply GPU failures visibly on per-frame increments only.
+			const uint64_t cacheFailed = dejudderExtras.dejudderCache.Failed();
+			if (cacheFailed < dejudderExtras.lastDejudderCacheFailed)
+				dejudderExtras.lastDejudderCacheFailed = 0;
+			if (!interpolating && !cached && activeSettings.dejudderWarpRendered && cacheFailed > dejudderExtras.lastDejudderCacheFailed)
+			{
+				dejudderExtras.lastDejudderCacheFailed = cacheFailed;
 				calls.SyncFallback(dejudderExtras.motionConsumerFailures.Note(GetTickCount64(), "rendered picture cache failed (using source warp)"));
+			}
 			// The composed picture exists only as the cache: without it the source
 			// warp would show the subtitle where it was.
 			if (!sourcePlanes && !cached)
@@ -1334,6 +1341,62 @@ namespace Vpv
 					failure ? failure : DejudderPolicy::Name(stop));
 			}
 			return spent || extras > 0;
+		}
+
+		bool RefreshPlanInterpolation(const ::VpvRenderer::Fields& settings, VpMotion::DejudderPolicyState& policy,
+			double filmHz, double captureHz, double displayHz, bool smoothMotion, bool lowLatency,
+			bool interlaced, bool nativeRgb, bool haveNext)
+		{
+			if (settings.interpolation == InterpolationPolicy::Mode::Off)
+			{
+				policy.interpolationDecision = InterpolationPolicy::Decision();
+				return false;
+			}
+			InterpolationPolicy::Input ii;
+			ii.mode = settings.interpolation;
+			ii.sourceHz = filmHz > 0.0 ? filmHz : (captureHz > 0.0 ? captureHz : policy.vpCaptureRateHz);
+			ii.displayHz = displayHz;
+			ii.pulldownLocked = filmHz > 0.0;
+			ii.dejudderStrength = settings.dejudderStrength;
+			ii.dejudderStrengthEven = settings.dejudderStrengthEven;
+			ii.dejudderEvenIncludes1001 = settings.dejudderEvenIncludes1001;
+			ii.smoothMotion = smoothMotion;
+			ii.lowLatency = lowLatency;
+			ii.interlaced = interlaced;
+			ii.nativeRgb = nativeRgb;
+			ii.subtitleComposed = false;
+			ii.haveNext = haveNext;
+			ii.perVsyncAvailable = true;
+			ii.classFixes = settings.cadenceClassFixes;
+			ii.generalRates = settings.generalRateFixes;
+			policy.interpolationDecision = InterpolationPolicy::Decide(ii);
+			return policy.interpolationDecision.Interpolates();
+		}
+
+		void ReleaseIdleConsumers(const void* owner, pl_gpu gpu, ExtrasState& extras,
+			std::unique_ptr<Interpolator::FrameInterpolator>& frameInterpolator,
+			pl_tex (&nextTextures)[2], pl_tex& rgbScratch, pl_tex (&aheadTextures)[2],
+			::Dejudder::AheadSchedule& ahead)
+		{
+			VpSkeleton::VramUsers::Instance().MarkActive(owner, VpSkeleton::kUserMotionMatcher, false);
+			extras.dejudderCache.Release();
+			extras.dejudderRenderedWarp.reset();
+			extras.dejudderVectorField.reset();
+			if (frameInterpolator)
+			{
+				frameInterpolator->Release();
+				frameInterpolator.reset();
+			}
+			VpSkeleton::VramUsers::Instance().Release(owner, VpSkeleton::kUserInterpolator);
+			if (gpu)
+			{
+				for (pl_tex& tex : nextTextures)
+					if (tex) pl_tex_destroy(gpu, &tex);
+				if (rgbScratch) pl_tex_destroy(gpu, &rgbScratch);
+				for (pl_tex& tex : aheadTextures)
+					if (tex) pl_tex_destroy(gpu, &tex);
+			}
+			ahead.Reset();
 		}
 	}
 }

@@ -36,6 +36,24 @@
 // its own, the gains read at the same picture position.
 namespace TextureRestore
 {
+	bool PictureBounds(const pl_rect2df& r, int w, int h, int out[4])
+	{
+		out[0] = 0; out[1] = 0; out[2] = w - 1; out[3] = h - 1;
+		const float x0 = (std::min)(r.x0, r.x1), x1 = (std::max)(r.x0, r.x1);
+		const float y0 = (std::min)(r.y0, r.y1), y1 = (std::max)(r.y0, r.y1);
+		if (!(x1 > x0) || !(y1 > y0) || w <= 0 || h <= 0)
+			return false;
+		const double eps = 1e-4;
+		const int lx = (std::max)(0, static_cast<int>(std::ceil(x0 * static_cast<double>(w) - eps)));
+		const int ly = (std::max)(0, static_cast<int>(std::ceil(y0 * static_cast<double>(h) - eps)));
+		const int hx = (std::min)(w - 1, static_cast<int>(std::floor(x1 * static_cast<double>(w) + eps)) - 1);
+		const int hy = (std::min)(h - 1, static_cast<int>(std::floor(y1 * static_cast<double>(h) + eps)) - 1);
+		if (hx < lx || hy < ly || (lx == 0 && ly == 0 && hx == w - 1 && hy == h - 1))
+			return false;
+		out[0] = lx; out[1] = ly; out[2] = hx; out[3] = hy;
+		return true;
+	}
+
 	namespace
 	{
 		// W23-IR-L1: FXC-safe finite check so corrupt float NaN/Inf texels cannot poison tile/EMA state.
@@ -142,6 +160,21 @@ ivec2 ts = imageSize(stats_a);
 if (t.x < ts.x && t.y < ts.y) {
     ivec2 t0 = t * TPX;
     ivec2 t1 = min(t0 + ivec2(TPX), plane_sz);
+#ifdef PICT
+    ivec2 pic0 = PIC_LO(plane_sz - ivec2(1));
+    ivec2 pic1 = PIC_HI(plane_sz - ivec2(1)) + ivec2(1);
+    t0 = max(t0, pic0);
+    t1 = min(t1, pic1);
+#endif
+    if (t0.x >= t1.x || t0.y >= t1.y) {
+        imageStore(stats_a, t, vec4(0.0));
+#ifdef HAVE_P11_S4
+        imageStore(grain_out, t, vec4(-1.0, -1.0, 0.0, 0.0));
+#else
+        imageStore(stats_b, t, vec4(-1.0, -1.0, 0.0, 0.0));
+#endif
+        return;
+    }
     ivec2 b0 = t0 / p11_block;
     ivec2 b1 = max(b0 + ivec2(1), (t1 + ivec2(p11_block - 1)) / p11_block);
     vec3 e_acc = vec3(0.0);
@@ -168,6 +201,15 @@ if (t.x < ts.x && t.y < ts.y) {
 #endif
         }
     }
+    if (!(a_acc > 0.0)) {
+        imageStore(stats_a, t, vec4(0.0));
+#ifdef HAVE_P11_S4
+        imageStore(grain_out, t, vec4(-1.0, -1.0, 0.0, 0.0));
+#else
+        imageStore(stats_b, t, vec4(-1.0, -1.0, 0.0, 0.0));
+#endif
+        return;
+    }
     ivec2 lsz = textureSize(low, 0);
     ivec2 h0 = t0 / 2;
     ivec2 h1 = min(lsz, max(h0 + ivec2(1), (t1 + ivec2(1)) / 2));
@@ -191,10 +233,10 @@ if (t.x < ts.x && t.y < ts.y) {
     }
     float mu_low = mu_acc / max(l_cnt, 1.0);
     float chg = chg_acc / max(l_cnt, 1.0);
-    vec3 e = a_acc > 0.0 ? (e_acc / a_acc) * p11_e_scale : vec3(0.0);
+    vec3 e = (e_acc / a_acc) * p11_e_scale;
     imageStore(stats_a, t, vec4(e, mu_low));
 #ifdef HAVE_P11_S4
-    float nv = a_acc > 0.0 ? (n_acc / a_acc) * p11_e_scale : 0.0;
+    float nv = (n_acc / a_acc) * p11_e_scale;
     imageStore(grain_out, t, vec4(nv * n1_share, nv * n2_share, chg, 1.0));
 #else
     imageStore(stats_b, t, vec4(e.x, e.y, chg, 1.0));
@@ -1121,7 +1163,7 @@ if (p.x < sz.x && p.y < sz.y) {
 				float n1Share = 0.0f, n2Share = 0.0f;
 				BandWhiteShares(scale, n1Share, n2Share);
 				const std::string header = tileDef + fieldDef + (restartAll ? "" : "#define PREV 1\n")
-					+ (haveS4 ? "#define HAVE_P11_S4 1\n" : "") + LOW_PREV_FIELD_GLSL;
+					+ (haveS4 ? "#define HAVE_P11_S4 1\n" : "") + picDef + LOW_PREV_FIELD_GLSL;
 				pl_shader_desc d[7];
 				int nd = 0;
 				d[nd++] = Sampled("p11_s2", p11Tex.s2);

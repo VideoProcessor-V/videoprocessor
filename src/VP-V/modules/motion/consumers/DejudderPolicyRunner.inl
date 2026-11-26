@@ -255,21 +255,12 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		// runs, so the matcher builds no pyramid of its own. Its row (synced only in RunDejudderEstimate) is released here, never left
 		// engaged. A transient NoEstimate (cadence repeat, the same frame) keeps the row as the last estimate set it.
 		if (outcome == VpMotion::DecisionOutcome::ReleaseBranch) SyncFallback(FallbackCatalog::Released("product.motion_warp"));
-		// W23-IR-H5: when keepForGaps retains the idle matcher, release non-matcher consumer textures
-		// (~330 MB at 4K: dejudderCache, dejudderRenderedWarp, dejudderVectorField, dejudderAheadTextures)
-		// and clear active matcher mark so idle playback does not hoard consumer VRAM.
 		if (outcome == VpMotion::DecisionOutcome::ReleaseBranch && dejudder)
 		{
-			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserMotionMatcher, false);
-			dejudderExtras.dejudderCache.Release();
-			dejudderExtras.dejudderRenderedWarp.reset();
-			dejudderExtras.dejudderVectorField.reset();
-			dejudderAheadUpload.Clear();
-			for (pl_tex& tex : dejudderAheadTextures)
-				if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
-			dejudderAhead.Reset();
-			dejudderAheadPayload.reset();
-			dejudderAheadPayloadSequence = 0;
+			Vpv::Dejudder::ReleaseIdleConsumers(this, d3d11 ? d3d11->gpu : nullptr, dejudderExtras, frameInterpolator,
+				dejudderNextTextures, dejudderRgbScratch, dejudderAheadTextures, dejudderAhead);
+			SyncFallback(FallbackCatalog::Released("product.interpolator"));
+			dejudderNextUpload.Clear(); dejudderAheadUpload.Clear(); dejudderAheadPayload.reset(); dejudderAheadPayloadSequence = 0;
 		}
 		if (outcome != VpMotion::DecisionOutcome::PairCheck)
 			return;

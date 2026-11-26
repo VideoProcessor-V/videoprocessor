@@ -560,7 +560,8 @@ namespace FallbackCatalog
 	{
 		if (!failure) return false;
 		const std::string f(failure);
-		return f == "warp failed" || f == "rendered warp failed" || f == "interpolation failed";
+		return f == "warp failed" || f == "rendered warp failed" || f == "interpolation failed" ||
+			f == "rendered picture cache failed (using source warp)" || f == "occlusion / grain map hook failed";
 	}
 	struct MotionConsumerFailures
 	{

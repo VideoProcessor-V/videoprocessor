@@ -157,6 +157,7 @@ public:
 
 	// Called right after ConfigureRenderParams replaces colorMapParams with a fresh configured projection.
 	void ResetParameterSwitches() { m_toneSwitch.Reset(); m_mapSwitch.Reset(); }
+	void SyncProjectionEpoch(uint64_t epoch) { if (epoch != m_lastProjectionEpoch) { m_lastProjectionEpoch = epoch; ResetParameterSwitches(); } }
 
 	// CF-DV P5 (colour.dm_pre): post-decode I-only DV debander (DmPreDeband.h, shaders/vp_dm_pre_deband.glsl).
 	CustomHookChain::Chain& DmPreDebandHook() { return m_dmPreHook; }
@@ -569,4 +570,8 @@ private:
 	bool m_vpDebandSkipped = false;     // DvTunnelPolicy: VP's deband skipped for this DV picture
 	bool m_debandSkipLogged = false;
 	int m_toneL1Logged = -1;            // audit 7: L1 reaching libplacebo, logged on change
+	uint64_t m_lastProjectionEpoch = 0; // W23-DV-H1: reset tone/map switches when projection epoch advances
 };
+
+template<class DolbyMetaT>
+inline bool DolbyVisionTunnelR10SdrPassthrough(VideoFrameEncoding e, const DolbyMetaT& d) { return (e == VideoFrameEncoding::R10b || e == VideoFrameEncoding::R10l) && !d.valid && d.allowSdrFallback && (d.rgbBitAlignment == 1 || d.rgbBitAlignment == 2); }

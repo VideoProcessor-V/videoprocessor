@@ -80,6 +80,28 @@ namespace Vpv
 			return original;
 		}
 
+		namespace
+		{
+			std::atomic<HostPathwaySink>& PathwaySink()
+			{
+				static std::atomic<HostPathwaySink> sink{ nullptr };
+				return sink;
+			}
+		}
+
+		void SetHostPathwaySink(HostPathwaySink sink)
+		{
+			PathwaySink().store(sink, std::memory_order_release);
+		}
+
+		void NotifyHostPathway(const void* host, bool original)
+		{
+			if (!host)
+				return;
+			if (HostPathwaySink sink = PathwaySink().load(std::memory_order_acquire))
+				sink(host, original);
+		}
+
 		bool LatchFromConfigurationFile(const std::string& path)
 		{
 			if (Value().load(std::memory_order_acquire) != kUnknown)

@@ -204,6 +204,59 @@ namespace Vpv
 			return entry && (entry->pathwayState.load(std::memory_order_acquire) & kOriginalBit) != 0;
 		}
 
+		bool IngressState::SyncIngressSwitches(const FixSwitches& f, std::atomic<bool>& queueTimingFixes, std::atomic<bool>& motionHistoryFixes)
+		{
+			m_pulldownFixes.store(f.pulldownFixes, std::memory_order_relaxed);
+			m_timingContinuityFixes.store(f.timingContinuityFixes, std::memory_order_relaxed);
+			m_cadenceClassFixes.store(f.cadenceClassFixes, std::memory_order_relaxed);
+			queueTimingFixes.store(f.queueTimingFixes, std::memory_order_relaxed);
+			motionHistoryFixes.store(f.motionHistoryFixes, std::memory_order_relaxed);
+			const bool prevOriginal = m_originalPathway.exchange(f.originalPathway, std::memory_order_acq_rel);
+			if (f.originalPathway)
+			{
+				ClearPulldownWhenOff();
+				m_captureStaleGapPending = false;
+				m_captureStaleGapCause = nullptr;
+				m_pulldownFrameFacts = CadenceFacts{};
+			}
+			else if (prevOriginal)
+			{
+				m_pulldownResetRequested.store(true, std::memory_order_release);
+				m_pulldownForceGap = true;
+			}
+			return prevOriginal != f.originalPathway;
+		}
+
+		void IngressState::ResetPulldown()
+		{
+			m_pulldown.Reset();
+			m_pulldownClock.Reset();
+			m_pulldownSignature = 0;
+			m_captureSignature.Reset();
+			m_pulldownFilmQpc = 0;
+			m_pulldownFilmIsFrameStart = false;
+			m_pulldownCadenceLatenessMaxMs.store(0.0, std::memory_order_relaxed);
+			m_pulldownAcquiring.store(false, std::memory_order_relaxed);
+		}
+
+		void IngressState::RequestPulldownResetAfterFault()
+		{
+			m_pulldownResetRequested.store(true, std::memory_order_release);
+			m_pulldownAcquiring.store(false, std::memory_order_relaxed);
+		}
+
+		bool IngressState::ClearPulldownWhenOff()
+		{
+			const bool wasAcquiring = m_pulldownAcquiring.exchange(false, std::memory_order_relaxed);
+			const bool wasLocked = m_pulldownCadence.load(std::memory_order_relaxed) != 0 || m_pulldown.Locked();
+			if (wasLocked || wasAcquiring)
+			{
+				ResetPulldown();
+				m_pulldownCadence.store(0, std::memory_order_relaxed);
+			}
+			return wasLocked;
+		}
+
 		void SyncHostFromImpl(const void* rendererHost, const void* implHost, IngressState& state,
 			std::atomic<bool>& queueTimingFixes, std::atomic<bool>& motionHistoryFixes)
 		{
@@ -292,6 +345,7 @@ namespace Vpv
 			if (registered)
 				return;
 			registered = true;
+			Vpv::RunningPathway::SetHostPathwaySink(&NoteOriginalPathway);
 			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(new IngressPolicy()));
 		}
 	}

@@ -361,14 +361,12 @@ bool LibplaceboVideoRenderer::Impl::DrawVpPhasePicture(const pl_frame& source, c
     if (phasePicture && vpPhaseDeferred)
     {
         const OwnedEntrance* heldA = nullptr;
-        const unsigned long long interpFailBefore = dejudderExtras.interpolationFailures;
-        const bool hadInterp = frameInterpolator != nullptr;
         entranceOnceDone = EntranceOncePhasePicture(source, sourceSequence, nextSourceSequence, &image, frame, &heldA);
+        const bool interpFailed = dejudderExtras.entranceOnceInterpFailed;
         bAlreadyA = bAsADone();
-        // W23-IR-H4: if EntranceOncePhasePicture failed inside frameInterpolator->Run (not a decline for crossfade / identity),
-        // do not dispatch frameInterpolator->Run a second time on the same draw; hold processed A or raw A cleanly.
-        const bool interpFailed = hadInterp && frameInterpolator && !frameInterpolator->LastError().empty() && heldA != nullptr && !entranceOnceDone && !bAlreadyA;
-        (void)interpFailBefore;
+        // W23-IR-H4 / W23-REG-H3: if EntranceOncePhasePicture failed inside frameInterpolator->Run (explicit out-param,
+        // not a decline for crossfade / identity / !pb), do not dispatch frameInterpolator->Run a second time on the same
+        // draw; hold processed A or raw A cleanly.
         if (!entranceOnceDone && (bAlreadyA || interpFailed) && heldA && !(rebaseFade < 1.0 && !temporalRenderer.Active()))
         {
             frame = EntranceSegment::OwnedFrame(*heldA, source);   // the processed A, held (no stage runs)
@@ -462,38 +460,10 @@ namespace
 bool LibplaceboVideoRenderer::Impl::PlanVpOutputs(RendererExtension::OutputPlan& plan)   // VPV-GATED
 {
 	if (pipelineSlots.OriginalPathway()) return false;   // PHASE 1: not planned, Bill's list is drawn
-	// W23-IR-H3: refresh InterpolationPolicy::Decide for THIS frame's actual rates before PlanVpTimeline reads
-	// VpTimelineWanted(), eliminating 1-frame-stale false->true startup drops and true->false 24p->60p stalls.
 	if (!vpGapFillStandalone)
-	{
-		if (activeSettings.interpolation == InterpolationPolicy::Mode::Off)
-		{
-			interpolating = false;
-			dejudderPolicy.interpolationDecision = InterpolationPolicy::Decision();
-		}
-		else
-		{
-			InterpolationPolicy::Input ii;
-			ii.mode = activeSettings.interpolation;
-			ii.sourceHz = plan.filmHz > 0.0 ? plan.filmHz : (plan.captureHz > 0.0 ? plan.captureHz : dejudderPolicy.vpCaptureRateHz);
-			ii.displayHz = TimelineDisplayHz();
-			ii.pulldownLocked = plan.filmHz > 0.0;
-			ii.dejudderStrength = activeSettings.dejudderStrength;
-			ii.dejudderStrengthEven = activeSettings.dejudderStrengthEven;
-			ii.dejudderEvenIncludes1001 = activeSettings.dejudderEvenIncludes1001;
-			ii.smoothMotion = smoothMotionEngine;
-			ii.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
-			ii.interlaced = false;
-			ii.nativeRgb = dejudderRgbLuma != nullptr;
-			ii.subtitleComposed = false;
-			ii.haveNext = plan.ptsB > 0.0;
-			ii.perVsyncAvailable = true;
-			ii.classFixes = activeSettings.cadenceClassFixes;
-			ii.generalRates = activeSettings.generalRateFixes;
-			dejudderPolicy.interpolationDecision = InterpolationPolicy::Decide(ii);
-			interpolating = dejudderPolicy.interpolationDecision.Interpolates();
-		}
-	}
+		interpolating = Vpv::Dejudder::RefreshPlanInterpolation(activeSettings, dejudderPolicy, plan.filmHz, plan.captureHz,
+			TimelineDisplayHz(), smoothMotionEngine, lowLatencyQueueActive.load(std::memory_order_acquire),
+			dejudderExtras.vpPlanInterlaced, dejudderExtras.vpPlanNativeRgb || dejudderRgbLuma != nullptr, plan.ptsB > 0.0);
 	if(temporalRenderer.Mixing()!=dejudderPolicy.smoothMotionMixingLogged) {
 	    RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
 	    dejudderPolicy.smoothMotionMixingLogged=temporalRenderer.Mixing();

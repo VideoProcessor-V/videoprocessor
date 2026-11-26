@@ -461,6 +461,8 @@ namespace Vpv
 			// Written by the lifecycle thread (the render thread), read there.
 			Settings settings;
 			Vpv::TapSource::Counters tapCounters;   // P10 D5: per-frame GPU-source / CPU-tap causes (the phase C reader counts into it)
+			uint64_t activeRenderSeq = 0;           // W23-BLOCKER1: unretired sourceSequence across multi-draw & cadenceRepeat
+			uint64_t lastAfterRenderSeq = 0;        // W23-NEON-H2: detects secondary draws / cadence repeats without inflating skipped
 			std::atomic<bool> active{ false };
 			std::atomic<bool> reporting{ false };   // off, but an invalid key is being shown
 			std::atomic<uint32_t> settingsGen{ 1 };
@@ -2084,6 +2086,13 @@ namespace Vpv
 			const void* host = st->host;
 			st->active.store(false, std::memory_order_release);
 			st->reporting.store(false, std::memory_order_release);
+			if (st->activeRenderSeq != 0)
+			{
+				if (const std::shared_ptr<Bundle> b = std::atomic_load(&st->bundle))
+					b->lane.OnFrameRetired(st->activeRenderSeq, 0u);
+				st->activeRenderSeq = 0;
+			}
+			st->lastAfterRenderSeq = 0;
 			if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(host))
 				capture->sourceRing.SetWanted(false);   // no reader: the ring clears (its references drop at the next Begin)
 			if (st->tapOn)
@@ -3672,6 +3681,9 @@ namespace Vpv
 			if (c.phase == RE::FramePhase::Begin)
 				ReconcileIfRaiseMoved(c.host);   // 15c-c8: a consumer's raising demand made / withdrawn on another thread is applied here
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
+			// W23-BLOCKER1: cadenceRepeat keeps sourceSequence sealed & unretired until the next distinct source frame begins.
+			if (c.phase == RE::FramePhase::Begin && c.seq > 0 && st && st->activeRenderSeq == static_cast<uint64_t>(c.seq))
+				return false;
 			// L-CORE s3: the renderer's memo is sealed at every Begin with or without the lane. With a bound lane Begin() seals it after
 			// the lane's seal (the seal reuses a publication); otherwise (no lane, lane waiting, lane off) it is sealed here.
 			struct MemoSeal
@@ -3718,16 +3730,28 @@ namespace Vpv
 					Reconcile(c.host, -1);   // the tap was lost: register it again
 			}
 			if (c.phase == RE::FramePhase::Begin)
+			{
+				// W23-BLOCKER1: retire the prior source frame ONCE now that all its motionDraws and cadenceRepeats are done.
+				if (st->activeRenderSeq != 0 && st->activeRenderSeq != static_cast<uint64_t>(c.seq))
+				{
+					if (const std::shared_ptr<Bundle> prevB = std::atomic_load(&st->bundle))
+						prevB->lane.OnFrameRetired(st->activeRenderSeq, 0u);
+					st->activeRenderSeq = 0;
+				}
+				st->activeRenderSeq = static_cast<uint64_t>(c.seq);
 				Begin(*st, c.seq);
+			}
 			else
 			{
 				const RE::DrawJob* job = RE::PayloadOf<RE::DrawJob>(c);
-				const bool retireSourceFrame = !job || job->retireSourceFrame;
-				const bool retireOnly = job && job->retireOnly;
-				const bool runPostSubmitGap = !job || job->runPostSubmitGap;
-				const bool secondaryDraw = job && job->secondaryDraw;
-				const uint64_t releaseFenceValue = job ? job->releaseFenceValue : 0u;
-				AfterRender(*st, c.seq, retireSourceFrame, retireOnly, releaseFenceValue, runPostSubmitGap, secondaryDraw);
+				// Direct unit tests pass phaseData == nullptr and expect immediate retire; live NotifyAfterRender passes
+				// DrawJob* and defers retire until the next distinct Begin / Flush / GpuReleased so multi-draw & cadenceRepeat stay pinned.
+				const bool retireSourceFrame = !job;
+				const bool secondaryDraw = c.seq > 0 && st->lastAfterRenderSeq == static_cast<uint64_t>(c.seq);
+				if (c.seq > 0)
+					st->lastAfterRenderSeq = static_cast<uint64_t>(c.seq);
+				const bool runPostSubmitGap = !job || (job->rendered && !secondaryDraw);
+				AfterRender(*st, c.seq, retireSourceFrame, false, 0u, runPostSubmitGap, secondaryDraw);
 			}
 			return false;   // observation only: never a take-over
 		}
@@ -3853,9 +3877,17 @@ namespace Vpv
 				if (cardOverride_)
 					preCard = card_;
 				preKnown = cardOverride_ || QueryCard(hosts_.Aux(st.host), preCard, preWhy);
-				// W23-SK-H1: compare ONLY the unallocated delta of private working memory at `dims` against FreeVram,
-				// so 1080p -> 4K upshifts and lazy allocations are never bypassed by HoldsVideoMemory().
-				const uint64_t needPriv = st.dispatcher->PrivateBytes(dims, wantGapAhead);
+				// W23-SK-H1 / W23-REG-M1: compare ONLY the unallocated delta of private working memory at `dims`
+				// (sized for the upcoming tap ring depth `3 + R + L` when gap-ahead is enabled) against FreeVram,
+				// so 1080p -> 4K upshifts, tap ring expansion, and lazy allocations are never bypassed.
+				const QueueShape preQueue = CurrentQueue(st.host);
+				const unsigned preRenderAhead = CappedRenderAhead(preQueue.renderAhead);
+				const unsigned preLaneLead = (std::min<unsigned>)(preQueue.laneLead, LaneLeadCap(preQueue.renderAhead));
+				const size_t targetTapSlots = wantGapAhead
+					? (std::min<size_t>)(Vpv::Skeleton::SkeletonGpuDispatcher::kMaxTapRing,
+						(std::max<size_t>)(Vpv::Skeleton::SkeletonGpuDispatcher::kTapRing, 3u + size_t(preRenderAhead) + size_t(preLaneLead)))
+					: Vpv::Skeleton::SkeletonGpuDispatcher::kTapRing;
+				const uint64_t needPriv = st.dispatcher->PrivateBytes(dims, wantGapAhead, targetTapSlots);
 				const uint64_t heldPriv = st.dispatcher->ActualPrivateBytes(dims);
 				const uint64_t privDelta = needPriv > heldPriv ? needPriv - heldPriv : 0u;
 				if (preKnown && privDelta > preCard.FreeVram())
@@ -4055,9 +4087,14 @@ namespace Vpv
 				// declarations the governor plans: count it as used, and refuse the GPU products when it alone does not fit.
 				if (wiring.dispatcher != nullptr)
 				{
-					// W23-SK-H1: charge only the unallocated delta of private working memory at `dims`, so upshifts
-					// (e.g. 1080p -> 4K) and lazily allocated splitters are budgeted without double-counting held taps.
-					const uint64_t needPriv = wiring.dispatcher->PrivateBytes(dims, wiring.gapAhead);
+					// W23-SK-H1 / W23-REG-M1: charge only the unallocated delta of private working memory at `dims`
+					// (budgeted for the upcoming tap ring depth `3 + R + L`), so upshifts, tap ring growth, and
+					// lazily allocated splitters are budgeted without double-counting held taps.
+					const size_t targetTapSlots = wiring.gapAhead
+						? (std::min<size_t>)(Vpv::Skeleton::SkeletonGpuDispatcher::kMaxTapRing,
+							(std::max<size_t>)(Vpv::Skeleton::SkeletonGpuDispatcher::kTapRing, 3u + size_t(queue.renderAhead) + size_t(queue.laneLead)))
+						: Vpv::Skeleton::SkeletonGpuDispatcher::kTapRing;
+					const uint64_t needPriv = wiring.dispatcher->PrivateBytes(dims, wiring.gapAhead, targetTapSlots);
 					const uint64_t heldPriv = wiring.dispatcher->ActualPrivateBytes(dims);
 					const uint64_t privDelta = needPriv > heldPriv ? needPriv - heldPriv : 0u;
 					if (known && privDelta > card.FreeVram())
@@ -4273,23 +4310,19 @@ namespace Vpv
 			}
 			if (retireSourceFrame)
 			{
-				// R22 / FIX3-D4 / W23-HOST-WIRING: retire this source frame ONCE after its final draw (all motionDraws
-				// and any cadenceRepeat complete) before the post-submit gap so reclaimed ring slots are available to
-				// GPU-compute gap work for seq + 1 while secondary draws never lose P10/P11/source ring slots.
-				// Single-queue D3D11 immediate-context FIFO: all consumer reads of frame `seq` and all subsequent gap
-				// writes queued by OnPostSubmitGap execute in strict FIFO submission order on the same D3D11 immediate
-				// context (so releaseFenceValue == 0 is sound on D3D11; multi-queue backends pass a real monotonic fence).
 				b->lane.OnFrameRetired(seq, releaseFenceValue);
-				if (runPostSubmitGap)
+				if (st.activeRenderSeq == seq)
+					st.activeRenderSeq = 0;
+			}
+			if (runPostSubmitGap)
+			{
+				if (st.periodMs > 0.0)
 				{
-					if (st.periodMs > 0.0)
-					{
-						b->lane.OnPostSubmitGap(nowUs_() + static_cast<uint64_t>(st.periodMs * 500.0));   // half the measured period
-						++st.gapsRun;
-					}
-					else
-						++st.gapsSkipped;   // the frame period is not measured yet: no gap is promised
+					b->lane.OnPostSubmitGap(nowUs_() + static_cast<uint64_t>(st.periodMs * 500.0));   // half the measured period
+					++st.gapsRun;
 				}
+				else
+					++st.gapsSkipped;   // the frame period is not measured yet: no gap is promised
 			}
 		}
 

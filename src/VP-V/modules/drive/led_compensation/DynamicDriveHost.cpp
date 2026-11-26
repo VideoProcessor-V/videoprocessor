@@ -3,6 +3,7 @@
 
 #include <VP-V/core/PipelineSlots.h>
 #include <VP-V/core/RunningPathway.h>
+#include <VP-V/core/RunningPathwayLatch.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveHoldover.h>
@@ -410,7 +411,7 @@ namespace LedDrive
 	}
 
 	void DynamicDriveHost::ApplySnapshot(const std::shared_ptr<const ConfigFile>& snapshotConfiguration,
-		const std::string& sourceKind, const HostContext& context)
+		const std::string& sourceKind, const HostContext& context, bool deferUntilAttach)
 	{
 		if (!snapshotConfiguration)
 			return;
@@ -418,8 +419,32 @@ namespace LedDrive
 		holdoverMs = sourceKind == "file" ?
 			FileSource::ReadFileHostSettings(*snapshotConfiguration).ledHoldoverMs : 0;
 		configuration = snapshotConfiguration;
+		if (deferUntilAttach)
+		{
+			deferredSnapshot = true;
+			return;
+		}
+		deferredSnapshot = false;
 		if (!suspended)
 			Update(*snapshotConfiguration, context);
+	}
+
+	void DynamicDriveHost::ApplyAcceptedSnapshot(const void* rendererHost, const ConfigFile* candidateConfig,
+		bool hasExplicitPathway, bool explicitOriginalPathway,
+		const std::shared_ptr<const ConfigFile>& snapshotConfig, const std::string& sourceKind,
+		const HostContext& context, bool rebuilding, bool implInitialized)
+	{
+		const bool nextOriginal = hasExplicitPathway ? explicitOriginalPathway :
+			(candidateConfig != nullptr && OriginalPathwayForConfig([candidateConfig](const char* section, const char* key, std::string& out)
+				{ return candidateConfig->TryGetString(section, key, out); }));
+		Vpv::RunningPathway::Store(nextOriginal);
+		Vpv::RunningPathway::NotifyHostPathway(rendererHost, nextOriginal);
+		if (!snapshotConfig)
+			return;
+		// W23-REG-H3: never publish VP-V Dynamic Drive state onto an outgoing Original/uninitialized Impl or
+		// open the projector port prematurely; save the snapshot and let the newly built Impl's Attach() start it.
+		const bool deferUntilAttach = (rebuilding || !implInitialized) && (!context.projectorAllowed || !implInitialized);
+		ApplySnapshot(snapshotConfig, sourceKind, context, deferUntilAttach);
 	}
 
 	void DynamicDriveHost::Attach(const HostContext& context)
@@ -431,14 +456,24 @@ namespace LedDrive
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
 			if (!context.projectorAllowed)
+			{
+				if (deferredSnapshot && configuration && !suspended)
+				{
+					deferredSnapshot = false;
+					Update(*configuration, context);
+				}
 				stopped = DetachLocked(context);
+			}
 			else
 			{
-				// W23-NEON-H1: when live-switching Original -> VP-V (or re-enabling drive.projector_control),
-				// ApplySnapshot may have run while the outgoing Original Impl still had projectorAllowed == false.
-				// Re-evaluate the saved configuration here on Attach() so Dynamic Drive starts cleanly.
-				if (!suspended && configuration && !std::atomic_load(&module))
+				// W23-NEON-H1 / W23-REG-H3: when live-switching Original -> VP-V (or re-enabling drive.projector_control),
+				// ApplySnapshot may have been deferred while the outgoing Original/uninitialized Impl awaited rebuild.
+				// Re-evaluate the saved configuration here on Attach() so Dynamic Drive starts cleanly on the new Impl.
+				if (!suspended && configuration && (deferredSnapshot || !std::atomic_load(&module)))
+				{
+					deferredSnapshot = false;
 					Update(*configuration, context);
+				}
 				attached = std::atomic_load(&module);
 			}
 			publishedParams = params;

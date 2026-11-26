@@ -61,11 +61,24 @@ namespace Vpv
 			Release();
 			if (m_texPool)
 			{
+				// W23-REG-L1: drain any retired textures freed during Release() before marking the pool abandoned.
 				// Any external Acquire keepAlive still surviving past ~SkeletonGpuDispatcher must never invoke
 				// libplacebo on a destroyed/gone device.
-				std::lock_guard<std::mutex> lk(m_texPool->mutex);
-				m_texPool->backend.gpu = nullptr;
-				m_texPool->abandoned = true;
+				for (;;)
+				{
+					std::vector<std::unique_ptr<GpuProductTextures>> dead;
+					{
+						std::lock_guard<std::mutex> lk(m_texPool->mutex);
+						if (m_texPool->retired.empty())
+						{
+							m_texPool->backend.gpu = nullptr;
+							m_texPool->abandoned = true;
+							break;
+						}
+						dead.swap(m_texPool->retired);
+					}
+					dead.clear();
+				}
 			}
 			if (m_dispatch)
 				pl_dispatch_destroy(&m_dispatch);
@@ -256,19 +269,33 @@ namespace Vpv
 				}
 				m_dims = dims;
 			}
+			if (rebuildTextures && oldJobsJoined)
+			{
+				for (Tap& t : m_taps)
+					t.pinned = false;
+			}
 			if (m_taps.size() != wantTaps)
 			{
 				if (wantTaps < m_taps.size())
 				{
-					for (size_t i = wantTaps; i < m_taps.size(); ++i)
+					// W23-REG-M1: preserve any in-flight pinned taps by partitioning pinned first; never destroy a pinned tap.
+					size_t pinnedCount = 0;
+					for (const Tap& t : m_taps)
+						if (t.pinned)
+							++pinnedCount;
+					const size_t keepCount = (std::max)(wantTaps, pinnedCount);
+					std::stable_partition(m_taps.begin(), m_taps.end(), [](const Tap& t) { return t.pinned; });
+					for (size_t i = keepCount; i < m_taps.size(); ++i)
 					{
 						if (m_taps[i].tap)
 							pl_tex_destroy(m_gpu, &m_taps[i].tap);
 						if (m_taps[i].extended)
 							pl_tex_destroy(m_gpu, &m_taps[i].extended);
 					}
+					m_taps.resize(keepCount);
 				}
-				m_taps.resize(wantTaps);
+				else
+					m_taps.resize(wantTaps);
 			}
 			for (const auto& k : m_kernels)
 				if (m_products.count(k->Product()) != 0 && !k->Prepare(m_gpu, m_dispatch, dims))
@@ -536,7 +563,15 @@ namespace Vpv
 				m_tapError = "the tap plane of frame " + std::to_string(seq) + " is not there (evicted, or its first chunk did not run)";
 				return nullptr;
 			}
-			// W23-SK-H2: prefer an unused slot, then the lowest-seq unpinned slot; only evict a pinned slot if all are pinned.
+			// W23-SK-H2 / W23-REG-M1: release stale pins whose frame has already left the lane source ring, then
+			// prefer an unused slot, then the lowest-seq unpinned slot; only evict a pinned slot if all are pinned.
+			if (m_lane != nullptr)
+			{
+				VpSkeleton::SourceFrameView probe;
+				for (Tap& t : m_taps)
+					if (t.used && t.pinned && t.seq != seq && !m_lane->SourceOf(t.seq, &probe))
+						t.pinned = false;
+			}
 			Tap* victim = nullptr;
 			m_tapError.clear();
 			for (Tap& t : m_taps)
@@ -848,9 +883,12 @@ namespace Vpv
 			return it == m_products.end() ? 0.0 : double(it->second.lastNs) / 1.0e6;
 		}
 
-		uint64_t SkeletonGpuDispatcher::PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const
+		uint64_t SkeletonGpuDispatcher::PrivateBytes(VpSkeleton::Dims dims, bool laneForm, size_t targetTapSlots) const
 	{
-		const size_t tapSlots = m_taps.empty() ? kTapRing : m_taps.size();
+		const size_t currentSlots = m_taps.empty() ? kTapRing : m_taps.size();
+		const size_t tapSlots = targetTapSlots != 0
+			? (std::min<size_t>)(kMaxTapRing, (std::max<size_t>)(kTapRing, targetTapSlots))
+			: currentSlots;
 		uint64_t total = uint64_t(tapSlots) * 2u * uint64_t(dims.width) * dims.height * 2u;
 		for (const std::unique_ptr<VpLaneProducts::IProductKernel>& k : m_kernels)
 			total += k->PrivateBytes(dims, laneForm);

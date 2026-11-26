@@ -60,12 +60,7 @@ inline bool DolbyVisionTunnelGateContainer(const DolbyVisionTunnelGateInput& in)
 }
 
 // A capture the HDMI tunnel can never arrive in (YCbCr 4:2:2 or 12-bit 36-bit/px RGB: W23-DV-H2).
-inline bool DolbyVisionTunnelImpossibleEncoding(VideoFrameEncoding encoding)
-{
-	return encoding == VideoFrameEncoding::V210 || encoding == VideoFrameEncoding::UYVY ||
-		encoding == VideoFrameEncoding::HDYC || encoding == VideoFrameEncoding::R12B ||
-		encoding == VideoFrameEncoding::R12L;
-}
+inline bool DolbyVisionTunnelImpossibleEncoding(VideoFrameEncoding e) { return e == VideoFrameEncoding::V210 || e == VideoFrameEncoding::UYVY || e == VideoFrameEncoding::HDYC || e == VideoFrameEncoding::R12B || e == VideoFrameEncoding::R12L; }
 
 // The tunnel formatter would take this capture if it were not handed off:
 // the condition under which the hand-off probe watches the pictures.

@@ -23,6 +23,9 @@ namespace Vpv
 		// so queue, lookahead, capture/display fixes, ingress policy, Dynamic Drive, and renderer switch together.
 		// Serialized with cold-startup file probing; returns `original`.
 		bool Store(bool original);
+		using HostPathwaySink = void (*)(const void* host, bool original);
+		void SetHostPathwaySink(HostPathwaySink sink);
+		void NotifyHostPathway(const void* host, bool original);
 		// Latches from a configuration file's pathway ([vpv] then [vprenderer], as the renderer reads it) when nothing is
 		// latched yet; a file that does not load latches nothing. Returns Original().
 		bool LatchFromConfigurationFile(const std::string& path);

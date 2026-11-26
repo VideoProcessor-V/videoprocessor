@@ -122,6 +122,13 @@ namespace Vpv
 
 			// ---- motion.consumers (group D audit D3): failed warp / interpolation passes, visible while recent ----
 			FallbackCatalog::MotionConsumerFailures motionConsumerFailures;
+			// W23-REG-M2: last-observed cumulative hook/cache failure counts so windowed fallbacks fire on per-frame increments only.
+			uint64_t lastOcclusionMaskFailed = 0;
+			uint64_t lastDejudderCacheFailed = 0;
+			// W23-REG-H3 / H4: per-draw EntranceOnce interpolation failure flag and current-frame plan inputs.
+			bool entranceOnceInterpFailed = false;
+			bool vpPlanInterlaced = false;
+			bool vpPlanNativeRgb = false;
 			// The de-judder held this frame because the display rate is not known (presentation entry).
 			bool dejudderHeldNoDisplayRate = false;
 
@@ -321,6 +328,13 @@ namespace Vpv
 			const char* holding = nullptr);
 
 		bool PresentExtras(ExtrasHost& h, ExtrasState& s, const ExtrasFrame& f);
+		bool RefreshPlanInterpolation(const ::VpvRenderer::Fields& settings, VpMotion::DejudderPolicyState& policy,
+			double filmHz, double captureHz, double displayHz, bool smoothMotion, bool lowLatency,
+			bool interlaced, bool nativeRgb, bool haveNext);
+		void ReleaseIdleConsumers(const void* owner, pl_gpu gpu, ExtrasState& extras,
+			std::unique_ptr<Interpolator::FrameInterpolator>& frameInterpolator,
+			pl_tex (&nextTextures)[2], pl_tex& rgbScratch, pl_tex (&aheadTextures)[2],
+			::Dejudder::AheadSchedule& ahead);
 	}
 
 	namespace HostAccess

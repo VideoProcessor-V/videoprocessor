@@ -21,6 +21,44 @@
 
 namespace MotionAhead
 {
+	namespace Pipeline
+	{
+		bool OrderedPublishGate::Accept(uint64_t generation, uint64_t fromSeq, uint64_t toSeq)
+		{
+			if (toSeq <= fromSeq)
+				return false;
+			std::lock_guard<std::mutex> lock(mutex_);
+			if (!haveGeneration_ || generation != generation_)
+			{
+				if (haveGeneration_ && generation < generation_)
+					return false;
+				haveGeneration_ = true;
+				generation_ = generation;
+				havePublished_ = true;
+				lastTo_ = toSeq;
+				return true;
+			}
+			if (havePublished_ && toSeq <= lastTo_)
+				return false;
+			havePublished_ = true;
+			lastTo_ = toSeq;
+			return true;
+		}
+		void OrderedPublishGate::Reset()
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			haveGeneration_ = false; generation_ = 0; havePublished_ = false; lastTo_ = 0;
+		}
+		void OrderedPublishGate::SetGeneration(uint64_t generation)
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			haveGeneration_ = true; generation_ = generation; havePublished_ = false; lastTo_ = 0;
+		}
+		uint64_t OrderedPublishGate::Generation() const { std::lock_guard<std::mutex> lock(mutex_); return generation_; }
+		uint64_t OrderedPublishGate::LastPublishedTo() const { std::lock_guard<std::mutex> lock(mutex_); return lastTo_; }
+		bool OrderedPublishGate::HasPublished() const { std::lock_guard<std::mutex> lock(mutex_); return havePublished_; }
+	}
+
 	namespace
 	{
 		// MAP-RGB-LUMA-PROXY (OD 11-15 11:11 (3)): no private RGB decode here any more. The (R + 2G + B) / 4 proxy luma and its
@@ -33,6 +71,9 @@ namespace MotionAhead
 		Stop();
 		if (workers <= 0)
 			return;
+		// W23-REG-H1: cap workers to <= 63 so bitmask (1ull << workerIdx) covers every worker safely.
+		if (workers > 63)
+			workers = 63;
 		std::lock_guard<std::mutex> lock(mutex_);
 		stop_ = false;
 		workerCount_ = workers;
@@ -145,7 +186,9 @@ namespace MotionAhead
 		{
 			std::unique_lock<std::mutex> lock(mutex_);
 			doneCv_.wait(lock, [this] { return (remaining_ == 0 || stop_) && activeCallbacks_ == 0; });
-			interrupted = stop_ && remaining_ > 0;
+			// W23-REG-H1: exiting workers decrement remaining_ to 0 on stop_ without claiming their slice,
+			// so always check claimedMask_ whenever stop_ is true (claimed slices are skipped in O(1)).
+			interrupted = stop_;
 			claimed = claimedMask_;
 			fn_ = nullptr;
 		}
@@ -1782,12 +1825,20 @@ namespace MotionAhead
 			ok = testEngine->request ? testEngine->request(rq, mode, *flow) : true;
 			ran = ok;
 			if (!ok) flow.reset();
-			// The chain now holds `to` (Chain / Adopt); an off-chain run leaves it for the walk.
+			// W23-REG-L2: match GPU path — advance chain only when testEngine succeeded, clear on failure.
 			if (mode != Mode::OffChain)
 			{
-				havePrevious = true;
-				previousSequence = rq.to;
-				previousGeneration = rq.generation;
+				if (ok && flow)
+				{
+					havePrevious = true;
+					previousSequence = rq.to;
+					previousGeneration = rq.generation;
+				}
+				else
+				{
+					havePrevious = false;
+					previousLuma.reset();
+				}
 			}
 			{
 				std::lock_guard<std::mutex> lock(mutex);

@@ -18,7 +18,7 @@
 #include <VP-V/modules/output/presentation/PresentationHostHelpers.h>   // Package C 4: compiled in PresentationHostHelpers.cpp
 #include <VP-V/modules/control/skeleton/RendererHostHelpers.h>   // Package C 6: compiled in RendererHostHelpers.cpp
 
-void LibplaceboVideoRenderer::Impl::ConfigureIntentInterpreter() { ConfigureIntentMotion(); ConfigureIntentAmbient(); }
+void LibplaceboVideoRenderer::Impl::ConfigureIntentInterpreter() { if (pipelineSlots.OriginalPathway()) return; ConfigureIntentMotion(); ConfigureIntentAmbient(); }
 void LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient() { Vpv::LedIntent::ConfigureAmbient(vpv.led.intent, activeSettings, dvStage.AppearanceDecision().active); }
 double LibplaceboVideoRenderer::Impl::IntentTargetBlackNits(uint64_t sourceSequence) { return Vpv::LedIntent::TargetBlackNits(vpv.led.intent, vpv.motion.intent, sdrBlackNits, sourceSequence); }
 void LibplaceboVideoRenderer::Impl::EvaluateIntentBlackDisplay(const SceneDescriptor& scene, const DisplayProfile& display) { Vpv::LedIntent::EvaluateBlackDisplay(vpv.led.intent, vpv.motion.intent, activeSettings, sdrBlackNits, dynamicDrive, scene, display); }
