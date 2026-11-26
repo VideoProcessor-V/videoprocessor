@@ -2410,7 +2410,22 @@ bool focusChange = ((fFlags & 1) != 0);
 bool isDefocused = ((fFlags & 2) != 0);
 bool isFace = (fInfo.w > 0.5);
 
-float retG = max(0.0, texelFetch(cell_prior, cell, 0).x);
+vec4 priorT = texelFetch(cell_prior, cell, 0);
+bool cellNonFin = td_is_bad(priorT.x) || priorT.x < 0.0;
+if (u_cell_prior_has_step_scale > 0.5)
+{
+    if (td_is_bad(priorT.z) || !(priorT.z > 0.0))
+        cellNonFin = true;
+}
+for (int kk = 0; kk < K; ++kk)
+{
+    if (texelFetch(motion_gate, ivec2(kk * TD_CW + cell.x, cell.y), 0).z > 0.5)
+        cellNonFin = true;
+}
+if ((uint(round(texelFetch(warp_diag, cell, 0).y)) & 16u) != 0u)
+    cellNonFin = true;
+
+float retG = cellNonFin ? 0.0 : max(0.0, priorT.x);
 float mVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z);
 float hVar = fInfo.z * fInfo.z;
 float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
@@ -2436,7 +2451,7 @@ if (lowMotionForMerge)
 for (int b = 0; b < 3; ++b)
 {
     vec4 outRec = vec4(0.0);
-    if (!isFace && !focusChange && !(isDefocused && (b >= 1 || !bokehAllowL)))
+    if (!cellNonFin && !isFace && !focusChange && !(isDefocused && (b >= 1 || !bokehAllowL)))
     {
         int centerMask = 0;
         for (int kk = 0; kk < K; ++kk)

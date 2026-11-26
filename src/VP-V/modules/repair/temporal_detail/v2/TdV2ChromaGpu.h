@@ -1339,10 +1339,27 @@ int fBits = int(round(pT.y));
 bool focusChange = ((fBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5);
 bool isDefoc = ((fBits & 2) != 0);
 
+// PROD-GPU-BUG-19: Exclude non-finite / negative-grain / invalid-step-scale / bad-warp cells from EB/A2e prior prep.
+float rawGvCb = pT.x;
+float rawGvCr = (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x;
+bool cellNonFin = td_is_bad(rawGvCb) || rawGvCb < 0.0 || td_is_bad(rawGvCr) || rawGvCr < 0.0;
+if (u_cell_prior_has_step_scale > 0.5)
+{
+    if (td_is_bad(pT.z) || !(pT.z > 0.0))
+        cellNonFin = true;
+}
+for (int kk = 0; kk < K; ++kk)
+{
+    if (texelFetch(motion_gate, ivec2(kk * TD_CW + cell.x, cell.y), 0).z > 0.5)
+        cellNonFin = true;
+}
+if ((uint(round(texelFetch(warp_diag, cell, 0).y)) & 16u) != 0u)
+    cellNonFin = true;
+
 for (int chIdx = 0; chIdx < 2; ++chIdx)
 {
     // PROD-GPU-BUG-18: Classify activity (flat vs textured) BEFORE unsplit Projection-IR grain estimation (TdV2Chroma.h:3637).
-    float retG = (chIdx == 0) ? max(0.0, pT.x) : max(0.0, (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x);
+    float retG = cellNonFin ? 0.0 : ((chIdx == 0) ? max(0.0, rawGvCb) : max(0.0, rawGvCr));
     float mVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z)
                               : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z);
     float hVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(2 * TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z)
@@ -1350,13 +1367,13 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
     float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
                        max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
     int cellAc = (cleanTexMH > u_activity_tex_floor) ? 1 : 0;
-    if (u_has_clean_split < 0.5 && retG <= TD_NUM_FLOOR && !coarseOnly && !isFace && !focusChange && !isDefoc)
+    if (!cellNonFin && u_has_clean_split < 0.5 && retG <= TD_NUM_FLOOR && !coarseOnly && !isFace && !focusChange && !isDefoc)
         retG = td_chroma_unsplit_proj_ir(cell, chIdx, K, hPoolR);
 
     for (int b = 0; b < 3; ++b)
     {
         vec4 outRec = vec4(0.0);
-        if (!isFace && !focusChange && !(isDefoc && (b >= 1 || !bokehAllowL)) && !(coarseOnly && b >= 1))
+        if (!cellNonFin && !isFace && !focusChange && !(isDefoc && (b >= 1 || !bokehAllowL)) && !(coarseOnly && b >= 1))
         {
             int centerMask = 0;
             for (int kk = 0; kk < K; ++kk)
@@ -2024,7 +2041,7 @@ float rawScale = (u_cell_prior_has_step_scale > 0.5) ? priorT.z : 1.0;
 float cellStepScale = (td_is_bad(rawScale) || !(rawScale > 0.0)) ? 0.0 : clamp(rawScale, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX);
 float cellStepScaleSq = cellStepScale * cellStepScale;
 int expFocusBits = int(round(priorT.y));
-bool cellFocusVeto = ((expFocusBits & 1) != 0);
+bool cellFocusVeto = ((expFocusBits & 1) != 0) || (texelFetch(cell_own_grain, ivec2(cx, cy), 0).w > 0.5);
 bool cellDefoc = ((expFocusBits & 2) != 0);
 bool bokehAllowL = (u_bokeh_mode > 0.5);
 bool reuseLumaW = (u_reuse_luma_weights > 0.5);
@@ -2089,7 +2106,23 @@ for (int b = 0; b < 3; ++b)
 
         float curV = (chIdx == 0) ? curB.x : curB.y;
         int ownActiveMask = int(round(ownW.w));
+        // PROD-GPU-BUG-20: Under reuseLumaW, zero-weight luma cells must NEVER bleed neighbor corner weights across a vetoed cell boundary (TdV2Chroma.h:4231-4235).
+        bool allowBlend = true;
+        if (reuseLumaW)
+        {
+            float ownBandSum = 0.0;
+            for (int k = 0; k < K; ++k)
+            {
+                int wSlot = td_luma_slot(k);
+                if (wSlot < 0) continue;
+                float wOwn = td_vec_comp(ownW, wSlot);
+                if (!td_is_bad(wOwn) && wOwn > 0.0)
+                    ownBandSum += wOwn;
+            }
+            allowBlend = (ownBandSum > 0.0);
+        }
         float bandDelta = 0.0;
+        if (allowBlend)
         for (int k = 0; k < K; ++k)
         {
             if ((refFl[k] & 1) == 0) continue;
@@ -2186,7 +2219,7 @@ bool bokehAllowL = (u_bokeh_mode > 0.5);
 
 vec4 priorTexel = texelFetch(cell_prior, cell, 0);
 int expFocusBits = int(round(priorTexel.y));
-bool allBandVeto = ((expFocusBits & 1) != 0) || (((expFocusBits & 2) != 0) && !bokehAllowL);
+bool allBandVeto = ((expFocusBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5) || (((expFocusBits & 2) != 0) && !bokehAllowL);
 bool cellIsFace = (u_has_face_mask > 0.5) && (texelFetch(face_mask, cell, 0).x > 0.5);
 bool cellVetoed = cellIsFace || allBandVeto;
 
@@ -2609,7 +2642,8 @@ vec4 priorT = texelFetch(cell_prior, ivec2(cx, cy), 0);
 int expFocusBits = int(round(priorT.y));
 bool bokehAllowL = (u_bokeh_mode > 0.5);
 bool cellVetoed = ((u_has_face_mask > 0.5) && (texelFetch(face_mask, ivec2(cx, cy), 0).x > 0.5)) ||
-                  ((expFocusBits & 1) != 0) || (((expFocusBits & 2) != 0) && !bokehAllowL);
+                  ((expFocusBits & 1) != 0) || (texelFetch(cell_own_grain, ivec2(cx, cy), 0).w > 0.5) ||
+                  (((expFocusBits & 2) != 0) && !bokehAllowL);
 if (cellVetoed)
 {
     imageStore(out_coded_delta, p, vec4(0.0));
@@ -4137,7 +4171,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2ebPrepHdr += Shaders::kPass2MergeSolveHeader;
 				c2ebPrepHdr += ChromaShaders::kChromaProjIrHelpers;
 
-				pl_shader_desc d2ebPrep[9] = {
+				pl_shader_desc d2ebPrep[10] = {
 					VpvGpu::Sampled("cell_stats_cb", sc.statsCb),
 					VpvGpu::Sampled("cell_stats_cr", sc.statsCr),
 					VpvGpu::Sampled("motion_gate", sc.motionGate),
@@ -4146,9 +4180,10 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Sampled("face_mask", faceMaskBind),
 					VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
 					VpvGpu::Sampled("proj_ir", chProjIrTex_),
+					VpvGpu::Sampled("warp_diag", dstWarpDiag),
 					VpvGpu::Storage("eb_scratch", ebScratchTex_)
 				};
-				pl_shader_var v2ebPrep[22] = {
+				pl_shader_var v2ebPrep[23] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r_l", &uPoolRL), VpvGpu::Var("u_pool_r_m", &uPoolRM), VpvGpu::Var("u_pool_r_h", &uPoolRH),
 					VpvGpu::Var("u_ref_role_0", &uRefRole0), VpvGpu::Var("u_ref_role_1", &uRefRole1), VpvGpu::Var("u_ref_role_2", &uRefRole2),
@@ -4157,11 +4192,12 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Var("u_has_clean_split", &uHasSplit), VpvGpu::Var("u_bokeh_mode", &uBokehMode),
 					VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
 					VpvGpu::Var("u_cell_prior_has_cr_grain", &uPriorHasCrGrain),
+					VpvGpu::Var("u_cell_prior_has_step_scale", &uPriorHasStep),
 					VpvGpu::Var("u_psd_low", &uPsdLow), VpvGpu::Var("u_psd_mid", &uPsdMid), VpvGpu::Var("u_psd_fine", &uPsdFine),
 					VpvGpu::Var("u_coarse_only", &uCoarseOnly),
 					VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor)
 				};
-				if (!runPass("td_v2_c2eb_prep", c2ebPrepHdr, ChromaShaders::kPassChromaEbPriorPrep, d2ebPrep, 9, v2ebPrep, 22,
+				if (!runPass("td_v2_c2eb_prep", c2ebPrepHdr, ChromaShaders::kPassChromaEbPriorPrep, d2ebPrep, 10, v2ebPrep, 23,
 				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
 					return failVisible("td_v2_c2eb_prep dispatch failed", StandInKind::GpuDispatchFailed);
 
@@ -4341,7 +4377,7 @@ float td_huber_taper(float diffSq, float diagC)
 				pl_tex bindDiagCb = sc.diagCb;
 				pl_tex bindDiagCr = sc.diagCr;
 
-				pl_shader_desc d3[17] = {
+				pl_shader_desc d3[18] = {
 					VpvGpu::Sampled("cur_l", sc.curL), VpvGpu::Sampled("cur_mh", sc.curMH),
 					VpvGpu::Sampled("ref_l_0", sc.refL[0]), VpvGpu::Sampled("ref_l_1", sc.refL[1]), VpvGpu::Sampled("ref_l_2", sc.refL[2]),
 					VpvGpu::Sampled("ref_mh_0", sc.refMH[0]), VpvGpu::Sampled("ref_mh_1", sc.refMH[1]), VpvGpu::Sampled("ref_mh_2", sc.refMH[2]),
@@ -4350,6 +4386,7 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Sampled("cell_weights_cb", bindWeightsCb), VpvGpu::Sampled("cell_weights_cr", bindWeightsCr),
 					VpvGpu::Sampled("cell_diag_cb", bindDiagCb), VpvGpu::Sampled("cell_diag_cr", bindDiagCr),
 					VpvGpu::Sampled("cell_prior", cellPriorTex), VpvGpu::Sampled("face_mask", faceMaskBind),
+					VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
 					VpvGpu::Storage("coded_delta_raw", sc.codedDeltaRaw)
 				};
 				pl_shader_var v3[19] = {
@@ -4369,7 +4406,7 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Var("u_luma_slot_1", &uLumaSlot1),
 					VpvGpu::Var("u_luma_slot_2", &uLumaSlot2)
 				};
-				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 17, v3, 19, cGx, cGy))
+				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 18, v3, 19, cGx, cGy))
 					return failVisible("td_v2_c3_blend_bound dispatch failed", StandInKind::GpuDispatchFailed);
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::TransformUnknownBound);
@@ -4391,12 +4428,13 @@ float td_huber_taper(float diffSq, float diagC)
 
 				// Use sc.bandTmpCb (dead after C1) as dummy face_mask so Pass C4/C4B NEVER alias sc.warpedUv!
 				pl_tex c4FaceBind = hasFaceMask ? faceMaskTex : sc.bandTmpCb;
-				pl_shader_desc d4[7] = {
+				pl_shader_desc d4[8] = {
 					VpvGpu::Sampled("rec_uv", codedRecTex),
 					VpvGpu::Sampled("cur_uv", sameCleanRec ? sc.weightsCr : codedCleanTex),
 					VpvGpu::Sampled("coded_delta_raw", sc.codedDeltaRaw),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),
 					VpvGpu::Sampled("face_mask", c4FaceBind),
+					VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
 					VpvGpu::Storage("out_coded_delta", smoothGuard ? sc.warpedUv : out.outCodedDeltaTex),
 					VpvGpu::Storage("guard_cell", dstGuardCell)
 				};
@@ -4411,18 +4449,19 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Var("u_store_fine_diff", &uStoreFineDiff)
 				};
 				const std::string c4Body = ChromaShaders::BuildPassChromaGuardBody();
-				if (!runPass("td_v2_c4_guard_delta", c4Hdr, c4Body.c_str(), d4, 7, v4, 13, cw, ch, 16, 16, shC4))
+				if (!runPass("td_v2_c4_guard_delta", c4Hdr, c4Body.c_str(), d4, 8, v4, 13, cw, ch, 16, 16, shC4))
 					return failVisible("td_v2_c4_guard_delta dispatch failed", StandInKind::GpuDispatchFailed);
 
 				if (smoothGuard)
 				{
 					const std::string c4bHdr = chromaGeom + Shaders::kCoreHelpers + ChromaShaders::kSitedCoordHelpers;
-					pl_shader_desc d4b[6] = {
+					pl_shader_desc d4b[7] = {
 						VpvGpu::Sampled("coded_delta_raw", sc.codedDeltaRaw),
 						VpvGpu::Sampled("fine_diff", sc.warpedUv),
 						VpvGpu::Sampled("guard_cell", dstGuardCell),
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Sampled("face_mask", c4FaceBind),
+						VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
 						VpvGpu::Storage("out_coded_delta", out.outCodedDeltaTex)
 					};
 					pl_shader_var v4b[9] = {
@@ -4432,7 +4471,7 @@ float td_huber_taper(float diffSq, float diagC)
 						VpvGpu::Var("u_bokeh_mode", &uBokehMode), VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
 						VpvGpu::Var("u_fade_keep", &uFadeKeep)
 					};
-					if (!runPass("td_v2_c4b_smooth_guard", c4bHdr, ChromaShaders::kPassChromaSmoothGuard, d4b, 6, v4b, 9, cGx, cGy))
+					if (!runPass("td_v2_c4b_smooth_guard", c4bHdr, ChromaShaders::kPassChromaSmoothGuard, d4b, 7, v4b, 9, cGx, cGy))
 						return failVisible("td_v2_c4b_smooth_guard dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 				if (standIns != nullptr)
