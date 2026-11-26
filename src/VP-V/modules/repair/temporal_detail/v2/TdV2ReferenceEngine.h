@@ -1037,7 +1037,8 @@ namespace TdV2
 		double cleanY,
 		double pxEdge,
 		double quantSigmaFloor,
-		bool enableHuber)
+		bool enableHuber,
+		double depthScale = 1.0)
 	{
 		if (cellWeights == nullptr || cellMeanY == nullptr || cellStdY == nullptr ||
 		    (enableHuber && cellDiagC == nullptr) ||
@@ -1082,7 +1083,8 @@ namespace TdV2
 		const double s01 = (1.0 - tx) * ty;
 		const double s11 = tx * ty;
 
-		const double baseQuantSigma = std::sqrt((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0);
+		const double effDepth = (std::isfinite(depthScale) && depthScale > 0.0) ? depthScale : 1.0;
+		const double baseQuantSigma = std::sqrt((effDepth * effDepth) / 12.0);
 		const double effQuantFloor = (std::isfinite(quantSigmaFloor) && quantSigmaFloor > baseQuantSigma)
 			? quantSigmaFloor
 			: baseQuantSigma;
@@ -1125,28 +1127,32 @@ namespace TdV2
 	}
 
 	// ---- Stage A4-1 Downstream Debander Coordination Helper over U19 TdMapsView::Block ----
-	// Reads only existing U19 TdMapsView fields (`kValidity`, `kStability`, `kBandMask`):
-	// returns continuous [0, 1] region debanding strength already applied by TD when `td_region_deband` is active,
-	// allowing VpDebander / downstream stages to back off cleanly (`1 - guidance`) without double-smoothing.
+	// Strictly respects TdMapsView::FieldsOf(Reader::Deband) (`kValidity` | `kStability` ONLY — M3!):
+	// returns continuous [0, 1] temporal stability / deband strength already applied by TD so VpDebander
+	// backs off cleanly without violating Reader::Deband's field mask (TD diagnostic readers may also inspect
+	// `kBandMask & kTdMapsBandMaskRegionDebandBit` separately).
 	struct TdRegionDebandGuidance
 	{
-		bool active = false;        // True when kValidity > 0.5 and kBandMask has kTdMapsBandMaskRegionDebandBit set
+		bool active = false;        // True when kValidity > 0.5 and kStability > 0
 		double appliedStrength = 0.0; // Continuous [0, 1] strength from kStability when active (else 0.0)
 	};
 
 	inline TdRegionDebandGuidance ReadRegionDebandGuidanceFromMaps(const TdMapsView::Block& block)
 	{
 		TdRegionDebandGuidance g;
-		const float valid = TdMapsView::Fetch(block, TdMapsView::kValidity);
-		const float maskF = TdMapsView::Fetch(block, TdMapsView::kBandMask);
-		if (!(valid > 0.5f) || !std::isfinite(maskF) || maskF < 0.0f)
+		// M3: Strictly honor U19 TdMapsView::FieldsOf(Reader::Deband) (kValidity | kStability only).
+		const uint32_t allowed = TdMapsView::FieldsOf(TdMapsView::Reader::Deband);
+		if ((allowed & TdMapsView::Bit(TdMapsView::kValidity)) == 0u ||
+		    (allowed & TdMapsView::Bit(TdMapsView::kStability)) == 0u)
 			return g;
-		const unsigned maskBits = static_cast<unsigned>(std::lround(maskF));
-		if ((maskBits & kTdMapsBandMaskRegionDebandBit) == 0u)
+		const float valid = TdMapsView::Fetch(block, TdMapsView::kValidity);
+		if (!(valid > 0.5f))
 			return g;
 		const float stab = TdMapsView::Fetch(block, TdMapsView::kStability);
+		if (!std::isfinite(stab) || !(stab > 0.0f))
+			return g;
 		g.active = true;
-		g.appliedStrength = std::isfinite(stab) ? RampMath::Clamp01(static_cast<double>(stab)) : 0.0;
+		g.appliedStrength = RampMath::Clamp01(static_cast<double>(stab));
 		return g;
 	}
 
@@ -1894,9 +1900,8 @@ namespace TdV2
 				return (*in.faceMask)[cellIdx] != 0u;
 			};
 
-			// Role-based independent A1 instrument partner lookup (NEVER allows Carry <-> PrevPeak/PrevPeak2/NextPeak
-			// cross-instrumentation since Carry shares recursive past error; plan s1.1 L70 & MEDIUM audit).
-			auto findIndependentA1Partner = [&](int k, size_t cIdx, int b) -> int
+			// Role-based independent A1 instrument partner lookup strictly within an active reference bitmask (H1 parity!).
+			auto findIndependentA1PartnerMasked = [&](int k, int activeMask) -> int
 			{
 				const RefRole myRole = refs[k].role;
 				int primary = -1;
@@ -1904,9 +1909,7 @@ namespace TdV2
 				for (int j = 0; j < K; ++j)
 				{
 					if (j == k) continue;
-					// RED-BUG-7b: Exclude any ref with motionGate <= 0 on this cell/band (drift-barred, held-out-rejected, or occluded).
-					const double jGate = (b == 0) ? refs[j].motionGate.gateL[cIdx] : refs[j].motionGate.gateMH[cIdx];
-					if (!(jGate > 0.0)) continue;
+					if ((activeMask & (1 << j)) == 0) continue;
 					const RefRole other = refs[j].role;
 					if (other == RefRole::Carry)
 						continue; // Carry is NEVER a valid A1 instrument for any reference!
@@ -1927,7 +1930,6 @@ namespace TdV2
 					}
 					else if (myRole == RefRole::Carry)
 					{
-						// Future peak is independent of past recurrent carry.
 						if (other == RefRole::NextPeak) primary = j;
 					}
 				}
@@ -1943,15 +1945,137 @@ namespace TdV2
 			{
 				const bool missingP11 = (in.p11FocusConfidence == nullptr || in.p11FocusConfidence->size() < numCells);
 				const bool missingP12 = (in.p12TextureDensity == nullptr || in.p12TextureDensity->size() < numCells);
-				const bool missingEdge = (!hasValidEdgeMapPlane && (in.edgeMapCells == nullptr || in.edgeMapCells->size() < numCells));
+				// H3: Stage 2B uses cell-level edgeMapCells; report RegionMapsDerived honestly whenever edgeMapCells is absent.
+				const bool missingEdge = (in.edgeMapCells == nullptr || in.edgeMapCells->size() < numCells);
 				if (missingP11 || ((cfg_.enableRegionTailoring || cfg_.enableRegionDeband) && (missingP12 || missingEdge)))
 					standIns->Engage(StandInKind::RegionMapsDerived, "TdV2ReferenceEngine deriving missing P11/P12/kEdgeMap from clean bands");
 			}
 
 			// Single-source-of-truth Owner Focus Rule & BokehMode band veto (Plan s1.4 L135-L143 & H8, extended for A4-1):
 			// - When effBokehMatchDelta == 0 (default OFF): bit-identical baseline Owner Focus Rule & BokehMode.
-			// - When effBokehMatchDelta > 0 (Stage A4-1 matched-focus bokeh tailoring): explicitFocusChange vetoes all bands,
-			//   explicit bokeh vetoes M/H always (L allowed for matched-focus refs), and per-ref focusDelta_k gates each ref in Stage 2B.
+			// - When effBokehMatchDelta > 0 (Stage A4-1 matched-focus bokeh tailoring, H1): explicitFocusChange vetoes all bands,
+			//   out-of-focus cur (explicit bokeh, optical defocus without external P11, or P11 < 0.5) vetoes M/H, and
+			//   per-ref focusDelta_k >= effBokehMatchDelta vetoes ref k BEFORE Stage 2A pooling, A2e/EB, and Stage 2B!
+			const double depthScale = DepthScale(cfg_.sourceBits);
+			const double baseQuantVar = (depthScale * depthScale) / 12.0;
+			const double activityTexFloor = 2.0 * (gains.mid + gains.fine) * baseQuantVar;
+			const double regionEffNoiseVar = (std::max)(baseQuantVar, a2Stats.valid ? (std::max)(0.0, a2Stats.totalVar) : 0.0);
+			const double regionFSharp = AnalyticalEdgeFocusRatio(0.0);
+			const double regionFDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
+
+			// H1/H3: Pre-evaluate focus descriptors & per-band active/EB masks ONCE before Stage 2A pooling!
+			std::vector<double> cellRegFocusConf(numCells, 1.0);
+			std::vector<uint8_t> cellRegCurOutOfFocus(numCells, 0u);
+			std::vector<uint8_t> cellRegNonFinite(numCells, 0u);
+			std::vector<std::array<double, kMaxBlendRefs>> cellRegFocusDelta(numCells, { 0.0, 0.0, 0.0 });
+			std::vector<int> cellEffMaskL(numCells, 0);
+			std::vector<int> cellEffMaskMH(numCells, 0);
+			std::vector<int> cellEbMaskL(numCells, 0);
+			std::vector<int> cellEbMaskMH(numCells, 0);
+			for (size_t cIdx = 0; cIdx < numCells; ++cIdx)
+			{
+				const FocusCellInfo& fi = focusCells[cIdx];
+				bool regFocusBad = false;
+				double fConf = 1.0;
+				bool curOOF = fi.isExplicitBokeh || fi.isDefocused;
+				double fDelta[kMaxBlendRefs] = {};
+				if (anyRegionFeature)
+				{
+					CellRegionInputs ri;
+					ri.curFDebiased = fi.curFDebiased;
+					ri.curEnergy = fi.curEnergy;
+					ri.refCount = K;
+					for (int k = 0; k < K; ++k)
+					{
+						ri.refFDebiased[k] = fi.refFDebiased[k];
+						ri.refEnergy[k] = fi.refEnergy[k];
+						if (refSpecs[k].focusConfidence != nullptr && cIdx < refSpecs[k].focusConfidence->size())
+						{
+							const double rv = (*refSpecs[k].focusConfidence)[cIdx];
+							if (std::isfinite(rv))
+								ri.extRefFocus[k] = rv;
+							else
+							{
+								regFocusBad = true;
+								nonFiniteCellFlag[cIdx] = 1u;
+								if (standIns != nullptr)
+									standIns->Engage(StandInKind::NonFiniteClosure, "non-finite ref P11 focusConfidence");
+							}
+						}
+					}
+					if (in.p11FocusConfidence != nullptr && cIdx < in.p11FocusConfidence->size())
+					{
+						const double cv = (*in.p11FocusConfidence)[cIdx];
+						if (std::isfinite(cv))
+							ri.extCurFocus = cv;
+						else
+						{
+							regFocusBad = true;
+							nonFiniteCellFlag[cIdx] = 1u;
+							if (standIns != nullptr)
+								standIns->Engage(StandInKind::NonFiniteClosure, "non-finite cur P11 focusConfidence");
+						}
+					}
+					const double cs = cellStepScales[cIdx];
+					ri.cellStepScaleSq = cs * cs;
+					ri.effNoiseVar = regionEffNoiseVar;
+					ri.baseQuantVar = baseQuantVar;
+					ri.fDefocus = regionFDefocus;
+					ri.fSharp = regionFSharp;
+					ri.gainMid = gains.mid;
+					ri.gainFine = gains.fine;
+					ri.gainD3 = gains.d3;
+					ri.isExplicitBokeh = fi.isExplicitBokeh;
+					ri.opticalIsDefocused = fi.isDefocused;
+					const CellRegionDescriptors rd = EvaluateCellRegionDescriptors(ri);
+					fConf = rd.focusConf;
+					curOOF = rd.curIsOutOfFocus;
+					for (int k = 0; k < K; ++k)
+						fDelta[k] = rd.focusDelta[k];
+				}
+				cellRegFocusConf[cIdx] = fConf;
+				cellRegCurOutOfFocus[cIdx] = curOOF ? 1u : 0u;
+				if (regFocusBad)
+					cellRegNonFinite[cIdx] = 1u;
+				for (int k = 0; k < K; ++k)
+					cellRegFocusDelta[cIdx][k] = fDelta[k];
+
+				if (isFaceMaskedCell(cIdx) || regFocusBad)
+					continue;
+
+				const bool vetoL = (effBokehMatchDelta > 0.0)
+					? fi.explicitFocusChange
+					: (fi.focusChange || (fi.isExplicitBokeh && cfg_.bokehMode != BokehMode::LowBandCellOnly));
+				const bool vetoMH = (effBokehMatchDelta > 0.0)
+					? (fi.explicitFocusChange || curOOF)
+					: (fi.focusChange || fi.isExplicitBokeh);
+
+				int mL = 0, mMH = 0, eL = 0, eMH = 0;
+				for (int k = 0; k < K; ++k)
+				{
+					const double gL = refs[k].motionGate.gateL[cIdx];
+					const double gMH = refs[k].motionGate.gateMH[cIdx];
+					const bool matchActive = (effBokehMatchDelta <= 0.0) || (fDelta[k] < effBokehMatchDelta);
+					const bool matchEbClean = (effBokehMatchDelta <= 0.0) || (fDelta[k] < 0.5 * effBokehMatchDelta);
+					if (!vetoL && gL > 0.0 && matchActive)
+					{
+						mL |= (1 << k);
+						if (matchEbClean)
+							eL |= (1 << k);
+					}
+					if (!vetoMH && gMH > 0.0 && matchActive)
+					{
+						mMH |= (1 << k);
+						if (matchEbClean)
+							eMH |= (1 << k);
+					}
+				}
+				cellEffMaskL[cIdx] = mL;
+				cellEffMaskMH[cIdx] = mMH;
+				cellEbMaskL[cIdx] = eL;
+				cellEbMaskMH[cIdx] = eMH;
+			}
+
 			auto isFocusVetoedBand = [&](size_t cellIndex, int bandIdx) -> bool
 			{
 				const FocusCellInfo& fi = focusCells[cellIndex];
@@ -1959,7 +2083,7 @@ namespace TdV2
 				{
 					if (fi.explicitFocusChange)
 						return true;
-					if (fi.isExplicitBokeh && bandIdx >= 1)
+					if (cellRegCurOutOfFocus[cellIndex] != 0u && bandIdx >= 1)
 						return true;
 					return false;
 				}
@@ -1983,12 +2107,9 @@ namespace TdV2
 				double cIvSeSq[kMaxBlendRefs] = {};     // Wishart sampling variance se^2 = (C_pp C_nn + C_pn^2) / N_eff
 				double cIvUpperCap[kMaxBlendRefs] = {}; // Physical upper cap min(C_pp, C_nn)
 				bool hasIndependentPartner[kMaxBlendRefs] = {};
+				bool ebEligible[kMaxBlendRefs] = {};    // H1: True iff both ref k and its A1 partner pass ebMask (no rack-focus transition!)
 				size_t sampleCount = 0;
 			};
-
-			const double depthScale = DepthScale(cfg_.sourceBits);
-			const double baseQuantVar = (depthScale * depthScale) / 12.0;
-			const double activityTexFloor = 2.0 * (gains.mid + gains.fine) * baseQuantVar;
 
 			std::vector<double> cellSpatialDetailRms(numCells, 0.0);
 			std::vector<double> cellOwnGrainVarArr(numCells, 0.0);
@@ -2154,22 +2275,14 @@ namespace TdV2
 						const int px0 = (std::max)(active.x0, (cx - bandPoolR) * cellPx);
 						const int px1 = (std::min)(active.x1, (cx + bandPoolR + 1) * cellPx);
 
-						// RED-BUG-7b: Only require validPx & gate > 0 for refs active on the center cell cIdx,
-						// so a drift-barred / held-out-rejected anchor (or occluded ref) NEVER zeroes out valid peers!
+						// RED-BUG-7b + Stage A4-1 (H1): Use focus-gated active bitmask (motion + anchor bar + matched-focus bokeh)
+						// so occluded, barred, defocused, or rack-focus-mismatched refs NEVER pollute C or A2e/EB!
+						const int centerMask = (b == 0) ? cellEffMaskL[cIdx] : cellEffMaskMH[cIdx];
+						const int centerEbMask = (b == 0) ? cellEbMaskL[cIdx] : cellEbMaskMH[cIdx];
 						bool cellRefActive[kMaxBlendRefs] = {};
-						bool anyCellRefActive = false;
-						int centerMask = 0;
 						for (int k = 0; k < K; ++k)
-						{
-							const double cGate = (b == 0) ? refs[k].motionGate.gateL[cIdx] : refs[k].motionGate.gateMH[cIdx];
-							cellRefActive[k] = (cGate > 0.0);
-							if (cellRefActive[k])
-							{
-								anyCellRefActive = true;
-								centerMask |= (1 << k);
-							}
-						}
-						if (!anyCellRefActive)
+							cellRefActive[k] = ((centerMask & (1 << k)) != 0);
+						if (centerMask == 0)
 							continue;
 
 						for (int y = py0; y < py1; ++y)
@@ -2182,13 +2295,7 @@ namespace TdV2
 								if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, b))
 									continue;
 
-								int nbrMask = 0;
-								for (int k = 0; k < K; ++k)
-								{
-									const double pGate = (b == 0) ? refs[k].motionGate.gateL[pCell] : refs[k].motionGate.gateMH[pCell];
-									if (pGate > 0.0)
-										nbrMask |= (1 << k);
-								}
+								const int nbrMask = (b == 0) ? cellEffMaskL[pCell] : cellEffMaskMH[pCell];
 								if ((nbrMask & centerMask) != centerMask)
 									continue;
 
@@ -2281,7 +2388,7 @@ namespace TdV2
 						{
 							if (!cellRefActive[k])
 								continue;
-							const int partner = findIndependentA1Partner(k, cIdx, b);
+							const int partner = findIndependentA1PartnerMasked(k, centerMask);
 							if (partner >= 0 && !refsCollinear(cm.C[k][k], cm.C[partner][partner], cm.C[k][partner]))
 							{
 								cm.hasIndependentPartner[k] = true;
@@ -2302,10 +2409,12 @@ namespace TdV2
 								cm.cIvSeSq[k] = SamplingVarianceOfCrossMoment(cm.C[k][k], cm.C[partner][partner], cm.C[k][partner], nEff);
 								cm.cIvClipped[k] = EstimateC_A1(cm.C[k][partner], cm.C[k][k], cm.C[partner][partner],
 								                                cellRetainedGrainVar, bandTransfer[b], 1.0, psdScale, subpixelBias);
-								if (!cellContributedA2e && !refs[k].isExactCopy && !isFocusVetoedBand(cIdx, b))
+								// H1: Exclude partial focus transitions (focusDelta >= 0.5*bokehMatchDelta) from frame-wide A2e/EB!
+								const bool pairEbClean = ((centerEbMask & (1 << k)) != 0) && ((centerEbMask & (1 << partner)) != 0);
+								cm.ebEligible[k] = pairEbClean;
+								if (!cellContributedA2e && pairEbClean && !refs[k].isExactCopy && !isFocusVetoedBand(cIdx, b))
 								{
-									const double mGate = (b == 0) ? refs[k].motionGate.gateL[cIdx] : refs[k].motionGate.gateMH[cIdx];
-									if (mGate > 0.0 && std::isfinite(cm.cIvClipped[k]))
+									if (std::isfinite(cm.cIvClipped[k]))
 									{
 										a2eSamples[b][actClass].push_back(cm.cIvClipped[k]);
 										cellContributedA2e = true;
@@ -2419,10 +2528,9 @@ namespace TdV2
 								{
 									for (int k = 0; k < K; ++k)
 									{
-										if (cm.hasIndependentPartner[k] && !refs[k].isExactCopy && !isFocusVetoedBand(ci, b))
+										if (cm.hasIndependentPartner[k] && cm.ebEligible[k] && !refs[k].isExactCopy && !isFocusVetoedBand(ci, b))
 										{
-											const double mGate = (b == 0) ? refs[k].motionGate.gateL[ci] : refs[k].motionGate.gateMH[ci];
-											if (mGate > 0.0 && std::isfinite(cm.cIvClipped[k]))
+											if (std::isfinite(cm.cIvClipped[k]))
 											{
 												a2eSamples[b][cellActivityClass[ci]].push_back(cm.cIvClipped[k]);
 												break;
@@ -2446,10 +2554,11 @@ namespace TdV2
 								cellDiagC[b][k][ci] = (std::min)(cellDiagC[b][k][ci], cm.C[k][k]);
 							cm.sampleCount = cm.sampleCount + pm.sampleCount;
 							const double nEffMerged = EffectiveSamplesForBand(b, static_cast<double>(cm.sampleCount));
+							const int ciMask = (b == 0) ? cellEffMaskL[ci] : cellEffMaskMH[ci];
 							bool cellContributed = false;
 							for (int k = 0; k < K; ++k)
 							{
-								const int partner = findIndependentA1Partner(k, ci, b);
+								const int partner = findIndependentA1PartnerMasked(k, ciMask);
 								if (partner >= 0 && cm.hasIndependentPartner[k] && pm.hasPartner[k])
 								{
 									cm.cIvRaw[k] = wCur * cm.cIvRaw[k] + wPrev * pm.cIvRaw[k];
@@ -2457,10 +2566,9 @@ namespace TdV2
 									cm.cIvSeSq[k] = SamplingVarianceOfCrossMoment(cm.C[k][k], cm.C[partner][partner], cm.C[k][partner], nEffMerged);
 									const double clipped = cm.cIvRaw[k] <= 0.0 ? 0.0 : (cm.cIvRaw[k] < cm.cIvUpperCap[k] ? cm.cIvRaw[k] : cm.cIvUpperCap[k]);
 									cm.cIvClipped[k] = clipped;
-									if (!cellContributed && !refs[k].isExactCopy && !isFocusVetoedBand(ci, b))
+									if (!cellContributed && cm.ebEligible[k] && !refs[k].isExactCopy && !isFocusVetoedBand(ci, b))
 									{
-										const double mGate = (b == 0) ? refs[k].motionGate.gateL[ci] : refs[k].motionGate.gateMH[ci];
-										if (mGate > 0.0 && std::isfinite(clipped))
+										if (std::isfinite(clipped))
 										{
 											a2eSamples[b][cellActivityClass[ci]].push_back(clipped);
 											cellContributed = true;
@@ -2532,10 +2640,9 @@ namespace TdV2
 						const int ac = static_cast<int>(cellActivityClass[ci]);
 						for (int k = 0; k < K; ++k)
 						{
-							if (!cm.hasIndependentPartner[k] || refs[k].isExactCopy)
+							if (!cm.hasIndependentPartner[k] || !cm.ebEligible[k] || refs[k].isExactCopy)
 								continue;
-							const double mGate = (b == 0) ? refs[k].motionGate.gateL[ci] : refs[k].motionGate.gateMH[ci];
-							if (!(mGate > 0.0) || !std::isfinite(cm.cIvRaw[k]) || !std::isfinite(cm.cIvSeSq[k]))
+							if (!std::isfinite(cm.cIvRaw[k]) || !std::isfinite(cm.cIvSeSq[k]))
 								continue;
 							++cnt[ac];
 							const double d = cm.cIvRaw[k] - meanRaw[ac];
@@ -2562,10 +2669,8 @@ namespace TdV2
 			}
 
 			// ---- Stage 2B: Per-cell blind c selection, constrained convex QP solve, motion/focus/region/deband/grain/fade gates ----
-			const double regionBaseQuantVar = (kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0;
-			const double regionEffNoiseVar = (std::max)(regionBaseQuantVar, a2Stats.valid ? (std::max)(0.0, a2Stats.totalVar) : 0.0);
-			const double regionFSharp = AnalyticalEdgeFocusRatio(0.0);
-			const double regionFDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
+			// M2: Use bit-depth-scaled baseQuantVar = DepthScale(sourceBits)^2 / 12 consistently!
+			const double regionBaseQuantVar = baseQuantVar;
 			std::vector<double> cellDebandBoundL(numCells, 0.0);
 
 			for (int cy = 0; cy < res.cellsH; ++cy)
@@ -2584,8 +2689,9 @@ namespace TdV2
 					const double cellStepScaleSq = cellStepScaleVal * cellStepScaleVal;
 					const int actClass = static_cast<int>(cellActivityClass[cIdx]);
 
-					// Stage A4-1: Evaluate continuous per-cell region descriptors (P11, P12, kEdgeMap, P10g) when any A4-1 toggle is on.
+					// Stage A4-1: Evaluate continuous per-cell region descriptors (P11 pre-evaluated in Stage 2A, plus P12/kEdgeMap/P10g).
 					CellRegionDescriptors regDesc;
+					bool cellRegionNonFinite = (cellRegNonFinite[cIdx] != 0u);
 					if (anyRegionFeature)
 					{
 						CellRegionInputs ri;
@@ -2596,30 +2702,6 @@ namespace TdV2
 						{
 							ri.refFDebiased[k] = focusCells[cIdx].refFDebiased[k];
 							ri.refEnergy[k] = focusCells[cIdx].refEnergy[k];
-							if (refSpecs[k].focusConfidence != nullptr && cIdx < refSpecs[k].focusConfidence->size())
-							{
-								const double rv = (*refSpecs[k].focusConfidence)[cIdx];
-								if (std::isfinite(rv))
-									ri.extRefFocus[k] = rv;
-								else
-								{
-									nonFiniteCellFlag[cIdx] = 1u;
-									if (standIns != nullptr)
-										standIns->Engage(StandInKind::NonFiniteClosure, "non-finite ref P11 focusConfidence");
-								}
-							}
-						}
-						if (in.p11FocusConfidence != nullptr && cIdx < in.p11FocusConfidence->size())
-						{
-							const double cv = (*in.p11FocusConfidence)[cIdx];
-							if (std::isfinite(cv))
-								ri.extCurFocus = cv;
-							else
-							{
-								nonFiniteCellFlag[cIdx] = 1u;
-								if (standIns != nullptr)
-									standIns->Engage(StandInKind::NonFiniteClosure, "non-finite cur P11 focusConfidence");
-							}
 						}
 						if (in.p12TextureDensity != nullptr && cIdx < in.p12TextureDensity->size())
 						{
@@ -2628,6 +2710,7 @@ namespace TdV2
 								ri.extTextureDensity = tv;
 							else
 							{
+								cellRegionNonFinite = true;
 								nonFiniteCellFlag[cIdx] = 1u;
 								if (standIns != nullptr)
 									standIns->Engage(StandInKind::NonFiniteClosure, "non-finite P12 textureDensity");
@@ -2640,6 +2723,7 @@ namespace TdV2
 								ri.extCellEdge = ev;
 							else
 							{
+								cellRegionNonFinite = true;
 								nonFiniteCellFlag[cIdx] = 1u;
 								if (standIns != nullptr)
 									standIns->Engage(StandInKind::NonFiniteClosure, "non-finite kEdgeMap cell value");
@@ -2662,6 +2746,10 @@ namespace TdV2
 						ri.isExplicitBokeh = focusCells[cIdx].isExplicitBokeh;
 						ri.opticalIsDefocused = focusCells[cIdx].isDefocused;
 						regDesc = EvaluateCellRegionDescriptors(ri);
+						regDesc.focusConf = cellRegFocusConf[cIdx];
+						regDesc.curIsOutOfFocus = (cellRegCurOutOfFocus[cIdx] != 0u);
+						for (int k = 0; k < K; ++k)
+							regDesc.focusDelta[k] = cellRegFocusDelta[cIdx][k];
 					}
 					const double regionBandGain[3] = {
 						1.0,
@@ -2674,10 +2762,11 @@ namespace TdV2
 					unsigned activeBandBits = 0;
 					bool cellUsedSingleRefA2 = false;
 					bool cellHadSingular = false;
-					double cellDebandRegionVal = 0.0;
+					double cellDebandAddedShare = 0.0;
 					double cellDebandQuantStep = 0.0;
 
-					for (int b = 0; b < 3; ++b)
+					// H3: Fail closed (w = 0, kValidity = 0) on any cell with non-finite P11/P12/kEdgeMap/stepScale/grain prior!
+					for (int b = 0; !cellRegionNonFinite && b < 3; ++b)
 					{
 						const CellBandMoments& cm = cellMoments[b][cIdx];
 						if (cm.sampleCount == 0)
@@ -2857,18 +2946,17 @@ namespace TdV2
 							bandWSum += wFinal;
 						}
 
-						// Stage A4-1 Feature 3: Direct L-band region-aware temporal debanding on flat/shallow-gradient regions
-						// (low kEdgeMap, low P12 texture, low P10g grain, smooth L-band), bounded strictly by quantization step!
+						// Stage A4-1 Feature 3 (H2/M2): Direct L-band region-aware temporal debanding on flat/shallow-gradient regions.
+						// Coherent L-band contours have DC response H_L(0) = 1 (NEVER divide blockOwnU by white-noise gains.low!),
+						// preserve QP-solved peak weights w_k, and only raise td.maps/bound when weight is actually added!
 						if (cfg_.enableRegionDeband && b == 0 && focusGate > 0.0)
 						{
-							const double impliedVarL = (gains.low > kEngineNumFloor) ? (blockOwnU / gains.low) : 0.0;
-							const double effStepVar = (std::max)(regionBaseQuantVar * cellStepScaleSq,
-							                                     (std::max)(a2Stats.totalVar * cellStepScaleSq, impliedVarL));
-							const double quantStep = (std::max)(
-								kDefaultStepPriorLsb * cellStepScaleVal,
-								(in.hasStepPrior && effStepDelta > 0.0)
-									? (effStepDelta * cellStepScaleVal)
-									: std::sqrt(12.0 * effStepVar));
+							const double a2VarCell = a2Stats.valid ? (std::max)(0.0, a2Stats.totalVar * cellStepScaleSq) : 0.0;
+							const double coherentVarL = (std::max)(regionBaseQuantVar * cellStepScaleSq,
+							                                       (std::max)(a2VarCell, (std::max)(0.0, blockOwnU)));
+							const double quantStep = (in.hasStepPrior && effStepDelta > 0.0)
+								? (std::max)(depthScale * cellStepScaleVal, effStepDelta * cellStepScaleVal)
+								: std::sqrt(12.0 * coherentVarL);
 							const double smoothL = 1.0 - SmoothstepC1(quantStep, std::sqrt(kHuberKneeSq) * quantStep, cellStdCleanY[cIdx]);
 							const double debandRegion = (1.0 - regDesc.edgeStrength) * (1.0 - regDesc.textureDensity) *
 							                            (1.0 - regDesc.p10gShare) * smoothL;
@@ -2887,22 +2975,33 @@ namespace TdV2
 								}
 								if (nAgree > kEngineNumFloor)
 								{
-									// Exact MMSE temporal average of (1 + nAgree) equal-variance quantized frames: w_k = agree_k / (1 + nAgree).
 									const double invDen = 1.0 / (1.0 + nAgree);
-									const double wDebandSum = nAgree * invDen;
-									if (wDebandSum > bandWSum)
+									const double wBaseSum = bandWSum;
+									double lift[kMaxBlendRefs] = {};
+									double liftSum = 0.0;
+									for (int k = 0; k < K; ++k)
 									{
+										const double wEqK = agree[k] * invDen;
+										lift[k] = (wEqK > cellW[0][k][cIdx]) ? (wEqK - cellW[0][k][cIdx]) : 0.0;
+										liftSum += lift[k];
+									}
+									if (liftSum > kEngineNumFloor)
+									{
+										const double room = (std::max)(0.0, 1.0 - wBaseSum);
+										const double liftScale = (liftSum > room) ? (room / liftSum) : 1.0;
 										bandWSum = 0.0;
 										for (int k = 0; k < K; ++k)
 										{
-											const double wDebK = agree[k] * invDen;
-											const double wNew = cellW[0][k][cIdx] + debandRegion * (wDebK - cellW[0][k][cIdx]);
-											cellW[0][k][cIdx] = wNew > 0.0 ? wNew : 0.0;
+											cellW[0][k][cIdx] += debandRegion * liftScale * lift[k];
 											bandWSum += cellW[0][k][cIdx];
 										}
+										const double debandAdded = (std::max)(0.0, bandWSum - wBaseSum);
+										if (debandAdded > kEngineNumFloor)
+										{
+											cellDebandAddedShare = RampMath::Clamp01(debandAdded / (std::max)(bandWSum, kEngineNumFloor));
+											cellDebandQuantStep = quantStep;
+										}
 									}
-									cellDebandRegionVal = debandRegion;
-									cellDebandQuantStep = quantStep;
 								}
 							}
 						}
@@ -3014,9 +3113,9 @@ namespace TdV2
 					}
 
 					double stabilityOut = RampMath::Clamp01(cellWeightSumAll / 3.0);
-					if (cfg_.enableRegionDeband && cellDebandRegionVal > kEngineNumFloor && lowWeightSum > kEngineNumFloor)
+					if (cfg_.enableRegionDeband && cellDebandAddedShare > kEngineNumFloor && lowWeightSum > kEngineNumFloor)
 					{
-						const double debandApplied = RampMath::Clamp01(cellDebandRegionVal * lowWeightSum);
+						const double debandApplied = RampMath::Clamp01(cellDebandAddedShare * lowWeightSum);
 						if (debandApplied > kEngineNumFloor)
 						{
 							cellDebandBoundL[cIdx] = debandApplied * 0.5 * cellDebandQuantStep;
@@ -3098,6 +3197,61 @@ namespace TdV2
 						continue;
 					}
 
+					// Stage A4-1 (H3 & M2): Pre-evaluate per-pixel edge confidence once per pixel (not 3*K times).
+					// Non-finite edgeMapPlane / edgeMapCells fails closed (delta = 0, NonFiniteClosure) instead of failing open.
+					double pxEdgeVal = 0.0;
+					double pxQuantSigmaVal = 0.0;
+					if (cfg_.enableRegionTailoring)
+					{
+						const double pxStepScale = cellStepScales[cIdx];
+						pxQuantSigmaVal = std::sqrt((std::max)(0.0, a2Stats.totalVar * pxStepScale * pxStepScale));
+						const double pxNoiseFloor = (std::max)(std::sqrt(regionBaseQuantVar), pxQuantSigmaVal);
+						bool derivePxEdge = false;
+						if (hasValidEdgeMapPlane)
+						{
+							const double ev = in.edgeMapPlane->at(x, y);
+							if (!std::isfinite(ev))
+							{
+								nonFiniteCellFlag[cIdx] = 1u;
+								if (standIns != nullptr)
+									standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ReferenceEngine non-finite edgeMapPlane");
+								deltaPlane.at(x, y) = 0.0;
+								continue;
+							}
+							pxEdgeVal = RampMath::Clamp01(ev);
+						}
+						else if (in.edgeMapCells != nullptr && cIdx < in.edgeMapCells->size())
+						{
+							const double ev = (*in.edgeMapCells)[cIdx];
+							if (!std::isfinite(ev))
+							{
+								nonFiniteCellFlag[cIdx] = 1u;
+								if (standIns != nullptr)
+									standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ReferenceEngine non-finite edgeMapCells");
+								deltaPlane.at(x, y) = 0.0;
+								continue;
+							}
+							if (ev >= 0.0)
+								pxEdgeVal = RampMath::Clamp01(ev);
+							else
+								derivePxEdge = true;
+						}
+						else
+						{
+							derivePxEdge = true;
+						}
+						if (derivePxEdge)
+						{
+							const int xm = (std::max)(active.x0, x - 1);
+							const int xp = (std::min)(active.x1 - 1, x + 1);
+							const int ym = (std::max)(active.y0, y - 1);
+							const int yp = (std::min)(active.y1 - 1, y + 1);
+							const double gxY = 0.5 * (curClean.at(xp, y) - curClean.at(xm, y));
+							const double gyY = 0.5 * (curClean.at(x, yp) - curClean.at(x, ym));
+							pxEdgeVal = SmoothstepC1(pxNoiseFloor, std::sqrt(kHuberKneeSq) * pxNoiseFloor, std::hypot(gxY, gyY));
+						}
+					}
+
 					// Pixels outside valid 8x8 DCT POCS (transform unknown, missing real P_B, or non-8-aligned strips)
 					// receive the honest statistical per-band + joint cross-band limit (TD-U3 / H-1 / Owner D3).
 					const bool inFull8x8Block = canRun8x8Pocs &&
@@ -3157,36 +3311,12 @@ namespace TdV2
 							double wEff = 0.0;
 							if (cfg_.enableRegionTailoring)
 							{
-								const double pxStepScale = cellStepScales[cIdx];
-								const double pxQuantSigma = std::sqrt((std::max)(0.0, a2Stats.totalVar * pxStepScale * pxStepScale));
-								const double pxNoiseFloor = (std::max)(std::sqrt(regionBaseQuantVar), pxQuantSigma);
-								double pxEdge = 0.0;
-								if (hasValidEdgeMapPlane)
-								{
-									const double ev = in.edgeMapPlane->at(x, y);
-									pxEdge = std::isfinite(ev) ? RampMath::Clamp01(ev) : 0.0;
-								}
-								else if (in.edgeMapCells != nullptr && cIdx < in.edgeMapCells->size())
-								{
-									const double ev = (*in.edgeMapCells)[cIdx];
-									pxEdge = std::isfinite(ev) ? RampMath::Clamp01(ev) : 0.0;
-								}
-								else
-								{
-									const int xm = (std::max)(active.x0, x - 1);
-									const int xp = (std::min)(active.x1 - 1, x + 1);
-									const int ym = (std::max)(active.y0, y - 1);
-									const int yp = (std::min)(active.y1 - 1, y + 1);
-									const double gxY = 0.5 * (curClean.at(xp, y) - curClean.at(xm, y));
-									const double gyY = 0.5 * (curClean.at(x, yp) - curClean.at(x, ym));
-									pxEdge = SmoothstepC1(pxNoiseFloor, std::sqrt(kHuberKneeSq) * pxNoiseFloor, std::hypot(gxY, gyY));
-								}
 								wEff = SpatialEdgeAwareBilinearWeight(
 									cellW[b][k].data(), cellDiagC[b][k].data(),
 									cellMeanCleanY.data(), cellStdCleanY.data(),
 									res.cellsW, res.cellsH,
 									static_cast<double>(x), static_cast<double>(y), cellPx,
-									cx, cy, diff, curClean.at(x, y), pxEdge, pxQuantSigma, cfg_.enablePerCornerHuber);
+									cx, cy, diff, curClean.at(x, y), pxEdgeVal, pxQuantSigmaVal, cfg_.enablePerCornerHuber, depthScale);
 							}
 							else if (cfg_.enableEdgeAwareWeightUpsample)
 							{

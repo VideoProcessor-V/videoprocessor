@@ -1412,7 +1412,8 @@ namespace TdV2
 
 		// 1) P11 focus confidence in [0, 1]: 0 = defocused bokeh, 1 = sharp or flat neutral.
 		const double rawCurF = SmoothstepC1(in.fDefocus, in.fSharp, in.curFDebiased);
-		if (std::isfinite(in.extCurFocus) && in.extCurFocus >= 0.0)
+		const bool hasExtCurF = std::isfinite(in.extCurFocus) && in.extCurFocus >= 0.0;
+		if (hasExtCurF)
 		{
 			out.focusConf = RampMath::Clamp01(in.extCurFocus);
 		}
@@ -1425,11 +1426,11 @@ namespace TdV2
 			const double eConf = SmoothstepC1(0.5 * cellStructFloor, 2.0 * cellStructFloor, in.curEnergy);
 			out.focusConf = 1.0 - eConf * (1.0 - rawCurF);
 		}
-		out.curIsOutOfFocus = in.isExplicitBokeh || in.opticalIsDefocused || (out.focusConf < 0.5);
+		// LOW-1: Authoritative external P11 (extCurFocus >= 0) is never overridden by clean-band stand-in opticalIsDefocused.
+		out.curIsOutOfFocus = in.isExplicitBokeh || (!hasExtCurF && in.opticalIsDefocused) || (out.focusConf < 0.5);
 
 		// 2) Per-reference |focus_ref_k - focus_cur| in [0, 1] focus space (for matched-focus bokeh tailoring).
 		const int K = in.refCount < 0 ? 0 : (in.refCount > kMaxBlendRefs ? kMaxBlendRefs : in.refCount);
-		const bool hasExtCurF = std::isfinite(in.extCurFocus) && in.extCurFocus >= 0.0;
 		for (int k = 0; k < K; ++k)
 		{
 			const bool hasExtRefF = std::isfinite(in.extRefFocus[k]) && in.extRefFocus[k] >= 0.0;
