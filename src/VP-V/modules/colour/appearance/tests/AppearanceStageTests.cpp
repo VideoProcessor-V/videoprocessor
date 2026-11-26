@@ -26,8 +26,14 @@ namespace Tests
 			in.sdrTargetNits = 203.0;
 			Assert::AreEqual(203.0, AppearanceStage::ReferenceWhite(in), 0.0);
 			in.trimApplied = true;
+			in.trimTargetNits = 150.0;   // below BT.2408 diffuse white (203 nits): trim target takes precedence over sdrTargetNits
+			Assert::AreEqual(150.0, AppearanceStage::ReferenceWhite(in), 0.0);
+			// POD2-H2 (432818710): ReferenceWhite caps peak trimTargetNits to ITU-R BT.2408 diffuse white (203 nits),
+			// never conflating peak display luminance (700 nits) with paper white or falling back to sdrTargetNits (120 nits).
+			in.sdrTargetNits = 120.0;
 			in.trimTargetNits = 700.0;
-			Assert::AreEqual(700.0, AppearanceStage::ReferenceWhite(in), 0.0);
+			Assert::AreEqual(203.0, AppearanceStage::ReferenceWhite(in), 0.0);
+			in.sdrTargetNits = 203.0;
 			in.trimTargetNits = 0.0;   // a trim without a target does not invent one
 			Assert::AreEqual(203.0, AppearanceStage::ReferenceWhite(in), 0.0);
 		}

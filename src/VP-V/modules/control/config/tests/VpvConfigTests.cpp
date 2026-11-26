@@ -4863,16 +4863,40 @@ namespace
 				if (expectManaged)
 				{
 					require(!w->isEnabled() && w->property("vpvManaged").toBool() &&
+						!w->property("vpvOrigDisabled").toBool() &&
 						w->toolTip().startsWith(QStringLiteral("Managed by VP-V")),
 						(std::string("GEM-040 (") + phase + "): " + name +
-							" must remain disabled and marked Managed by VP-V").c_str());
+							" must remain disabled and marked Managed by VP-V (with vpvOrigDisabled == false)").c_str());
 				}
 				else
 				{
-					require(w->isEnabled() && !w->property("vpvManaged").toBool(),
+					// W23-CFG-M2 / W23-REG-H5 / W23-C2-S5-M1 (WAIVER-W23-POSTSEAL-REDTEAM): low_bitrate_handling,
+					// capture_path, and dv_trims are IsVpvOnlyKey additions overridden on the Original pathway, so
+					// switching to Original clears vpvManaged == false and reversibly engages vpvOrigDisabled == true,
+					// while Bill's own upstream controls (e.g. scaling.deband_strength) stay live and enabled!
+					require(!w->property("vpvManaged").toBool() && w->property("vpvOrigDisabled").toBool() &&
+						!w->isEnabled() && w->toolTip().startsWith(QStringLiteral("Disabled on the Original pathway")),
 						(std::string("GEM-040 (") + phase + "): " + name +
-							" must restore enabled with vpvManaged == false on Original pathway").c_str());
+							" must clear vpvManaged and engage vpvOrigDisabled on Original pathway").c_str());
 				}
+			}
+			// Negative control on the same window: Bill's own upstream control stays live & enabled on Original!
+			auto* billDeband = control<QWidget>(window, QStringLiteral("config.vprenderer.scaling.deband_strength"));
+			require(billDeband->isEnabled() && !billDeband->property("vpvOrigDisabled").toBool(),
+				(std::string("GEM-040 negative control (") + phase + "): Bill's scaling.deband_strength must remain enabled").c_str());
+
+			// W23-C2-S5-M1: duplicate upstream upscale_sharp_antiring row stays hidden via ApplyManagedRows and toggles
+			// vpvManaged <-> vpvOrigDisabled reversibly across VP-V <-> Original without corrupting base tooltip!
+			if (auto* sharpAr = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.upscale_sharp_antiring")))
+			{
+				require(!RowShown(sharpAr),
+					(std::string("S5-M1 (") + phase + "): duplicate config.vprenderer.upscale_sharp_antiring row must stay hidden").c_str());
+				if (expectManaged)
+					require(sharpAr->property("vpvManaged").toBool() && !sharpAr->property("vpvOrigDisabled").toBool(),
+						(std::string("S5-M1 (") + phase + "): upscale_sharp_antiring marked vpvManaged on VP-V").c_str());
+				else
+					require(!sharpAr->property("vpvManaged").toBool() && sharpAr->property("vpvOrigDisabled").toBool(),
+						(std::string("S5-M1 (") + phase + "): upscale_sharp_antiring marked vpvOrigDisabled on Original").c_str());
 			}
 
 			require(!adaptiveUpscale->property("derivedSetting").toBool(),
@@ -4888,9 +4912,10 @@ namespace
 			else
 			{
 				require(!devTab->isEnabled() && !adaptiveUpscale->property("vpvManaged").toBool() &&
-					adaptiveUpscale->isEnabledTo(devTab),
+					adaptiveUpscale->property("vpvOrigDisabled").toBool() && !adaptiveUpscale->isEnabled() &&
+					adaptiveUpscale->toolTip().startsWith(QStringLiteral("Disabled on the Original pathway")),
 					(std::string("GEM-040 (") + phase + "): config.vprenderer.adaptive_upscale" +
-						" must restore its own enabled state (isEnabledTo(vpv.developer)) with vpvManaged == false while vpv.developer is disabled on Original").c_str());
+						" must clear vpvManaged and engage vpvOrigDisabled while vpv.developer is disabled on Original").c_str());
 			}
 		};
 
@@ -6022,15 +6047,16 @@ namespace
 		require(overviewLayout != nullptr, "CUI fit negative control: Overview tab has no layout");
 		{
 			std::unique_ptr<QWidget> oversized(new QWidget);
-			oversized->setMinimumWidth(vpvScroll->viewport()->width() + 200);
+			oversized->setMinimumSize(vpvScroll->viewport()->width() + 200, 8);
 			overviewLayout->addWidget(oversized.get());
-			for (int n = 0; n < 3; ++n) QCoreApplication::processEvents();
+			oversized->show();
+			for (int n = 0; n < 8; ++n) QCoreApplication::processEvents();
 			require(vpvScroll->horizontalScrollBar()->maximum() > 0 &&
 				vpvScroll->widget()->width() > vpvScroll->viewport()->width(),
 				"CUI fit negative control failed: oversized child widget did not trigger horizontal overflow at 760x540");
 			overviewLayout->removeWidget(oversized.get());
 		}
-		for (int n = 0; n < 3; ++n) QCoreApplication::processEvents();
+		for (int n = 0; n < 8; ++n) QCoreApplication::processEvents();
 		require(vpvScroll->horizontalScrollBar()->maximum() == 0,
 			"CUI fit negative control cleanup: horizontal overflow remained after removing oversized probe");
 	}

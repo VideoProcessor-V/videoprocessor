@@ -226,7 +226,8 @@ namespace VideoProcessorTest
 			const bool outside = excess[0] != 0.0 || excess[1] != 0.0 || excess[2] != 0.0;
 			const bool allBelow = rgbIn[0] <= 0.0 && rgbIn[1] <= 0.0 && rgbIn[2] <= 0.0;
 			const bool allAbove = rgbIn[0] >= 1.0 && rgbIn[1] >= 1.0 && rgbIn[2] >= 1.0;
-			if (outside && (allBelow || allAbove))
+			// W23-NEON-H3 (3ad95bc94): only wholly-BTB bypasses raw; wholly-WTW adapts (1,1,1) and adds excess for C0 corner continuity.
+			if (outside && (allBelow || (simulatePreFixSdrCeiling && allAbove)))
 				return rgbIn;
 
 			const double refNits = d.referenceWhiteNits;
@@ -249,7 +250,7 @@ namespace VideoProcessorTest
 			{
 				r = (std::max)(r, 0.0);
 				if (in.signalPq)
-					return DvMath::PqFromNits(r * screenNits);
+					return DvMath::PqFromNits(r * (simulatePreFixSdrCeiling ? screenNits : refNits));
 				if (in.transferKind > 0)
 					return ExtendedRange::FromLinear(trc, r);
 				return std::pow(r, 1.0 / in.outputGamma);
@@ -283,7 +284,8 @@ namespace VideoProcessorTest
 				return { { scaled[0] * 0.01, scaled[1] * 0.01, scaled[2] * 0.01 } };
 			};
 
-			const double upper = (!simulatePreFixSdrCeiling && in.signalPq) ? (10000.0 / (std::max)(screenNits, 1e-6)) : 1.0;
+			// POD2-H2 (432818710): Cam16::Inverse outputs XYZ_scr with Yw_scr = 100, which maps to refNits-relative units (not screenNits).
+			const double upper = (!simulatePreFixSdrCeiling && in.signalPq) ? (10000.0 / (std::max)(refNits, 1e-6)) : 1.0;
 			auto outOfRange = [upper](const std::array<double, 3>& c) -> bool
 			{
 				return !(c[0] >= -1e-4 && c[0] <= upper + 1e-4 &&
@@ -322,18 +324,21 @@ namespace VideoProcessorTest
 				}
 			}
 
+			const double veilRel = (!simulatePreFixSdrCeiling && in.signalPq) ? veil * (screenNits / (std::max)(refNits, 1e-6)) : veil;
 			for (int c = 0; c < 3; ++c)
-				outLin[c] = FlareReference(outLin[c], veil, upper);
+				outLin[c] = FlareReference(outLin[c], veilRel, upper);
 
 			const double luma = in.rgbToXyz[3] * lin[0] + in.rgbToXyz[4] * lin[1] + in.rgbToXyz[5] * lin[2];
 			const double knee = (std::min)(0.5, (std::max)(0.0, in.toeKnee));
-			const double toe = knee > 0.0 ? Smoothstep(0.0, toRel(knee), luma) : 1.0;
+			// W23-C2-S3-L2 (bff541a87): apx_knee is an SDR code fraction converted via apx_gamma even on PQ outputs.
+			const double kneeRel = (!simulatePreFixSdrCeiling && in.signalPq) ? std::pow(knee, (std::max)(in.outputGamma, 1e-6)) : toRel(knee);
+			const double toe = knee > 0.0 ? Smoothstep(0.0, kneeRel, luma) : 1.0;
 			const double w = (std::min)(1.0, (std::max)(0.0, in.strength)) * toe;
 
 			std::array<double, 3> res{};
 			for (int c = 0; c < 3; ++c)
 			{
-				const double inScreen = in.signalPq ? lin[c] * (refNits / (std::max)(screenNits, 1e-6)) : lin[c];
+				const double inScreen = (simulatePreFixSdrCeiling && in.signalPq) ? lin[c] * (refNits / (std::max)(screenNits, 1e-6)) : lin[c];
 				res[c] = fromRel(inScreen + (outLin[c] - inScreen) * w) + excess[c];
 			}
 			return res;
@@ -720,13 +725,19 @@ namespace VideoProcessorTest
 					L"Negative control must verify that naive subtract-and-clip crushes at least 8 near-black levels to 0");
 			}
 
-			// 4. Wholly-BTB and wholly-WTW pass through untouched within 1e-5.
+			// 4. Wholly-BTB passes through untouched within 1e-5; wholly-WTW adapts (1,1,1) + excess for C0 corner continuity (W23-NEON-H3).
+			const std::array<double, 3> refWholeWtw = CpuReferenceAppearancePixel(
+				in, d, { { pixels[idxWholeWtw][0], pixels[idxWholeWtw][1], pixels[idxWholeWtw][2] } });
+			const std::array<double, 3> refWhite = CpuReferenceAppearancePixel(in, d, { { 1.0, 1.0, 1.0 } });
 			for (int c = 0; c < 3; ++c)
 			{
 				Assert::AreEqual(static_cast<double>(pixels[idxWholeBtb][c]), static_cast<double>(gpu[idxWholeBtb][c]), 1e-5,
 					L"Wholly-BTB pixel must pass through unchanged");
-				Assert::AreEqual(static_cast<double>(pixels[idxWholeWtw][c]), static_cast<double>(gpu[idxWholeWtw][c]), 1e-5,
-					L"Wholly-WTW pixel must pass through unchanged");
+				Assert::AreEqual(refWholeWtw[c], static_cast<double>(gpu[idxWholeWtw][c]), 2e-3,
+					L"W23-NEON-H3: Wholly-WTW pixel must match adapted (1,1,1) + excess CPU reference");
+				Assert::AreEqual(static_cast<double>(pixels[idxWholeWtw][c]) - 1.0,
+					static_cast<double>(gpu[idxWholeWtw][c]) - refWhite[c], 2e-3,
+					L"W23-NEON-H3: Wholly-WTW pixel must preserve exact WTW excess over adapted white");
 			}
 
 			// 5. Single-channel WTW and single-channel BTB preserve exact excess while adapting in-range channels identically.

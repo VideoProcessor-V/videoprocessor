@@ -1022,10 +1022,10 @@ namespace D8SceneJudgeAgreementNs
 			using namespace VpUnit::CutFadeJudge;
 			using namespace VpDetailRestore;
 
-			// 1. Verify contract defaults: U7 VectorVeto defaults OFF; DP/TR Params::vectorVeto default ON.
+			// 1. Verify contract defaults (W23-IR-H2 0fd081fdb, SceneRestart.h:7, 115:1435): U7 VectorVeto and DP/TR Params::vectorVeto all default OFF.
 			Assert::IsFalse(VectorVeto().enabled, L"default U7 VectorVeto must stay OFF");
-			Assert::IsTrue(DetailPulse::Params().vectorVeto, L"DetailPulse::Params::vectorVeto defaults ON");
-			Assert::IsTrue(TextureRestore::Params().vectorVeto, L"TextureRestore::Params::vectorVeto defaults ON");
+			Assert::IsFalse(DetailPulse::Params().vectorVeto, L"W23-IR-H2: DetailPulse::Params::vectorVeto defaults OFF");
+			Assert::IsFalse(TextureRestore::Params().vectorVeto, L"W23-IR-H2: TextureRestore::Params::vectorVeto defaults OFF");
 
 			// 2. Synthesize a large-histogram pan pair (different luma spread, not an unchanged-spread flash) that triggers U7 CutFadeJudge::ClassifyEvents cut == true.
 			VpUnit::SourceStats::Record prevRec{}, curRec{};
@@ -1196,6 +1196,91 @@ namespace D8SceneJudgeAgreementNs
 				const SceneRestartAnswer aFadeNoKeep = SceneRestartOf(kSeq, fadeNoKeepReader, false, true, nullptr, &memoP7);
 				Assert::IsTrue(aFadeNoKeep.fromRecord && aFadeNoKeep.fadeWithoutKeep, L"fadeWithoutKeep detected");
 				Assert::IsTrue(aFadeNoKeep.restart && !aFadeNoKeep.vectorVetoed, L"fadeWithoutKeep is never vetoed");
+			}
+		}
+
+		// W23-C2-S2-H1 (bff541a87): FlowGlobal encodes binary validity (1.0f) in rec.global[d][3] and cell-agreement
+		// share in rec.global[d][2] = clamp(1.05f - 1.5f * share, 0.05f, 1.0f). ReadMemoVectorTrust must invert
+		// bidirectional rec.global[0/1][2] instead of reading binary [3], so low-agreement cuts (share = 0.25 < 0.50,
+		// sigma = 0.675 < 0.90, [3] = 1.0f) are NEVER falsely vetoed, while high bidirectional agreement (share >= 0.55)
+		// vetoes pan cuts; same-input negative control reading rec.global[0][3] falsely vetoes every usable P2 cut.
+		TEST_METHOD(P2VectorTrustDerivesCellAgreementShareFromGlobalSigmaInsteadOfBinaryValidityFlag)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			using namespace VpDetailRestore;
+
+			static constexpr uint64_t kSeq = 77u;
+			auto cutReader = [](uint64_t seq, FrameAnalysis::Scene& sc) -> bool {
+				if (seq != kSeq) return false;
+				sc = FrameAnalysis::Scene();
+				sc.cut = true;
+				sc.confirmed = true;
+				sc.cutStrength = 1.0f;
+				return true;
+			};
+
+			auto sigmaFromShare = [](float share) -> float {
+				const float raw = 1.05f - 1.5f * share;
+				return (std::max)(0.05f, (std::min)(1.0f, raw));
+			};
+			auto registerFlowGlobalP2 = [&](VpSkeleton::SkeletonMemo& memo, float fwdShare, float bwdShare) -> VpMotion::P2PairRecord {
+				const float global[2][4] = {
+					{ 6.0f, 0.0f, sigmaFromShare(fwdShare), 1.0f },
+					{ -6.0f, 0.0f, sigmaFromShare(bwdShare), 1.0f }
+				};
+				const float second[2][4] = {};
+				const VpMotion::P2PairRecord rec = VpMotion::MakeP2PairRecord(kSeq - 1u, kSeq, 1u, global, second, true, false);
+				VpSkeleton::OwnerFill f;
+				f.renderThreadOnly = false;
+				f.fill = [rec](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
+					if (req.seq != kSeq) return false;
+					uint8_t buf[VpMotion::kP2PairRecordBytes]{};
+					const size_t n = VpMotion::EncodeP2PairRecord(rec, buf, sizeof(buf));
+					if (n != VpMotion::kP2PairRecordBytes) return false;
+					out.bytes.assign(buf, buf + n);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP2VectorPair, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP2VectorPair), std::move(f)) == Reg::Registered);
+				return rec;
+			};
+
+			// Case A: Real cut with usable global vectors (sigma = 0.675 < 0.90, [3] = 1.0f) but low cell agreement (share = 0.25 < 0.50).
+			{
+				VpSkeleton::SkeletonMemo memoLowShare;
+				const VpMotion::P2PairRecord rec = registerFlowGlobalP2(memoLowShare, 0.25f, 0.25f);
+				Assert::IsTrue(OpticalFlowTrust::GlobalUsable(rec.global[0]) && OpticalFlowTrust::GlobalUsable(rec.global[1]),
+					L"precondition: both global[0] and global[1] pass GlobalUsable (sigma=0.675 < 0.90, [3]=1.0f)");
+
+				// Same-input negative control: pre-fix bug read rec.global[0][3] == 1.0 >= 0.50 and falsely vetoed the real cut!
+				const double brokenBinaryTrust = static_cast<double>(rec.global[0][3]);
+				Assert::IsTrue(brokenBinaryTrust >= VpUnit::CutFadeJudge::kVectorVetoMinTrust,
+					L"negative control: naive rec.global[0][3] reads binary validity 1.0 >= 0.50 on a 25%-agreement cut");
+
+				const SceneRestartAnswer ans = SceneRestartOf(kSeq, cutReader, false, true, nullptr, &memoLowShare);
+				Assert::IsTrue(ans.fromRecord && ans.restart && !ans.vectorVetoed,
+					L"S2-H1: 25% cell-agreement share (< 0.50) must NOT veto a real scene cut despite [3] == 1.0f");
+				Assert::AreEqual(0.0f, ans.historyKeep, 1e-6f);
+			}
+
+			// Case B: Asymmetric agreement (fwd share = 0.65 >= 0.50, bwd share = 0.30 < 0.50) -> min(fwd, bwd) = 0.30 < 0.50 fails closed.
+			{
+				VpSkeleton::SkeletonMemo memoAsym;
+				const VpMotion::P2PairRecord rec = registerFlowGlobalP2(memoAsym, 0.65f, 0.30f);
+				Assert::IsTrue(OpticalFlowTrust::GlobalUsable(rec.global[0]) && OpticalFlowTrust::GlobalUsable(rec.global[1]));
+				const SceneRestartAnswer ans = SceneRestartOf(kSeq, cutReader, false, true, nullptr, &memoAsym);
+				Assert::IsTrue(ans.restart && !ans.vectorVetoed,
+					L"S2-H1: asymmetric P2 share (bwd 0.30 < 0.50) must NOT veto scene cut");
+			}
+
+			// Case C: High bidirectional cell agreement (fwd = 0.60, bwd = 0.58 -> both >= 0.50) vetoes pan cut cleanly.
+			{
+				VpSkeleton::SkeletonMemo memoHighShare;
+				registerFlowGlobalP2(memoHighShare, 0.60f, 0.58f);
+				const SceneRestartAnswer ans = SceneRestartOf(kSeq, cutReader, false, true, nullptr, &memoHighShare);
+				Assert::IsTrue(ans.fromRecord && !ans.restart && ans.vectorVetoed,
+					L"S2-H1: bidirectional cell-agreement share >= 0.50 vetoes pan cut");
+				Assert::AreEqual(1.0f, ans.historyKeep, 1e-6f);
 			}
 		}
 	};

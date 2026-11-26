@@ -24,13 +24,23 @@
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
 #include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
+#include <VP-V/core/FallbackStatus.h>
+#include <VP-V/core/PipelineSlots.h>
+#include <VP-V/modules/control/skeleton/SkeletonSettings.h>
+#include <VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h>
+#include <VP-V/modules/input/signal/HdrInferenceChoice.h>
+#include <ConfigFile.h>
+#include <ShortcutDefaults.h>
+#include <vprenderer/QueueTimingPolicy.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
+#include <windows.h>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -524,6 +534,123 @@ namespace VideoProcessorTest
 			const FallbackCatalog::Decision released = monitor.GeometryDetectFallback();
 			Assert::IsFalse(released.engaged, L"released in the Original pathway");
 			Assert::IsTrue(released.reason.empty());
+		}
+
+		// W23-C2-S1-H2 / S1-H3 / S5-H1 / S5-M2 (bff541a87 + 24d188643):
+		// (1) Legacy section precedence [vpv] -> [vprenderer] -> [vpvr.display] -> [display] agrees across
+		//     OriginalPathwayForConfig, HdrInferenceChoice::FromConfig, and Skeleton::Parse (with explicit [vpv] off
+		//     overriding legacy [vpvr.display] / [display] on).
+		// (2) QueueDelayHold cleanup on live VP-V -> Original switch: passing budgetMs = 0 when original == true
+		//     clears an active HoldDecision and clears a "too short" delay-budget fallback note, whereas the pre-fix
+		//     early-return negative control left stale m_queueHold.active == true and stale "delay budget" engaged.
+		// (3) PipelineSlots / FallbackStatus cleanup on live VP-V -> Original (and RepairDeband off): all gated VP-V
+		//     fallback ids ("delay budget", "look-ahead", "dither need", "product.debander", "product.detail_pulse",
+		//     "product.texture_restore", "queue analysis floor") are released cleanly.
+		TEST_METHOD(LiveSwitchToOriginalClearsQueueDelayHoldGatedFallbacksAndHonoursLegacySectionPrecedence)
+		{
+			// 1. Legacy section precedence [vpv] -> [vprenderer] -> [vpvr.display] -> [display].
+			char tempDir[MAX_PATH] = {}, tempFile[MAX_PATH] = {};
+			Assert::IsTrue(GetTempPathA(MAX_PATH, tempDir) != 0);
+			Assert::IsTrue(GetTempFileNameA(tempDir, "opg", 0, tempFile) != 0);
+			struct TempGuard { std::string p; ~TempGuard() { DeleteFileA(p.c_str()); } } tg{ tempFile };
+
+			auto loadCfg = [&](const std::string& text, ConfigFile& out) {
+				{
+					std::ofstream f(tg.p, std::ios::trunc | std::ios::binary);
+					f << text;
+				}
+				Assert::IsTrue(out.Load(tg.p));
+			};
+
+			for (const char* sec : { "vpv", "vprenderer", "vpvr.display", "display" })
+			{
+				ConfigFile cfg;
+				loadCfg(std::string("[") + sec + "]\npipeline_original_pathway: on\n", cfg);
+				const bool shortcutOrig = OriginalPathwayForConfig(
+					[&cfg](const char* s, const char* k, std::string& v) { return cfg.TryGetString(s, k, v); });
+				const HdrInferenceChoice::Resolved hdr = HdrInferenceChoice::FromConfig(cfg);
+				const Vpv::Skeleton::Settings sk = Vpv::Skeleton::Parse(cfg);
+				Assert::IsTrue(shortcutOrig && hdr.originalPathway && sk.originalPathway,
+					L"S5-M2: all pathway readers honour [vpv]/[vprenderer]/[vpvr.display]/[display] = on");
+				Assert::IsTrue(hdr.effective == HdrInferenceChoice::Mode::Original,
+					L"S5-H1/S5-M2: Original pathway forces HdrInferenceChoice::Mode::Original");
+			}
+			// Precedence negative control: explicit [vpv] off overrides [vpvr.display] on and [display] on!
+			{
+				ConfigFile cfg;
+				loadCfg("[vpv]\npipeline_original_pathway: off\n[vpvr.display]\npipeline_original_pathway: on\n[display]\npipeline_original_pathway: on\n", cfg);
+				const bool shortcutOrig = OriginalPathwayForConfig(
+					[&cfg](const char* s, const char* k, std::string& v) { return cfg.TryGetString(s, k, v); });
+				const HdrInferenceChoice::Resolved hdr = HdrInferenceChoice::FromConfig(cfg);
+				const Vpv::Skeleton::Settings sk = Vpv::Skeleton::Parse(cfg);
+				Assert::IsFalse(shortcutOrig || hdr.originalPathway || sk.originalPathway,
+					L"negative control: [vpv] off must override legacy [vpvr.display]/[display] on");
+			}
+
+			// 2. S1-H2 QueueDelayHold live VP-V -> Original cleanup vs pre-fix early-return negative control.
+			{
+				VpQueueTiming::VpFixedBudgetPolicy vpPolicy;
+				QueueTimingPolicy::HoldContext vpHoldCtx{};
+				vpHoldCtx.budgetMs = 267;
+				vpHoldCtx.sourceRateHz = 23.976;
+				vpHoldCtx.signalRateHz = 60.0;
+				vpHoldCtx.displayHz = 60.0;
+				vpHoldCtx.queueCapacity = 16;
+				const QueueTimingPolicy::HoldPlan activeHold = vpPolicy.PlanHold(vpHoldCtx);
+				Assert::IsTrue(activeHold.active && activeHold.targetFrames >= 4,
+					L"precondition: VP-V 267 ms budget activates QueueDelayHold");
+
+				// Too-short VP-V budget (80 ms at 23.976 fps) produces a non-empty "delay budget" fallback note.
+				QueueTimingPolicy::HoldContext tightCtx = vpHoldCtx;
+				tightCtx.budgetMs = 80;
+				const QueueTimingPolicy::HoldPlan tightHold = vpPolicy.PlanHold(tightCtx);
+				Assert::IsFalse(tightHold.note.empty(),
+					L"precondition: 80 ms budget at 23.976 fps populates non-empty delay budget fallback note");
+
+				// Pre-fix negative control: returning early on Original left activeHold.active == true and tightHold.note non-empty!
+				Assert::IsTrue(activeHold.active && !tightHold.note.empty(),
+					L"negative control: early return on Original leaked active QueueDelayHold and delay budget fallback");
+
+				// S1-H2 fix: on Original (`context.budgetMs = (m_impl && !original) ? budgetMs : 0`), PlanHold deactivates hold & clears note!
+				QueueTimingPolicy::HoldContext origHoldCtx = vpHoldCtx;
+				origHoldCtx.budgetMs = 0;
+				const QueueTimingPolicy::HoldPlan clearedHold = vpPolicy.PlanHold(origHoldCtx);
+				Assert::IsFalse(clearedHold.active, L"S1-H2: Original pathway budgetMs=0 clears m_queueHold.active");
+				Assert::IsTrue(clearedHold.note.empty(), L"S1-H2: Original pathway budgetMs=0 clears delay budget fallback note");
+			}
+
+			// 3. S1-H3 + 24d188643 LOW-2: PipelineSlots + FallbackStatus release of gated VP-V fallbacks on Original / slot-off.
+			{
+				FallbackStatus::Registry fallbacks;
+				const char* const gatedIds[] = {
+					"timeline", "calibration LUT BTB/WTW", "delay budget", "look-ahead",
+					"motion look-ahead worker", "occlusion mask", "calibration LUT stage",
+					"calibration LUT slope", "temporal entrance", "libplacebo", "picture precision",
+					"product.debander", "product.detail_pulse", "product.texture_restore",
+					"queue analysis floor", "dither need"
+				};
+				for (const char* id : gatedIds)
+					fallbacks.Engage(id, "synthetic VP-V fallback before switch");
+				Assert::IsTrue(fallbacks.Heading().find("Fallbacks engaged: none") == std::string::npos,
+					L"negative control: VP-V fallbacks engaged before Original switch");
+
+				// Disabling RepairDeband via pipeline_slots_off releases product.debander (24d188643 LOW-2).
+				PipelineSlots::Registry slots;
+				slots.SetEnabled(PipelineSlots::Id::RepairDeband, false);
+				if (!slots.Runs(PipelineSlots::Id::RepairDeband))
+					fallbacks.Release("product.debander");
+				Assert::IsFalse(fallbacks.Engaged("product.debander"),
+					L"24d188643 LOW-2: disabling repair.deband releases product.debander fallback");
+				Assert::IsTrue(fallbacks.Engaged("delay budget"), L"other VP-V fallbacks remain while still on VP-V");
+
+				// Entering Original releases all gated VP-V fallbacks cleanly (S1-H3).
+				slots.ApplyOriginalPathway();
+				Assert::IsTrue(slots.OriginalPathway());
+				for (const char* id : gatedIds)
+					fallbacks.Release(id);
+				Assert::AreEqual(std::string("Fallbacks engaged: none"), fallbacks.Heading(),
+					L"S1-H3: Original pathway releases all gated VP-V fallbacks cleanly");
+			}
 		}
 	};
 }

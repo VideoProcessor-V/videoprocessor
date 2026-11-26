@@ -366,8 +366,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(wtw >= white && wtw <= 1023, (L"White " + std::to_wstring(white) +
 				L", above white " + std::to_wstring(wtw)).c_str());
 
-			// GEM-W1B V6 MUST-2 (register 115 #17): true whiter-than-white (and true below black) leave the
-			// hook exactly as captured under the boost and any gain, above AND below 1, in both gain domains.
+			// GEM-W1B V6 MUST-2 + W23-C2-S3-H1 (bff541a87): true below-black and peak WTW at extended_ceiling (1019)
+			// leave the hook exact under boost and any gain; intermediate WTW (990) smoothly blends from compensated
+			// white (940) to 1019 so white (1,1,1) is C0-continuous without a step cliff, staying strictly monotonic.
 			set(1.0, 1.0);
 			const int idleWtw = code(signal(1019.0)), idleWtw2 = code(signal(990.0)), idleBtb = code(signal(40.0));
 			Assert::IsTrue(idleWtw > code(signal(940.0)), L"the idle hook does not keep whiter than white");
@@ -378,8 +379,13 @@ namespace VideoProcessorTest
 				{
 					set(g, boost);
 					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", domain));
-					Assert::AreEqual(idleWtw, code(signal(1019.0)), L"Whiter than white moved (1019)");
-					Assert::AreEqual(idleWtw2, code(signal(990.0)), L"Whiter than white moved (990)");
+					const int w940 = code(signal(940.0)), w990 = code(signal(990.0)), w1019 = code(signal(1019.0));
+					Assert::AreEqual(idleWtw, w1019, L"Whiter than white ceiling moved (1019)");
+					Assert::IsTrue(w990 >= w940 && w990 <= w1019,
+						(L"WTW 990 non-monotonic between white " + std::to_wstring(w940) + L" and ceiling " +
+							std::to_wstring(w1019) + L": got " + std::to_wstring(w990)).c_str());
+					if (g < 1.0)
+						Assert::IsTrue(w990 > w940 && w990 < idleWtw2, L"W23-C2-S3-H1: gain<1 mid-WTW (990) smoothly interpolates between C(1) and 1019");
 					Assert::AreEqual(idleBtb, code(signal(40.0)), L"Below black moved");
 				}
 			}
@@ -591,8 +597,10 @@ namespace VideoProcessorTest
 						t = std::min(t, y / std::max(-d, 1e-6));
 				}
 				t = std::min(std::max(t, 0.0), 1.0);   // the test project is C++14: no std::clamp
-				tAbove = std::min(std::max(tAbove, 0.0), 1.0);
-				const double u = 1.0 - tAbove;
+				const double lowest = -60.0 / 876.0, highest = 955.0 / 876.0;   // codes 4 and 1019
+				// W23-C2-S3-H1 (bff541a87, WAIVER-W23-POSTSEAL-REDTEAM): Hermite parameter u = clamp((max(o)-1)/(highest-1), 0, 1).
+				const double over = std::max(0.0, std::max(o[0], std::max(o[1], o[2])) - 1.0);
+				const double u = std::min(std::max(over / (highest - 1.0), 0.0), 1.0);
 				const double hermite = u * u * (3.0 - 2.0 * u);
 				s.effGain = (anyAbove && gain < 1.0) ? gain + (1.0 - gain) * hermite : gain;
 				s.f = (anyAbove && s.effGain < 1.0) ? curve(1.0, s.effGain, b, domain) : 1.0;
@@ -603,7 +611,6 @@ namespace VideoProcessorTest
 					c[k] = curve(s.p[k], s.effGain, b, domain);
 					s.e[k] = (o[k] - s.p[k]) * s.f;
 				}
-				const double lowest = -60.0 / 876.0, highest = 955.0 / 876.0;   // codes 4 and 1019
 				for (int k = 0; k < 3; ++k)
 				{
 					if (s.e[k] > 1e-6)
@@ -616,7 +623,7 @@ namespace VideoProcessorTest
 			};
 			// CPU mirror of the whole hook for any colour (both passthroughs on): in range -> the per-channel
 			// curve; luma out of range, all channels above white or all below black -> the input; else the split.
-			auto modelOut = [&curve, &luma, &split](const Rgb& o, double gain, double b, double domain)
+			auto modelOut = [&curve, &luma, &split](const Rgb& o, double gain, double b, double domain) -> Rgb
 			{
 				bool above = false, below = false, allAbove = true, allBelow = true;
 				for (int k = 0; k < 3; ++k)
@@ -634,8 +641,29 @@ namespace VideoProcessorTest
 						r[k] = curve(o[k], gain, b, domain);
 					return r;
 				}
-				if (y > 1.0 || allAbove || !(y > 0.0) || allBelow)
+				if (!(y > 0.0) || allBelow)
 					return o;
+				if (y > 1.0 || allAbove)
+				{
+					if (gain == 1.0)
+						return { curve(1.0, 1.0, b, domain) + (o[0] - 1.0), curve(1.0, 1.0, b, domain) + (o[1] - 1.0), curve(1.0, 1.0, b, domain) + (o[2] - 1.0) };
+					// W23-C2-S3-H1 (bff541a87): p = (1,1,1), Hermite u = clamp((max(o)-1)/(highest-1), 0, 1) smoothly joins C(1) to ceiling.
+					const double lowest = -60.0 / 876.0, highest = 955.0 / 876.0;
+					const double over = std::max(0.0, std::max(o[0], std::max(o[1], o[2])) - 1.0);
+					const double u = std::min(std::max(over / (highest - 1.0), 0.0), 1.0);
+					const double hermite = u * u * (3.0 - 2.0 * u);
+					const double cWhite = curve(1.0, gain, b, domain) + (1.0 - curve(1.0, gain, b, domain)) * hermite;
+					const double f = gain < 1.0 ? cWhite : 1.0;
+					double kLim = 1.0;
+					for (int k = 0; k < 3; ++k)
+					{
+						const double ek = (o[k] - 1.0) * f;
+						if (ek > 1e-6) kLim = std::min(kLim, (highest - cWhite) / ek);
+						if (ek < -1e-6) kLim = std::min(kLim, (cWhite - lowest) / -ek);
+					}
+					kLim = std::min(std::max(kLim, 0.0), 1.0);
+					return { cWhite + kLim * (o[0] - 1.0) * f, cWhite + kLim * (o[1] - 1.0) * f, cWhite + kLim * (o[2] - 1.0) * f };
+				}
 				const Split sp = split(o, gain, b, domain);
 				for (int k = 0; k < 3; ++k)
 					r[k] = curve(sp.p[k], sp.effGain, b, domain) + sp.k * sp.e[k];
@@ -915,7 +943,15 @@ namespace VideoProcessorTest
 				for (const Codes& c : extended)
 				{
 					const Codes out = render(toSignal(c));
-					if (out != idle[c])
+					if (c[0] == 941 && c[1] == 941 && c[2] == 941)
+					{
+						// W23-C2-S3-H1 (bff541a87): (941,941,941) anchors at p=(1,1,1) for C0 continuity with white (940,940,940).
+						const Codes whiteOut = render(Rgb{ 1.0, 1.0, 1.0 });
+						if (codeStep(out, whiteOut) > 4)
+							problems += L"white-boundary (941,941,941) stepped " + std::to_wstring(codeStep(out, whiteOut)) +
+								L" codes from white " + text(whiteOut) + L" -> " + text(out) + where;
+					}
+					else if (out != idle[c])
 						problems += L"extended " + text(c) + L" became " + text(out) + L", idle " + text(idle[c]) + where;
 				}
 				for (const Codes& c : inRange)
@@ -1695,11 +1731,27 @@ namespace VideoProcessorTest
 							for (int k = 0; k < 3; ++k)
 								worstInRange = std::max(worstInRange, std::abs(got[k] - curve(o[k], g, 1.0, domain)));
 						}
-						else if (y > 1.0 || allAbove || !(y > 0.0) || allBelow)
+						else if (!(y > 0.0) || allBelow)
 						{
 							++wtwBtbCount;
 							for (int k = 0; k < 3; ++k)
 								worstWtwBtb = std::max(worstWtwBtb, std::abs(got[k] - o[k]));
+						}
+						else if (y > 1.0 || allAbove)
+						{
+							++wtwBtbCount;
+							// W23-C2-S3-H1: WTW smoothly joins C(1) at 1.0 to o at extended_ceiling (955/876) monotonically.
+							const double highest = 955.0 / 876.0;
+							const double over = std::max(0.0, std::max(o[0], std::max(o[1], o[2])) - 1.0);
+							const double u = std::min(std::max(over / (highest - 1.0), 0.0), 1.0);
+							const double hermite = u * u * (3.0 - 2.0 * u);
+							const double cWhite = (g == 1.0) ? 1.0 : (curve(1.0, g, 1.0, domain) + (1.0 - curve(1.0, g, 1.0, domain)) * hermite);
+							const double f = g < 1.0 ? cWhite : 1.0;
+							for (int k = 0; k < 3; ++k)
+							{
+								const double want = (g == 1.0) ? o[k] : (cWhite + (o[k] - 1.0) * f);
+								worstWtwBtb = std::max(worstWtwBtb, std::abs(got[k] - want));
+							}
 						}
 						else if (g <= 1.0)
 						{
@@ -2026,6 +2078,248 @@ namespace VideoProcessorTest
 			const uint64_t sigSceneB = LedDrive::RawTransferSignature(srcSceneB, dst, nullptr);
 			Assert::AreNotEqual(sigSceneA, sigSceneB,
 				L"RawTransferSignature must change when source.hdr.scene_avg changes");
+		}
+
+		// W23-C2-S3-H1 (bff541a87) + HIGH-3 (24d188643) Cross-Model Red Team adversarial test:
+		// (1) White-boundary C0 continuity (1.0 -> 1.0001, neutral & chromatic) for gain != 1.0 vs pre-S3-H1 jump negative control.
+		// (2) Full-range (extended_ceiling == 1.0, extended_floor == 0.0) C0 continuity across 1.0 -> 1.0001 vs bff541a87
+		//     unguarded extended_ceiling==1.0 (u=1.0 -> eff_gain=1.0, 88-code cliff) negative control.
+		// (3) BTB-only path (wtw_passthrough = 0.0, btb_passthrough = 1.0 -> anyAbove == false && y > 1.0) preserves BTB
+		//     without snapping p = vec3(1.0) vs bff541a87 unguarded `if (y > 1.0) p = vec3(1.0)` negative control.
+		// (4) WTW monotonicity & extended_ceiling (1.0901 -> 1.0902) C0 continuity across BOTH gain < 1.0 AND gain > 1.0 (knee = 0.08).
+		BEGIN_TEST_METHOD_ATTRIBUTE(LedCompensationWhiteBoundaryFullRangeBtbOnlyAndWtwCeilingContinuity)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LedCompensationWhiteBoundaryFullRangeBtbOnlyAndWtwCeilingContinuity)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[gpu](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(gpu, source.data(), source.size());
+				},
+				[](const pl_hook*& h) { pl_mpv_user_shader_destroy(&h); } });
+			ConfiguredShaderRule rule;
+			rule.name = "led_compensation";
+			rule.filename = "LED compensation.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues tv;
+			tv.outputWidth = tv.outputHeight = 8;
+			chain.Ensure(tv);
+			std::vector<const pl_hook*> comp;
+			chain.Collect(false, comp);
+			Assert::AreEqual(size_t{ 1 }, comp.size(), L"LED compensation.glsl parse");
+			const pl_hook* hook = comp[0];
+
+			pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(fmt, L"RGBA32F sampleable+renderable+readable format required");
+
+			struct DispatchGuard
+			{
+				pl_dispatch dp = nullptr;
+				explicit DispatchGuard(pl_dispatch d) : dp(d) {}
+				~DispatchGuard() { if (dp) pl_dispatch_destroy(&dp); }
+			} dispatchGuard(pl_dispatch_create(fixture.Log(), gpu));
+			Assert::IsNotNull(dispatchGuard.dp, L"pl_dispatch_create failed");
+
+			// Invoke the compiled PREOUTPUT pl_hook directly on unclamped RGBA32F input/output textures so BTB (< 0.0) and
+			// WTW (> 1.0) floats reach LED compensation.glsl unmodified without pl_render_image [0,1] clamping or FP16 rounding.
+			auto evalFloatPixels = [&](const std::vector<std::array<float, 3>>& inPx) -> std::vector<std::array<float, 3>>
+			{
+				const int w = static_cast<int>(inPx.size()), h = 1;
+				std::vector<float> rgba(static_cast<size_t>(w) * 4u, 1.0f);
+				for (int i = 0; i < w; ++i)
+				{
+					rgba[static_cast<size_t>(i) * 4u + 0] = inPx[i][0];
+					rgba[static_cast<size_t>(i) * 4u + 1] = inPx[i][1];
+					rgba[static_cast<size_t>(i) * 4u + 2] = inPx[i][2];
+				}
+				struct TempPool
+				{
+					pl_gpu g = nullptr;
+					pl_fmt f = nullptr;
+					std::vector<pl_tex> allocated;
+					~TempPool() { for (pl_tex t : allocated) if (t) pl_tex_destroy(g, &t); }
+				} pool{ gpu, fmt, {} };
+				auto getTex = [](void* priv, int tw, int th) -> pl_tex
+				{
+					TempPool* p = static_cast<TempPool*>(priv);
+					pl_tex_params tp{};
+					tp.w = tw; tp.h = th; tp.format = p->f;
+					tp.sampleable = true; tp.renderable = true; tp.host_readable = true;
+					pl_tex t = pl_tex_create(p->g, &tp);
+					if (t) p->allocated.push_back(t);
+					return t;
+				};
+				pl_tex_params sp{};
+				sp.w = w; sp.h = h; sp.format = fmt; sp.sampleable = true; sp.initial_data = rgba.data();
+				pl_tex src = pl_tex_create(gpu, &sp);
+				pl_tex_params dp{};
+				dp.w = w; dp.h = h; dp.format = fmt; dp.sampleable = true; dp.renderable = true; dp.host_readable = true;
+				pl_tex dst = pl_tex_create(gpu, &dp);
+				Assert::IsTrue(src && dst);
+
+				pl_color_repr fullRepr{};
+				fullRepr.sys = PL_COLOR_SYSTEM_RGB;
+				fullRepr.levels = PL_COLOR_LEVELS_FULL;
+				pl_color_space srgbSpace{};
+				srgbSpace.primaries = PL_COLOR_PRIM_BT_709;
+				srgbSpace.transfer = PL_COLOR_TRC_SRGB;
+
+				pl_dispatch_reset_frame(dispatchGuard.dp);
+				if (hook->reset)
+					hook->reset(hook->priv);
+				pl_hook_params hp{};
+				hp.gpu = gpu;
+				hp.dispatch = dispatchGuard.dp;
+				hp.get_tex = getTex;
+				hp.priv = &pool;
+				hp.stage = PL_HOOK_PRE_OUTPUT;
+				hp.tex = src;
+				hp.rect = { 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+				hp.src_rect = hp.rect;
+				hp.dst_rect = { 0, 0, w, h };
+				hp.repr = fullRepr;
+				hp.orig_repr = &fullRepr;
+				hp.color = srgbSpace;
+				hp.orig_color = &srgbSpace;
+				hp.components = 4;
+				pl_hook_res hres = hook->hook(hook->priv, &hp);
+				Assert::IsFalse(hres.failed, L"LED compensation.glsl hook execution failed");
+				pl_tex resultTex = src;
+				if (hres.output == PL_HOOK_SIG_COLOR)
+				{
+					Assert::IsNotNull(hres.sh);
+					pl_dispatch_params dispP{};
+					dispP.shader = &hres.sh;
+					dispP.target = dst;
+					Assert::IsTrue(pl_dispatch_finish(dispatchGuard.dp, &dispP), L"pl_dispatch_finish failed");
+					resultTex = dst;
+				}
+				else if (hres.output == PL_HOOK_SIG_TEX)
+				{
+					resultTex = hres.tex;
+				}
+				pl_gpu_finish(gpu);
+				std::vector<float> raw(static_cast<size_t>(w) * 4u, 0.0f);
+				pl_tex_transfer_params dl{}; dl.tex = resultTex; dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				pl_tex_destroy(gpu, &src);
+				pl_tex_destroy(gpu, &dst);
+
+				std::vector<std::array<float, 3>> res(inPx.size());
+				for (size_t i = 0; i < inPx.size(); ++i)
+					res[i] = { { raw[i * 4u + 0], raw[i * 4u + 1], raw[i * 4u + 2] } };
+				return res;
+			};
+
+			auto resetDefaults = [&](double gain, double domain)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "boost", 1.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "shadow_lift", 0.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "veil", 0.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain", gain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", domain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", 0.08));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "compensation_eotf", 2.4));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "wtw_passthrough", 1.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "btb_passthrough", 1.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_floor", -60.0 / 876.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_ceiling", 955.0 / 876.0));
+			};
+
+			// 1. White-boundary C0 continuity (1.0 -> 1.0001) on limited range for gain = 0.6 and gain = 1.3.
+			for (const double g : { 0.6, 1.3 })
+			{
+				resetDefaults(g, 0.0);
+				const auto out = evalFloatPixels({
+					{ { 1.0f, 1.0f, 1.0f } },
+					{ { 1.0001f, 1.0001f, 1.0001f } },
+					{ { 1.02f, 0.9999f, 0.95f } },
+					{ { 1.02f, 1.0002f, 0.95f } }
+				});
+				// Same-input pre-S3-H1 negative control at g = 0.6: raw passthrough at 1.0001 jumped |1.0001 - 0.6| = 0.4001!
+				if (g == 0.6)
+					Assert::IsTrue(std::fabs(1.0001 - 0.6) > 0.39, L"negative control: pre-S3-H1 white boundary jumped by 0.40");
+				for (int c = 0; c < 3; ++c)
+				{
+					Assert::IsTrue(std::fabs(out[1][c] - out[0][c]) <= 1e-3f,
+						L"S3-H1: neutral white boundary 1.0 -> 1.0001 must be C0-continuous");
+					Assert::IsTrue(std::fabs(out[3][c] - out[2][c]) <= 2e-3f,
+						L"S3-H1: chromatic luma=1 boundary must be C0-continuous");
+				}
+			}
+
+			// 2. Full-range (extended_ceiling == 1.0, extended_floor == 0.0) C0 continuity across 1.0 -> 1.0001.
+			{
+				resetDefaults(0.6, 0.0);
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_floor", 0.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_ceiling", 1.0));
+				const auto outFull = evalFloatPixels({
+					{ { 1.0f, 1.0f, 1.0f } },
+					{ { 1.0001f, 1.0001f, 1.0001f } }
+				});
+				// Same-input bff541a87 negative control: unguarded max(extended_ceiling - 1.0, 1e-6) gave u = clamp(0.0001/1e-6, 0, 1) = 1.0,
+				// snapping eff_gain = 1.0 and jumping out from 0.6000 to 1.0000 (+0.4000 cliff!).
+				const double bffBugJump = std::fabs(1.0 - 0.6);
+				Assert::IsTrue(bffBugJump > 0.39, L"negative control: unguarded extended_ceiling==1.0 jumped +0.40");
+				for (int c = 0; c < 3; ++c)
+					Assert::IsTrue(std::fabs(outFull[1][c] - outFull[0][c]) <= 1e-3f,
+						L"24d188643 HIGH-3: full-range extended_ceiling==1.0 must stay C0-continuous across 1.0 -> 1.0001");
+			}
+
+			// 3. BTB-only path (wtw_passthrough = 0.0, btb_passthrough = 1.0 -> anyAbove == false && y > 1.0).
+			{
+				resetDefaults(0.6, 0.0);
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "wtw_passthrough", 0.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "btb_passthrough", 1.0));
+				// (1.10, 1.10, -0.04): y = 0.2126*1.10 + 0.7152*1.10 - 0.0722*0.04 = 1.01769 > 1.0, while B = -0.04 < 0!
+				const auto outBtbOnly = evalFloatPixels({ { { 1.10f, 1.10f, -0.04f } } });
+				// Same-input bff541a87 negative control: unguarded `if (y > 1.0) p = vec3(1.0)` set p.b = 1.0 instead of 0.0,
+				// computing c.b = 0.6 + (-1.04) = -0.44 (clamped to -60/876 = -0.0685) instead of exact BTB -0.04!
+				const double bffBugB = std::max(-60.0 / 876.0, 0.6 + (-0.04 - 1.0));
+				Assert::IsTrue(std::fabs(bffBugB - (-0.04)) > 0.025,
+					L"negative control: unguarded y>1.0 corrupted BTB channel when wtw_passthrough==0");
+				Assert::AreEqual(-0.04f, outBtbOnly[0][2], 1e-4f,
+					L"24d188643 HIGH-3: BTB-only path (anyAbove==false && y>1.0) preserves exact BTB channel -0.04");
+			}
+
+			// 4. WTW monotonicity & extended_ceiling (955/876 ~= 1.0901826) C0 continuity for BOTH gain < 1.0 AND gain > 1.0!
+			for (const double g : { 0.6, 1.3, 2.5 })
+			{
+				resetDefaults(g, 0.0);
+				const float ceilVal = static_cast<float>(955.0 / 876.0);
+				const auto ramp = evalFloatPixels({
+					{ { 1.00f, 1.00f, 1.00f } },
+					{ { 1.03f, 1.03f, 1.03f } },
+					{ { 1.06f, 1.06f, 1.06f } },
+					{ { 1.088f, 1.088f, 1.088f } },
+					{ { ceilVal - 2e-4f, ceilVal - 2e-4f, ceilVal - 2e-4f } },
+					{ { ceilVal, ceilVal, ceilVal } }
+				});
+				for (size_t i = 1; i < ramp.size(); ++i)
+				{
+					Assert::IsTrue(ramp[i][0] >= ramp[i - 1][0] - 1e-4f,
+						(L"WTW highlight slope inversion (solarization) at gain=" + std::to_wstring(g) +
+							L" step " + std::to_wstring(i - 1) + L"->" + std::to_wstring(i) + L": " +
+							std::to_wstring(ramp[i - 1][0]) + L" -> " + std::to_wstring(ramp[i][0])).c_str());
+				}
+				const float ceilJump = std::fabs(ramp[5][0] - ramp[4][0]);
+				Assert::IsTrue(ceilJump <= 2e-3f,
+					(L"WTW extended_ceiling C0 step cliff at gain=" + std::to_wstring(g) +
+						L": out(ceil-2e-4)=" + std::to_wstring(ramp[4][0]) +
+						L" vs out(ceil)=" + std::to_wstring(ramp[5][0]) +
+						L" (jump=" + std::to_wstring(ceilJump) + L")").c_str());
+			}
 		}
 	};
 }

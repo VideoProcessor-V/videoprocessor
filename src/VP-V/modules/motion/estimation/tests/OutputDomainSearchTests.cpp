@@ -34,13 +34,14 @@ namespace VideoProcessorTest
 {
 	namespace
 	{
-		// FNV-1a 64 of `git show b5ae6eda5:"shaders/Temporal sigma-delta.glsl"` with the 9db725b55 quantiser hunk
-		// (`git diff dbbef8c07 9db725b55`), the W23-A3 S2-H3 NaN/Inf-safe tag & motion-gate hunk (72d94a734),
-		// the W23-A3 S2-H4 exact-code dither-noise zeroing hunk (4619d3552), the W23-A3 AC#2 / GEM-026
-		// near-black BTB clamp hunk (1519996c2), and the W23-Audit-Fix1 POD1-H4 //!TYPE DYNAMIC float hunk
-		// (+176 bytes across 22 params) applied (LF line ends, 48125 bytes; re-pinned under WAIVER-AUDIT-DYNAMIC-SHADERS).
-		constexpr uint64_t kOriginalFnv1a64 = 0x37a0fcadff5c59a0ull;
-		constexpr size_t kOriginalBytes = 48125;
+		// FNV-1a 64 of `git show b5ae6eda5:"shaders/Temporal sigma-delta.glsl"` with the 9db725b55 quantiser hunk,
+		// the W23-A3 S2-H3 NaN/Inf-safe tag & motion-gate hunk (72d94a734), the W23-A3 S2-H4 exact-code dither-noise
+		// zeroing hunk (4619d3552), the W23-A3 AC#2 / GEM-026 near-black BTB clamp hunk (1519996c2), the W23-Audit-Fix1
+		// POD1-H4 //!TYPE DYNAMIC float hunk (+176 bytes across 22 params), the POD2-M3 tsd_nonfinite bit-check hunk
+		// (432818710), and the W23-C2-S3-L1 OutputDomainSearchGlsl.h IEEE-754 floatBitsToUint NaN/Inf check hunk (bff541a87)
+		// applied (LF line ends, 48800 bytes; re-pinned under WAIVER-W23-POSTSEAL-REDTEAM).
+		constexpr uint64_t kOriginalFnv1a64 = 0xf38ce8401126ff37ull;
+		constexpr size_t kOriginalBytes = 48800;
 
 		uint64_t Fnv1a64(const std::string& text)
 		{
@@ -205,6 +206,36 @@ namespace VideoProcessorTest
 				L"POD2-L11: origFinite must not rely on FXC-fragile isnan/isinf");
 			Assert::IsTrue(finLine.find("greaterThanEqual") != std::string::npos && finLine.find("lessThanEqual") != std::string::npos,
 				L"POD2-L11: origFinite must use FXC-safe bounded range comparisons");
+
+			// POD2-M3 + W23-C2-S3-L1 (432818710 + bff541a87): expanded Temporal sigma-delta.glsl (including OutputDomainSearchGlsl.h)
+			// must contain zero bare isnan()/isinf() calls in executable GLSL (ignoring // and /* */ comments) and use IEEE-754
+			// floatBitsToUint exponent-mask checks instead.
+			std::string tsd = ToLf(ReadRepoShader("Temporal sigma-delta.glsl"));
+			std::string expandReason;
+			Assert::IsTrue(CustomHookChain::ExpandVpIncludes(tsd, expandReason) && expandReason.empty());
+			std::string tsdCode;
+			tsdCode.reserve(tsd.size());
+			for (size_t i = 0; i < tsd.size();)
+			{
+				if (i + 1 < tsd.size() && tsd[i] == '/' && tsd[i + 1] == '/')
+				{
+					while (i < tsd.size() && tsd[i] != '\n') ++i;
+				}
+				else if (i + 1 < tsd.size() && tsd[i] == '/' && tsd[i + 1] == '*')
+				{
+					i += 2;
+					while (i + 1 < tsd.size() && !(tsd[i] == '*' && tsd[i + 1] == '/')) ++i;
+					if (i + 1 < tsd.size()) i += 2;
+				}
+				else
+				{
+					tsdCode.push_back(tsd[i++]);
+				}
+			}
+			Assert::IsTrue(tsdCode.find("isnan(") == std::string::npos && tsdCode.find("isinf(") == std::string::npos,
+				L"POD2-M3 + S3-L1: expanded Temporal sigma-delta.glsl must contain zero FXC-fragile isnan()/isinf() calls");
+			Assert::IsTrue(tsdCode.find("0x7f800000u") != std::string::npos,
+				L"POD2-M3 + S3-L1: expanded Temporal sigma-delta.glsl must use IEEE-754 exponent-mask non-finite check");
 		}
 	};
 }

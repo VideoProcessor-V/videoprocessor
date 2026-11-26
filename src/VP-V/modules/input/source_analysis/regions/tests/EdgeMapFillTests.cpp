@@ -879,5 +879,131 @@ namespace VideoProcessorTest
 				rbLag.SetDemand(false);
 			}
 		}
+
+		// W23-CARBON-R2-REG-FIX BLOCKER-1 (24d188643):
+		// (1) VpvGpu::CodeUnit returns 0.0 without crashing when tex == nullptr or tex->params.format == nullptr.
+		// (2) FillEdgeMapDefault checks P13 SourcePlanes::FactsOf and VpvGpu::CodeUnit AFTER req.gpu->Allocate,
+		//     declining cleanly with visible reasons ("edge_map: missing P13 source plane facts" /
+		//     "edge_map: invalid source plane code unit") and ZERO access violation (0xC0000005).
+		TEST_METHOD(FillDeclinesCleanlyOnNullTextureFormatAndMissingP13FactsWithoutCrash)
+		{
+			using namespace VpSkeleton;
+			using Vpv::Capture::SourcePlanes;
+
+			pl_bit_encoding bits10{};
+			bits10.sample_depth = 16;
+			bits10.color_depth = 10;
+			bits10.bit_shift = 6;
+			pl_tex_t nullFmtTex{};
+			nullFmtTex.params.w = 64;
+			nullFmtTex.params.h = 48;
+			nullFmtTex.params.format = nullptr;
+			Assert::AreEqual(0.0, VpvGpu::CodeUnit(nullptr, bits10, 10), 0.0, L"CodeUnit(nullptr) == 0.0");
+			Assert::AreEqual(0.0, VpvGpu::CodeUnit(&nullFmtTex, bits10, 10), 0.0, L"CodeUnit(format == nullptr) == 0.0 without crash");
+
+			// Negative control: same pl_tex_t with a valid UNORM16 format descriptor yields exact positive CodeUnit (64 / 65535).
+			pl_fmt_t validFmt{};
+			validFmt.type = PL_FMT_UNORM;
+			validFmt.num_components = 1;
+			validFmt.component_depth[0] = 16;
+			pl_tex_t validFmtTex = nullFmtTex;
+			validFmtTex.params.format = &validFmt;
+			Assert::AreEqual(64.0 / 65535.0, VpvGpu::CodeUnit(&validFmtTex, bits10, 10), 1e-12,
+				L"negative control: valid UNORM16 format yields exact CodeUnit 64/65535");
+
+			// Dummy allocating device so FillEdgeMapDefault reaches post-Allocate P13 facts & CodeUnit guards.
+			class DummyAllocDevice : public IOwnerGpuDevice
+			{
+			public:
+				int gpuTag = 0;
+				int dispatchTag = 0;
+				pl_tex_t dummyOut{};
+				int allocated = 0;
+				void* OwnerGpu() const override { return const_cast<int*>(&gpuTag); }
+				void* OwnerDispatch() const override { return const_cast<int*>(&dispatchTag); }
+				bool CreateOwnerTexture(const TexShape& shape, GpuMemoHandle& out, std::string&) override
+				{
+					++allocated;
+					dummyOut.params.w = static_cast<int>(shape.w);
+					dummyOut.params.h = static_cast<int>(shape.h);
+					out.resource = &dummyOut;
+					out.width = shape.w;
+					out.height = shape.h;
+					out.format = static_cast<uint32_t>(shape.fmt);
+					out.bytes = ShapeBytes(shape);
+					return true;
+				}
+			};
+
+			const uint64_t reserve = Vpv::Regions::EdgeMapReserveBytes(DimsOf(64, 48));
+			const OwnerFill f = Vpv::Regions::MakeEdgeMapOwnerFill(reserve);
+
+			// Case A: Offered P13 frame with luma.params.format == nullptr allocates output then declines cleanly on CodeUnit <= 0.
+			{
+				int host = 0;
+				pl_frame image{};
+				image.num_planes = 1;
+				image.planes[0].texture = &nullFmtTex;
+				image.planes[0].components = 1;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				image.repr.bits = bits10;
+
+				SkeletonMemo m;
+				m.SetHost(&host);
+				m.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(m.RegisterOwnerFill(kP13SourceRing, AcquireForm::Gpu, SourcePlanes::kUnit, SourcePlanes::MakeOwnerFill())
+					== SkeletonMemo::Registration::Registered);
+				Assert::IsTrue(SourcePlanes::OfferFrame(&host, 11, 1, image));
+
+				DummyAllocDevice allocDev;
+				OwnerGpuContext ctx(&allocDev, reserve);
+				OwnerFillRequest req;
+				req.host = &host;
+				req.id = kEdgeMap;
+				req.seq = 11;
+				req.form = AcquireForm::Gpu;
+				req.gpu = &ctx;
+				OwnerFillOutput out;
+				Assert::IsFalse(f.fill(req, m, out), L"null format must decline cleanly without crashing");
+				Assert::AreEqual(1, allocDev.allocated, L"allocation ran before CodeUnit guard");
+				Assert::AreEqual(std::string("edge_map: invalid source plane code unit"), out.declineReason,
+					L"exact visible decline reason on null format");
+				SourcePlanes::Forget(&host);
+			}
+
+			// Case B: P13 view returned without SourcePlanes::FactsOf (missing P13 facts) declines cleanly after Allocate.
+			{
+				int host = 0;
+				SkeletonMemo m;
+				m.SetHost(&host);
+				m.SetRenderThread(std::this_thread::get_id());
+				OwnerFill customP13;
+				customP13.view = true;
+				customP13.frameScoped = true;
+				customP13.fill = [&validFmtTex](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out) {
+					out.gpu.resource = &validFmtTex;
+					out.gpu.width = 64;
+					out.gpu.height = 48;
+					return true;
+				};
+				Assert::IsTrue(m.RegisterOwnerFill(kP13SourceRing, AcquireForm::Gpu, SourcePlanes::kUnit, std::move(customP13))
+					== SkeletonMemo::Registration::Registered);
+
+				DummyAllocDevice allocDev;
+				OwnerGpuContext ctx(&allocDev, reserve);
+				OwnerFillRequest req;
+				req.host = &host;
+				req.id = kEdgeMap;
+				req.seq = 12;
+				req.form = AcquireForm::Gpu;
+				req.gpu = &ctx;
+				OwnerFillOutput out;
+				Assert::IsFalse(f.fill(req, m, out), L"missing P13 facts must decline cleanly");
+				Assert::AreEqual(1, allocDev.allocated, L"allocation ran before P13 facts guard");
+				Assert::AreEqual(std::string("edge_map: missing P13 source plane facts"), out.declineReason,
+					L"exact visible decline reason on missing P13 facts");
+			}
+		}
 	};
 }

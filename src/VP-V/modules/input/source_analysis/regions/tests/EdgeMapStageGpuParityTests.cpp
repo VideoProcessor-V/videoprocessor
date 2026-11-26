@@ -318,5 +318,93 @@ namespace VideoProcessorTest
 			SourcePlanes::Forget(&host);
 			pl_tex_destroy(gpu, &plane);
 		}
+
+		// W23-C2-S3-H3 (bff541a87): FillEdgeMapDefault derives em_scale = ldexp(1.0, 10 - bits) / CodeUnit(in, repr.bits, bits)
+		// from P13 SourcePlaneSet repr.bits instead of hardcoding kSourceTapCodesPerUnit (65535/64), so LSB-aligned 10-bit
+		// (bit_shift=0, color_depth=10) and 12-bit (bit_shift=0, color_depth=12) r16 UNORM source planes produce exact
+		// 10-bit-code Sobel magnitudes; same-input hardcoded kSourceTapCodesPerUnit negative control is 64x / 16x wrong.
+		BEGIN_TEST_METHOD_ATTRIBUTE(LsbAligned10And12BitSourcePlanesMatchSobelInTenBitCodeUnits)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LsbAligned10And12BitSourcePlanesMatchSobelInTenBitCodeUnits)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			const pl_gpu gpu = fixture.Gpu();
+			const int w = 40, h = 24;
+
+			for (const int depth : { 10, 12 })
+			{
+				const uint32_t maxCode = (1u << depth) - 1u;
+				const float toTenBit = (depth == 10) ? 1.0f : 0.25f;
+				std::vector<uint16_t> luma(static_cast<size_t>(w) * h);
+				std::vector<float> trueTenBitCodes(luma.size()), naiveTapCodes(luma.size());
+				uint32_t s = 0x13579bdfu + static_cast<uint32_t>(depth);
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						s = s * 1664525u + 1013904223u;
+						const uint32_t step = (x >= w / 2) ? (depth == 10 ? 700u : 2800u) : (depth == 10 ? 200u : 800u);
+						const uint16_t code = static_cast<uint16_t>((std::min)(maxCode, step + (s >> 26)));
+						const size_t idx = static_cast<size_t>(y) * w + x;
+						luma[idx] = code; // LSB-aligned (bit_shift == 0) in 16-bit UNORM texture!
+						trueTenBitCodes[idx] = static_cast<float>(code) * toTenBit;
+						naiveTapCodes[idx] = (static_cast<float>(code) / 65535.0f) * RegionEvidence::kSourceTapCodesPerUnit;
+					}
+				}
+
+				pl_tex plane = Upload(gpu, PL_FMT_UNORM, 1, 16, w, h, luma.data());
+				int host = 0;
+				SkeletonMemo m;
+				RegisterP13(m, &host);
+				SourcePlaneSet set;
+				set.seq = static_cast<uint64_t>(20 + depth);
+				set.planes = 1;
+				set.tex[0] = plane;
+				set.components[0] = 1;
+				set.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				set.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				set.repr.bits.sample_depth = 16;
+				set.repr.bits.color_depth = depth;
+				set.repr.bits.bit_shift = 0; // LSB-aligned!
+				set.origin = "lsb-aligned edge_map parity test";
+				Assert::IsTrue(SourcePlanes::Offer(&host, set), L"LSB-aligned SourcePlaneSet offered");
+
+				const uint64_t need = ReserveOf(uint32_t(w), uint32_t(h));
+				const OwnerFill f = Vpv::Regions::MakeEdgeMapOwnerFill(need);
+				ReadableOwnerDevice dev(gpu);
+				std::vector<float> gotR;
+				{
+					OwnerGpuContext ctx(&dev, need);
+					OwnerFillOutput out;
+					const bool ok = f.fill(Request(&host, set.seq, f, VariantKey(), &ctx), m, out);
+					Check(ok, "LSB-aligned default fill declined: " + out.declineReason);
+					const pl_tex result = static_cast<pl_tex>(out.gpu.resource);
+					Check(result != nullptr && result->params.w == w && result->params.h == h, "R32F at luma size");
+					gotR = Download(gpu, result, 1);
+				}
+
+				const std::vector<float> wantR = RegionEvidence::BusyEdge::SobelMagnitude(trueTenBitCodes.data(), w, h);
+				const std::vector<float> naiveR = RegionEvidence::BusyEdge::SobelMagnitude(naiveTapCodes.data(), w, h);
+
+				// Same-input negative control: hardcoded kSourceTapCodesPerUnit under-scales Sobel by 64x (10-bit) / 16x (12-bit)!
+				float maxEdgeWant = 0.0f, maxNaiveErr = 0.0f, maxGpuErr = 0.0f;
+				for (size_t i = 0; i < wantR.size(); ++i)
+				{
+					maxEdgeWant = (std::fmax)(maxEdgeWant, wantR[i]);
+					maxNaiveErr = (std::fmax)(maxNaiveErr, std::fabs(naiveR[i] - wantR[i]));
+					maxGpuErr = (std::fmax)(maxGpuErr, std::fabs(gotR[i] - wantR[i]));
+				}
+				Assert::IsTrue(maxEdgeWant > 400.0f && maxNaiveErr > 350.0f,
+					L"negative control: hardcoded kSourceTapCodesPerUnit severely under-scales LSB-aligned Sobel (>350 codes off)");
+				Assert::IsTrue(maxGpuErr <= 2e-3f,
+					(L"W23-C2-S3-H3: LSB-aligned " + std::to_wstring(depth) + L"-bit GPU Sobel worst error " +
+						std::to_wstring(maxGpuErr) + L" > 2e-3").c_str());
+
+				SourcePlanes::Forget(&host);
+				pl_tex_destroy(gpu, &plane);
+			}
+		}
 	};
 }

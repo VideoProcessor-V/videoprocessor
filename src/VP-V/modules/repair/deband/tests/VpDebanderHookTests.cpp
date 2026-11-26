@@ -1749,5 +1749,275 @@ namespace VideoProcessorTest
 				rig.memo.OnSeal(kSeq);
 			}
 		}
+
+		// W23-C2-S3-H2 + S3-M1 (bff541a87):
+		// (1) On a re-based frame (e.g. 128x72 re-based with fieldScale = 3.0 from native 384x216 where nativeH >= 2160
+		//     uses larger P11 block size: test 320x180 with fieldScale = 12.0 -> nativeH = 2160, p11Block = 32 vs
+		//     BlockSizeFor(180) = 16!), VpDebander derives P11 block size & UV scale from nativeH and toField / span so
+		//     UV [0,1] maps across the full P11 s1 grid; same-input pre-fix BlockSizeFor(luma->params.h) negative control
+		//     scales UV by 2x and clamps the right/bottom half of the frame to edge grain energy!
+		// (2) Hitting P10 + P11 clears stale LastGrainGuardFallback() and LastBandMemoFallback() strings.
+		// (3) Float32 source planes preserve BTB (< 0.0) and WTW (> 1.0) values via PL_FMT_FLOAT StorableLike without UNORM clamping.
+		BEGIN_TEST_METHOD_ATTRIBUTE(VpDebanderRebasedP11ScaleFallbackClearAndFloat32ExtendedRange)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VpDebanderRebasedP11ScaleFallbackClearAndFloat32ExtendedRange)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			namespace G = GrainSplit::Gpu;
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct DispatchGuard
+			{
+				pl_dispatch dispatch = nullptr;
+				explicit DispatchGuard(pl_dispatch d) : dispatch(d) {}
+				~DispatchGuard() { if (dispatch) pl_dispatch_destroy(&dispatch); }
+			} dispGuard(pl_dispatch_create(fixture.Log(), gpu));
+			pl_dispatch dispatch = dispGuard.dispatch;
+			Assert::IsNotNull(dispatch);
+
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+			};
+			struct DebandGuard
+			{
+				pl_gpu gpu = nullptr;
+				VpDebander::Module mod;
+				explicit DebandGuard(pl_gpu g) : gpu(g) {}
+				~DebandGuard() { mod.Release(gpu); }
+			};
+
+			// Part 1 & 2: Re-based 320x180 luma frame with fieldScale = 12.0 -> native 3840x2160 (nativeH = 2160 -> p11Block = 32,
+			// s1 grid 120x68, span = 3840x2188; whereas pre-fix BlockSizeFor(180) = 16 gave spanX = 1920 and p11Scale[0] = 320/(1920*320)
+			// vs toField[0]/spanX = 3840/3840 = 1.0 — off by 2x!).
+			// Put 0 grain energy in left half of P11 s1 (bands smoothed) and strong grain energy in right half of P11 s1 (grain preserved).
+			// Wait: with pre-fix formula `luma->params.w / (spanX_wrong * w) = 1 / 1920` (where shader multiplies pixel coord `x` in `0..320`
+			// or UV? Let's check both via real GPU output: right-half grain zone x in [200, 300] maps to native x in [2400, 3600], s1.x in [75, 112]!).
+			// Under pre-fix formula, pixel x=240 sampled s1 at 240 / (16 * 120 * 320) * 320 = 240 / 1920 = 0.125 (LEFT half of s1 = 0 grain!),
+			// crushing right-half film grain! Under S3-H2 fix, pixel x=240 samples s1 at 240 * 12 / 3840 = 0.75 (RIGHT half of s1 = strong grain!),
+			// preserving right-half film grain!
+			{
+				const int W = 320, H = 180;
+				const double kFieldScale = 12.0; // native 3840x2160 -> BlockSizeFor(2160) == 32, BlockSizeFor(180) == 16!
+				const int nativeW = 3840, nativeH = 2160;
+				const int p11Block = RegionEvidence::BlockSizeFor(nativeH);
+				Assert::AreEqual(32, p11Block, L"native 2160p uses 32-px P11 blocks");
+				Assert::AreEqual(8, RegionEvidence::BlockSizeFor(H), L"pre-fix bug used re-based 180p -> 8-px P11 blocks (4x wrong)");
+
+				const int s1W = (nativeW + p11Block - 1) / p11Block; // 120
+				const int s1H = (nativeH + p11Block - 1) / p11Block; // 68
+				std::vector<float> s0Data(static_cast<size_t>(s1W) * s1H * 4u, 0.0f);
+				std::vector<float> s1RightGrain(static_cast<size_t>(s1W) * s1H * 4u, 0.0f);
+				std::vector<float> s1AllZero(static_cast<size_t>(s1W) * s1H * 4u, 0.0f);
+				for (int by = 0; by < s1H; ++by)
+					for (int bx = 0; bx < s1W; ++bx)
+					{
+						// Only native right half (bx >= 60, i.e. UV.x >= 0.5) has strong horizontal-gradient / vertical-ridge
+						// structure tensor J = (jxx=500, jyy=0, jxy=0, 1) -> coh = 1.0, theta = 0 (along = vertical)!
+						// Pre-fix UV.x at x = 255..256 was 255 / (8 * 120) = 0.266 -> bx = 31 < 60, missing bx >= 60 completely!
+						if (bx >= 60)
+						{
+							const size_t base = (static_cast<size_t>(by) * s1W + bx) * 4u;
+							s1RightGrain[base + 0] = 500.0f;
+							s1RightGrain[base + 1] = 0.0f;
+							s1RightGrain[base + 2] = 0.0f;
+							s1RightGrain[base + 3] = 1.0f;
+						}
+					}
+
+				// Right-half 28-code vertical contour at x = 256 (x < 256 ? 450 : 478; native x = 3072 -> bx = 96 >= 60).
+				// With re-based P11 UV scale hitting bx >= 60 (J = (1000,0,0,100) -> coh = 1, theta = 0), base = lowc + ra = c,
+				// so diff = |c - avg| > thr -> w = 0 preserves the crisp contour; with J = 0 (pre-fix UV under-scale at bx = 32 < 60),
+				// coh = 0 leaves base = lowc (~464 near x = 256), blurring across the contour!
+				std::vector<uint16_t> yRaw(static_cast<size_t>(W) * H, 0u);
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+					{
+						const int c10 = (x < 256) ? 450 : 478;
+						yRaw[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>(c10 << 6);
+					}
+
+				pl_tex_params yp{};
+				yp.w = W; yp.h = H; yp.format = pl_find_named_fmt(gpu, "r16"); yp.sampleable = true; yp.initial_data = yRaw.data();
+				TexGuard yTex(gpu, pl_tex_create(gpu, &yp));
+				pl_tex_params sp0{};
+				sp0.w = s1W; sp0.h = s1H; sp0.format = pl_find_named_fmt(gpu, "rgba32f"); sp0.sampleable = true;
+				sp0.initial_data = s0Data.data();
+				TexGuard s0Tex(gpu, pl_tex_create(gpu, &sp0));
+				sp0.initial_data = s1RightGrain.data();
+				TexGuard s1Tex(gpu, pl_tex_create(gpu, &sp0));
+				sp0.initial_data = s1AllZero.data();
+				TexGuard s1ZeroTex(gpu, pl_tex_create(gpu, &sp0));
+				Assert::IsTrue(yTex.tex && s0Tex.tex && s1Tex.tex && s1ZeroTex.tex);
+
+				pl_frame frame{};
+				frame.num_planes = 1;
+				frame.planes[0].texture = yTex.tex; frame.planes[0].components = 1; frame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				frame.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				frame.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				frame.repr.bits.sample_depth = 16; frame.repr.bits.color_depth = 10; frame.repr.bits.bit_shift = 6;
+				frame.color = pl_color_space_bt709;
+
+				Vpv::Skeleton::OwnerGpuDevice ownerDev(gpu);
+				VpSkeleton::SkeletonMemo memo;
+				G::VariantOwner grainOwner;
+				memo.SetHost(&memo);
+				memo.SetRenderThread(std::this_thread::get_id());
+				memo.SetGpuDispatcherPresent(true);
+				memo.SetGpuBudget(true, uint64_t(1) << 29);
+				memo.SetGpuDevice(&ownerDev);
+
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Gpu,
+					Vpv::Capture::SourcePlanes::kUnit, Vpv::Capture::SourcePlanes::MakeOwnerFill()) == Reg::Registered);
+				Assert::IsTrue(grainOwner.Register(memo, W, H) == Reg::Registered);
+
+				pl_tex s0Ptr = s0Tex.tex;
+				pl_tex activeS1 = s1Tex.tex;
+				VpSkeleton::OwnerFill p11Fill;
+				p11Fill.view = true;
+				p11Fill.frameScoped = true;
+				p11Fill.fill = [s0Ptr, &activeS1, s1W, s1H](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					out.gpu.resource = const_cast<void*>(static_cast<const void*>(s0Ptr));
+					out.gpu.view = const_cast<void*>(static_cast<const void*>(activeS1));
+					out.gpu.width = static_cast<uint32_t>(s1W);
+					out.gpu.height = static_cast<uint32_t>(s1H);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP11RegionBlockStats, VpSkeleton::AcquireForm::Gpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP11RegionBlockStats), std::move(p11Fill)) == Reg::Registered);
+
+				DebandGuard deband(gpu);
+				VpDebander::Params p;
+				p.thresholdCodes = 12.0;
+				p.colorDepth = 10;
+				p.radiusScale = 1.0;
+				p.fieldScale = kFieldScale;
+				p.grainGuard = true;
+				p.grainSplit = true;
+
+				// First call with memo == nullptr populates LastGrainGuardFallback / LastBandMemoFallback.
+				p.sequence = 400u;
+				p.memo = nullptr;
+				pl_frame outFb{};
+				Assert::IsTrue(deband.mod.Apply(gpu, dispatch, frame, p, outFb));
+				Assert::IsFalse(deband.mod.LastGrainGuardFallback().empty(), L"precondition: fallback reason populated when memo=nullptr");
+				Assert::IsFalse(deband.mod.LastBandMemoFallback().empty(), L"precondition: band_memo fallback populated when memo=nullptr");
+
+				// Offer P13 and call with memo bound: hits P10+P11, clears both fallback strings, and maps right-half UV into bx >= 60!
+				Vpv::Capture::SourcePlaneSet set;
+				set.seq = 401u;
+				set.planes = 1;
+				set.tex[0] = yTex.tex; set.components[0] = 1;
+				set.rgb = false;
+				set.repr = frame.repr;
+				set.origin = "rebased p11 scale test";
+				Assert::IsTrue(Vpv::Capture::SourcePlanes::Offer(&memo, set));
+
+				p.sequence = 401u;
+				p.memo = &memo;
+				pl_frame outRebased{};
+				Assert::IsTrue(deband.mod.Apply(gpu, dispatch, frame, p, outRebased));
+				Assert::IsTrue(deband.mod.LastGrainGuardFallback().empty(), L"S3-H2: P10+P11 hit clears stale LastGrainGuardFallback");
+				Assert::IsTrue(deband.mod.LastBandMemoFallback().empty(), L"S3-H2: P10+P11 hit clears stale LastBandMemoFallback");
+
+				auto downloadU16 = [&](pl_tex tex) {
+					pl_tex_params rp{};
+					rp.w = W; rp.h = H; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+					TexGuard rd(gpu, pl_tex_create(gpu, &rp));
+					pl_tex_blit_params bp{}; bp.src = tex; bp.dst = rd.tex;
+					pl_tex_blit(gpu, &bp);
+					pl_gpu_finish(gpu);
+					std::vector<uint16_t> raw(static_cast<size_t>(W) * H, 0u);
+					pl_tex_transfer_params dl{}; dl.tex = rd.tex; dl.ptr = raw.data();
+					Assert::IsTrue(pl_tex_download(gpu, &dl));
+					return raw;
+				};
+				const std::vector<uint16_t> rawHit = downloadU16(outRebased.planes[0].texture);
+				memo.OnSeal(401u);
+
+				// Same-input negative control: when s1 has J = 0 (what the pre-fix UV scale 1/(8*120) sampled at bx = 32 < 60!),
+				// coh == 0 drops directional contour preservation across x = 254..257!
+				activeS1 = s1ZeroTex.tex;
+				set.seq = 402u;
+				Assert::IsTrue(Vpv::Capture::SourcePlanes::Offer(&memo, set));
+				p.sequence = 402u;
+				pl_frame outZeroS1{};
+				Assert::IsTrue(deband.mod.Apply(gpu, dispatch, frame, p, outZeroS1));
+				const std::vector<uint16_t> rawMissed = downloadU16(outZeroS1.planes[0].texture);
+				memo.OnSeal(402u);
+
+				double hitEdgeErr = 0.0, missedEdgeErr = 0.0, maxDelta = 0.0;
+				int edgeN = 0;
+				for (int y = 24; y < H - 24; ++y)
+					for (int x = 254; x <= 257; ++x)
+					{
+						const size_t idx = static_cast<size_t>(y) * W + x;
+						const double orig = static_cast<double>(yRaw[idx]) / 64.0;
+						const double hv = static_cast<double>(rawHit[idx]) / 64.0;
+						const double mv = static_cast<double>(rawMissed[idx]) / 64.0;
+						hitEdgeErr += std::fabs(hv - orig);
+						missedEdgeErr += std::fabs(mv - orig);
+						maxDelta = (std::max)(maxDelta, std::fabs(hv - mv));
+						++edgeN;
+					}
+				hitEdgeErr /= edgeN;
+				missedEdgeErr /= edgeN;
+				Assert::IsTrue(maxDelta > 0.5 && hitEdgeErr < missedEdgeErr,
+					L"S3-H2: re-based P11 UV scale samples bx>=60 tensor J (preserves vertical contour) vs pre-fix UV under-scale (blurs contour)");
+
+				memo.ReleaseGpuSpots();
+				Vpv::Capture::SourcePlanes::Forget(&memo);
+				ownerDev.Release();
+			}
+
+			// Part 3 (S3-M1): Float32 plane with BTB (-0.05) and WTW (+1.08) preserves extended range without UNORM [0,1] clipping.
+			{
+				const int W = 64, H = 32;
+				std::vector<float> f32In(static_cast<size_t>(W) * H, 0.0f);
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+						f32In[static_cast<size_t>(y) * W + x] = (x < W / 2) ? -0.05f : 1.08f;
+				pl_tex_params fp{};
+				fp.w = W; fp.h = H; fp.format = pl_find_named_fmt(gpu, "r32f"); fp.sampleable = true; fp.initial_data = f32In.data();
+				TexGuard fTex(gpu, pl_tex_create(gpu, &fp));
+				Assert::IsNotNull(fTex.tex);
+
+				pl_frame fFrame{};
+				fFrame.num_planes = 1;
+				fFrame.planes[0].texture = fTex.tex; fFrame.planes[0].components = 1; fFrame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				fFrame.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				fFrame.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				fFrame.color = pl_color_space_bt709;
+
+				VpDebander::Params p;
+				p.thresholdCodes = 6.0;
+				p.colorDepth = 10;
+				p.grainGuard = false;
+				DebandGuard debF32(gpu);
+				pl_frame outF32{};
+				Assert::IsTrue(debF32.mod.Apply(gpu, dispatch, fFrame, p, outF32));
+				Assert::IsTrue(outF32.planes[0].texture->params.format->type == PL_FMT_FLOAT,
+					L"S3-M1: float32 source plane stays PL_FMT_FLOAT (never demoted to UNORM16)");
+
+				pl_tex_params rp{};
+				rp.w = W; rp.h = H; rp.format = outF32.planes[0].texture->params.format; rp.host_readable = true; rp.blit_dst = true;
+				TexGuard rd(gpu, pl_tex_create(gpu, &rp));
+				pl_tex_blit_params bp{}; bp.src = outF32.planes[0].texture; bp.dst = rd.tex;
+				pl_tex_blit(gpu, &bp);
+				pl_gpu_finish(gpu);
+				std::vector<float> got(static_cast<size_t>(W) * H, 0.0f);
+				pl_tex_transfer_params dl{}; dl.tex = rd.tex; dl.ptr = got.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				Assert::AreEqual(-0.05f, got[8 * W + 8], 1e-4f, L"S3-M1: float32 BTB -0.05 preserved");
+				Assert::AreEqual(1.08f, got[8 * W + W - 8], 1e-4f, L"S3-M1: float32 WTW +1.08 preserved");
+			}
+		}
 	};
 }

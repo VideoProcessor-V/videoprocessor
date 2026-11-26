@@ -454,5 +454,188 @@ namespace VideoProcessorTest
 			Assert::AreEqual(uint64_t(0), disp.AllocatedBytes(), L"Release frees all live textures");
 			Assert::IsFalse(disp.HoldsVideoMemory(), L"HoldsVideoMemory false after Release");
 		}
+
+		// W23-C2-S1-H1 (bff541a87) + MEDIUM-4 (24d188643):
+		// (1) EnsureTap re-runs ExtendTap when P4 active-picture ancestry rect changes on an already-extended tap
+		//     (e.g. full-frame {0,0,w,h} -> letterbox {0,12,w,52}), reflecting active row 12 into letterbox rows 0..11
+		//     instead of keeping stale black bars.
+		// (2) Failed ExtendTap clears t.extendedDone BEFORE ExtendTap and updates t.picture ONLY AFTER ExtendTap succeeds,
+		//     so a retry with the same cropped P4 rect re-extends cleanly instead of skipping ExtendTap with stale bars.
+		// (3) Changing SourceFrameView::luma or msbShift for the same seq re-uploads tap bands and re-runs ExtendTap,
+		//     and DispatchLive clears t->pinned on kP10GrainSplit finish/fail so tap slots are never leaked/starved.
+		BEGIN_TEST_METHOD_ATTRIBUTE(EnsureTapReExtendsOnP4CropSourceChangeAndFailedExtendRetry)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(EnsureTapReExtendsOnP4CropSourceChangeAndFailedExtendRetry)
+		{
+			class P11CopyExtendedKernel : public VpLaneProducts::IProductKernel
+			{
+			public:
+				ProductId Product() const override { return kP11RegionBlockStats; }
+				ProductTexLayout Layout(Dims) const override
+				{
+					ProductTexLayout l;
+					TexTerm a;
+					a.shift = 4;
+					a.fmt = TexFormat::RGBA32F;
+					for (int i = 0; i < 6; ++i)
+						l.terms.push_back(a);
+					return l;
+				}
+				uint32_t Steps(Dims) const override { return 1u; }
+				bool NeedsTap() const override { return true; }
+				bool Step(VpLaneProducts::KernelContext& c, uint32_t) override
+				{
+					if (!c.extended || c.outCount < 1)
+						return false;
+					return Pass(c.dispatch,
+						"ivec2 p = ivec2(gl_GlobalInvocationID.xy);\n"
+						"if (p.x >= 1 || p.y >= 1) return;\n"
+						"float v = floor(texelFetch(t_src, ivec2(0, 0), 0).x * 65535.0 + 0.5) / 64.0;\n"
+						"imageStore(t_dst, p, vec4(v, 0.0, 0.0, 1.0));\n",
+						c.extended, c.out[0], 1, 1);
+				}
+				void Release(pl_gpu) override {}
+			};
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			SkeletonGpuDispatcher disp(gpu, true);
+			disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(new CopyKernel()));
+			disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(new P11CopyExtendedKernel()));
+
+			const Dims d{ 64, 64 };
+			Registry reg = VpLaneProducts::TapFormProducts(SkeletonProducts());
+			ConsumerDecl cDecl;
+			cDecl.id = 1;
+			AddConsume(cDecl, kP10GrainSplit);
+			AddConsume(cDecl, kP11RegionBlockStats);
+			GraphSettings gs;
+			gs.dims = d;
+			gs.queueDepth = 4;
+			gs.laneLead = 1;
+			const Graph graph = BuildGraph(reg, std::vector<ConsumerDecl>{ cDecl }, gs);
+			TierPlan plan;
+			for (ProductId pid : { kP10GrainSplit, kP11RegionBlockStats })
+			{
+				TierEntry e;
+				e.id = pid;
+				e.backend = Backend::GpuCompute;
+				e.grant = Grant::Lane;
+				plan.entries.push_back(e);
+			}
+			Assert::IsTrue(disp.Configure(graph, reg, plan, d), L"configure P10 + P11");
+
+			const Node* p10Node = nullptr;
+			const Node* p11Node = nullptr;
+			for (const Node& nd : graph.nodes)
+			{
+				if (nd.id == kP10GrainSplit) p10Node = &nd;
+				if (nd.id == kP11RegionBlockStats) p11Node = &nd;
+			}
+			Assert::IsTrue(p10Node != nullptr && p11Node != nullptr, L"P10 and P11 nodes present");
+
+			// Synthesize letterboxed frame (rows 0..11 and 52..63 = black bar code 64; active rows 12..51 = code 800).
+			std::vector<uint16_t> codesA(size_t(d.width) * d.height, 64u);
+			for (uint32_t y = 12; y < 52; ++y)
+				for (uint32_t x = 0; x < d.width; ++x)
+					codesA[size_t(y) * d.width + x] = 800u;
+			SourceFrameView viewA = ViewOf(codesA, int(d.width), int(d.height), 20u);
+
+			// 1. Run P10 for seq 20 WITHOUT P4 (full-frame rect {0,0,64,64}): row 0 stays bar code 64.
+			LaneJobContext p10Job;
+			p10Job.node = p10Node;
+			p10Job.seq = 20u;
+			p10Job.ringSlot = 0;
+			p10Job.source = &viewA;
+			const uint32_t p10Steps = VpLaneProducts::StepsFor(kP10GrainSplit, d);
+			for (uint32_t i = 0; i < p10Steps; ++i)
+				Assert::IsTrue(disp.Dispatch(p10Job, i, p10Steps), L"initial full-frame P10 dispatch");
+			Assert::AreEqual(uint64_t(1), disp.Stats().extends, L"1 full-frame ExtendTap run");
+			const auto fullOut = Download<float>(gpu, disp.TexturesOf(kP10GrainSplit)->Ring(0, 0), 4);
+			Assert::AreEqual(64.0f, fullOut[0], 0.0f, L"negative control (uncropped P4): row 0 holds black bar code 64");
+
+			// Prepare P11 job for the SAME seq 20 WITH P4 active-picture rect {0, 12, 64, 52} (half-plane rectY0=6, rectY1=26).
+			size_t p4InputIdx = 0;
+			bool foundP4 = false;
+			for (size_t k = 0; k < p11Node->inputs.size(); ++k)
+			{
+				if (p11Node->inputs[k].product == kP4SourceStats)
+				{
+					p4InputIdx = k;
+					foundP4 = true;
+					break;
+				}
+			}
+			Assert::IsTrue(foundP4, L"P11 consumes kP4SourceStats");
+
+			std::vector<uint8_t> p4CropBytes(VpLaneProducts::kStatsBytes, 0u);
+			{
+				VpUnit::SourceStats::Record rec{};
+				rec.version = VpUnit::SourceStats::kRecordVersion;
+				rec.halfWidth = d.width / 2u;
+				rec.halfHeight = d.height / 2u;
+				rec.rectFound = 1u;
+				rec.rectX0 = 0u;
+				rec.rectY0 = 6u;  // full top = 12
+				rec.rectX1 = d.width / 2u;
+				rec.rectY1 = 26u; // full bottom = 52
+				std::memcpy(p4CropBytes.data(), &rec, sizeof(rec));
+			}
+			SlotSet dummyP4Set(kP4SourceStats, 4u, 1u);
+			LaneInputs p11Inputs;
+			p11Inputs.count = p11Node->inputs.size();
+			p11Inputs.sets[p4InputIdx] = &dummyP4Set;
+			p11Inputs.seqs[p4InputIdx] = 20u;
+			p11Inputs.liveIndex[p4InputIdx] = 0;
+
+			LaneJobContext p11CropJob;
+			p11CropJob.node = p11Node;
+			p11CropJob.seq = 20u;
+			p11CropJob.ringSlot = 0;
+			p11CropJob.source = &viewA;
+			p11CropJob.inputs = &p11Inputs;
+			p11CropJob.inputData[p4InputIdx] = p4CropBytes.data();
+
+			// 2. Force ExtendTap to fail once (temporarily mismatch extended->params.w so ExtendTap returns false at entry
+			//    without touching GPU state), then restore and retry with the exact same cropped P4 rect (24d188643 MEDIUM-4)!
+			pl_tex extTex = disp.TapOf(20u, true);
+			Assert::IsNotNull(extTex, L"extended tap exists for seq 20");
+			const int savedW = extTex->params.w;
+			const_cast<pl_tex_t*>(extTex)->params.w = 0;
+			const bool failedAttempt = disp.Dispatch(p11CropJob, 0, 1);
+			const_cast<pl_tex_t*>(extTex)->params.w = savedW;
+			Assert::IsFalse(failedAttempt, L"forced ExtendTap failure declines Dispatch");
+			Assert::AreEqual(uint64_t(1), disp.Stats().extends, L"failed ExtendTap does not increment extends");
+
+			// Retry with restored width and SAME cropped P4 rect: must re-run ExtendTap and mirror active row 12 (800) into row 0!
+			Assert::IsTrue(disp.Dispatch(p11CropJob, 0, 1), L"24d188643 MEDIUM-4: retry after failed ExtendTap succeeds");
+			Assert::AreEqual(uint64_t(2), disp.Stats().extends,
+				L"S1-H1 + MEDIUM-4: P4 crop replacement + failed-extend retry re-ran ExtendTap");
+			const auto cropOut = Download<float>(gpu, disp.TexturesOf(kP11RegionBlockStats)->Ring(0, 0), 4);
+			Assert::AreEqual(800.0f, cropOut[0], 0.0f,
+				L"S1-H1: ExtendTap reflected active-picture code 800 over letterbox bar row 0 (was 64 before re-extend)");
+
+			// 3. Changing SourceFrameView::luma on the same seq 20 re-uploads tap bands and re-extends!
+			std::vector<uint16_t> codesB(size_t(d.width) * d.height, 512u);
+			SourceFrameView viewB = ViewOf(codesB, int(d.width), int(d.height), 20u);
+			p11CropJob.source = &viewB;
+			const uint64_t bandsBefore = disp.Stats().tapBands;
+			Assert::IsTrue(disp.Dispatch(p11CropJob, 0, 1), L"S1-H1: source pointer replacement on seq 20 succeeds");
+			Assert::IsTrue(disp.Stats().tapBands > bandsBefore && disp.Stats().extends == 3u,
+				L"S1-H1: changing view.luma re-uploaded tap bands and re-ran ExtendTap");
+			const auto replacedOut = Download<float>(gpu, disp.TexturesOf(kP11RegionBlockStats)->Ring(0, 0), 4);
+			Assert::AreEqual(512.0f, replacedOut[0], 0.0f, L"S1-H1: updated luma codes 512 propagated through re-uploaded tap");
+
+			// 4. DispatchLive on kP10GrainSplit clears t->pinned so >kMaxTaps (16) live frames never starve the tap ring!
+			disp.SetLiveSourceForTesting([&codesB, d](uint64_t seq, SourceFrameView* out) {
+				*out = ViewOf(codesB, int(d.width), int(d.height), seq);
+				return true;
+			});
+			for (uint64_t seq = 100u; seq < 120u; ++seq)
+				Assert::IsTrue(disp.DispatchLive(*p10Node, seq, 0, Header(), 0u),
+					L"S1-H1: DispatchLive clears t->pinned on kP10GrainSplit so 20 consecutive frames never exhaust tap slots");
+		}
 	};
 }

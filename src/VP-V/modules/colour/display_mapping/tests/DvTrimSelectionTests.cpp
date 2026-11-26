@@ -519,5 +519,132 @@ namespace Tests
 			Assert::AreEqual(std::string("dv_slope"), std::string(buffer[1].first));
 		}
 
+		// W23-C2-S3-M2 (bff541a87) + LOW-1 (24d188643):
+		// (1) When l8Unresolved > 0 leaves L8 unbracketed above l8MaxPq, crossing switchPq from L8 into L2 is C0-continuous
+		//     for BOTH bracketed L2 (l2HasLow == true -> switchPq == l8MaxPq) and unbracketed L2 (!l2HasLow -> switchPq == 0.5*(l8MaxPq + l2Hi)),
+		//     fading the L8-vs-L2 delta linearly to 0 at hiL2; same-input pre-fix negative control suffers a hard step cliff at switchPq.
+		// (2) Trims authored at or above dm.sourceMaxPq anchor to neutral at sourceMaxPq so displayPq -> sourceMaxPq- is C0-continuous
+		//     into the identity return at displayPq >= sourceMaxPq (both DvTrimSelection::Select and DolbyVisionTrims::Select).
+		TEST_METHOD(UnresolvedL8ToL2CrossoverAndMasteringPeakBoundaryAreC0Continuous)
+		{
+			using namespace DvL8Trims;
+			auto nitsAtPqCode = [](double pqCode) { return DolbyVisionTrims::NitsFromPq(pqCode / 4095.0); };
+			auto maxParamStep = [](const DvTrimSelection::ExtParams& a, const DvTrimSelection::ExtParams& b) {
+				double d = (std::max)({
+					std::fabs(a.base.slope - b.base.slope),
+					std::fabs(a.base.offset - b.base.offset),
+					std::fabs(a.base.power - b.base.power),
+					std::fabs(a.base.chromaWeight - b.base.chromaWeight),
+					std::fabs(a.base.saturationGain - b.base.saturationGain),
+					std::fabs(a.midContrast - b.midContrast),
+					std::fabs(a.clipTrim - b.clipTrim) });
+				for (int k = 0; k < DvTrimSelection::kHues; ++k)
+				{
+					d = (std::max)(d, std::fabs(a.saturation[k] - b.saturation[k]));
+					d = (std::max)(d, std::fabs(a.hueDegrees[k] - b.hueDegrees[k]) / 30.0);
+				}
+				return d;
+			};
+
+			const uint16_t pq100 = 2081; // predefined index 1 (~100 nits)
+			const uint16_t pq600 = Pq(600.0);
+			const uint16_t pq4000 = Pq(4000.0);
+
+			// Case 1A: Bracketed L2 (L2 has 100-nit and 600-nit trims; L8 has resolved index 1 = 100 nits + unresolved index 28).
+			// L8 wins at displayPq <= 2081, L2 wins at displayPq > 2081 -> exact crossover switchPq == 2081.0.
+			{
+				Trim l8_100 = L8(1, 2048 + 480, 2048 - 240, 2048 + 300, 2048 + 200, 2048 + 400);
+				l8_100.hasMidContrastAndClip = true;
+				l8_100.midContrast = 2048 + 320;
+				l8_100.clipTrim = 2048 - 280;
+				l8_100.hasSaturationVector = true;
+				l8_100.saturationVector[0] = 180;
+				l8_100.hasHueVector = true;
+				l8_100.hueVector[2] = 90;
+				Trim l8_unres = L8(28, 2048 + 100, 2048);
+				DolbyVisionTunnelFrameMetadata dm = Dm({
+					l8_100, l8_unres,
+					L2(pq100, 2048 - 360, 2048 + 160),
+					L2(pq600, 2048 - 120, 2048 + 40)
+				}, pq4000);
+
+				const double eps = 0.05;
+				const auto below = DvTrimSelection::Select(dm, nitsAtPqCode(pq100 - eps));
+				const auto above = DvTrimSelection::Select(dm, nitsAtPqCode(pq100 + eps));
+				const auto atHi = DvTrimSelection::Select(dm, nitsAtPqCode(pq600));
+				Assert::IsTrue(below.level == DvTrimSelection::Level::L8, L"at/below l8MaxPq uses L8");
+				Assert::IsTrue(above.level == DvTrimSelection::Level::L2, L"above l8MaxPq switches to bracketed L2");
+
+				// Same-input pre-fix negative control: raw L2 selection at pq100 + eps jumps by full |L8(100) - L2(100)| > 0.20!
+				DvTrimSelection::Selection rawL2;
+				rawL2.displayPq = pq100 + eps;
+				DvTrimSelection::SelectAmong(dm, DvTrimSelection::Candidates(dm, DvTrimSelection::Level::L2), rawL2);
+				Assert::IsTrue(maxParamStep(below.params, rawL2.params) > 0.20,
+					L"negative control: un-faded L8->L2 switch suffers >0.20 parameter step cliff");
+
+				Assert::IsTrue(maxParamStep(below.params, above.params) < 2e-3,
+					L"bracketed L2: L8->L2 crossover at switchPq=l8MaxPq must be C0-continuous across all scalar+vector trims");
+				// At hiL2 (600 nits), the L8-vs-L2 delta has faded completely to pure L2(600).
+				Assert::AreEqual(1.0 - 120.0 / 4096.0, atHi.params.base.slope, 1e-9, L"at hiL2 delta fades to exact L2 trim");
+				Assert::AreEqual(0.0, atHi.params.midContrast, 1e-9, L"at hiL2 L8 midContrast delta fades to 0");
+			}
+
+			// Case 1B: Unbracketed L2 (!l2HasLow: L2 has ONLY 600-nit trim > l8MaxPq 2081; L8 has resolved index 1 + unresolved index 28).
+			// Nearest-trim tiebreak switches at midpoint switchPq = 0.5 * (2081 + pq600), NOT at l8MaxPq!
+			{
+				Trim l8_100 = L8(1, 2048 + 500, 2048 - 200);
+				l8_100.hasMidContrastAndClip = true;
+				l8_100.midContrast = 2048 + 400;
+				l8_100.clipTrim = 2048;
+				DolbyVisionTunnelFrameMetadata dm = Dm({
+					l8_100, L8(28, 2048 + 80, 2048),
+					L2(pq600, 2048 - 300, 2048 + 120)
+				}, pq4000);
+
+				const double midPq = 0.5 * (static_cast<double>(pq100) + static_cast<double>(pq600));
+				const double eps = 0.05;
+				const auto belowMid = DvTrimSelection::Select(dm, nitsAtPqCode(midPq - eps));
+				const auto aboveMid = DvTrimSelection::Select(dm, nitsAtPqCode(midPq + eps));
+				Assert::IsTrue(belowMid.level == DvTrimSelection::Level::L8, L"!l2HasLow: below midpoint uses L8");
+				Assert::IsTrue(aboveMid.level == DvTrimSelection::Level::L2, L"!l2HasLow: above midpoint switches to L2");
+
+				// Same-input negative control (24d188643 LOW-1): using l8MaxPq instead of midpoint leaves a big jump at midPq!
+				const double wrongF = (static_cast<double>(pq600) - (midPq + eps)) / (static_cast<double>(pq600) - static_cast<double>(pq100));
+				const double rawL2Slope = 1.0 - 300.0 / 4096.0;
+				const double l8SlopeAtMid = belowMid.params.base.slope;
+				const double buggySlope = rawL2Slope + wrongF * (l8SlopeAtMid - rawL2Slope);
+				Assert::IsTrue(std::fabs(buggySlope - l8SlopeAtMid) > 0.08,
+					L"negative control: anchoring fade at l8MaxPq instead of midpoint leaves >0.08 slope cliff at midPq");
+
+				Assert::IsTrue(maxParamStep(belowMid.params, aboveMid.params) < 2e-3,
+					L"LOW-1 (!l2HasLow): L8->L2 crossover at midpoint switchPq = 0.5*(l8MaxPq+l2Hi) must be C0-continuous");
+			}
+
+			// Case 2: Mastering-peak boundary C0 continuity when a trim is authored at/above dm.sourceMaxPq.
+			{
+				const uint16_t srcPeakPq = Pq(1000.0);
+				DolbyVisionTunnelFrameMetadata dm = Dm({
+					L2(pq100, 2048 - 600, 2048 + 200),
+					L2(static_cast<uint16_t>(srcPeakPq + 150), 2048 - 400, 2048 + 160) // targetMaxPq > sourceMaxPq!
+				}, srcPeakPq);
+
+				const double justBelowNits = nitsAtPqCode(srcPeakPq - 0.1);
+				const double atPeakNits = nitsAtPqCode(srcPeakPq + 0.1);
+				const auto selBelow = DvTrimSelection::Select(dm, justBelowNits);
+				const auto selAtPeak = DvTrimSelection::Select(dm, atPeakNits);
+				Assert::IsFalse(selAtPeak.apply, L"at/above sourceMaxPq returns identity");
+				// Pre-fix negative control: raw trim at srcPeakPq+150 had slope = 1 - 400/4096 = 0.9023 (0.0977 cliff to 1.0!).
+				Assert::IsTrue(std::fabs((1.0 - 400.0 / 4096.0) - 1.0) > 0.09, L"negative control: un-anchored >sourceMaxPq trim has >0.09 cliff");
+				Assert::AreEqual(1.0, selBelow.params.base.slope, 1e-3, L"DvTrimSelection: C0 fade to neutral slope 1.0 at sourceMaxPq-");
+				Assert::AreEqual(0.0, selBelow.params.base.offset, 1e-3, L"DvTrimSelection: C0 fade to neutral offset 0.0 at sourceMaxPq-");
+
+				const auto l2Below = DolbyVisionTrims::Select(dm, justBelowNits);
+				const auto l2AtPeak = DolbyVisionTrims::Select(dm, atPeakNits);
+				Assert::IsFalse(l2AtPeak.apply, L"DolbyVisionTrims: at/above sourceMaxPq returns identity");
+				Assert::AreEqual(1.0, l2Below.params.slope, 1e-3, L"DolbyVisionTrims: C0 fade to neutral slope 1.0 at sourceMaxPq-");
+				Assert::AreEqual(0.0, l2Below.params.offset, 1e-3, L"DolbyVisionTrims: C0 fade to neutral offset 0.0 at sourceMaxPq-");
+			}
+		}
+
 	};
 }

@@ -334,15 +334,16 @@ namespace
 		require(setupLayout != nullptr, "CUI fit negative control: Setup & Wizard tab has no layout");
 		{
 			std::unique_ptr<QWidget> oversized(new QWidget);
-			oversized->setMinimumWidth(scroll->viewport()->width() + 200);
+			oversized->setMinimumSize(scroll->viewport()->width() + 200, 8);
 			setupLayout->addWidget(oversized.get());
-			for (int n = 0; n < 3; ++n) QCoreApplication::processEvents();
+			oversized->show();
+			for (int n = 0; n < 8; ++n) QCoreApplication::processEvents();
 			require(scroll->horizontalScrollBar()->maximum() > 0 &&
 				scroll->widget()->width() > scroll->viewport()->width(),
 				"CUI fit negative control failed: oversized child did not trigger horizontal overflow at 760x540");
 			setupLayout->removeWidget(oversized.get());
 		}
-		for (int n = 0; n < 3; ++n) QCoreApplication::processEvents();
+		for (int n = 0; n < 8; ++n) QCoreApplication::processEvents();
 		require(scroll->horizontalScrollBar()->maximum() == 0,
 			"CUI fit negative control cleanup: horizontal overflow remained after removing oversized probe");
 	}

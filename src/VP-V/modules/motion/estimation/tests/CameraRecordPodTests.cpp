@@ -175,17 +175,18 @@ namespace VideoProcessorTest
 			}
 		}
 
-		// GEM-137 (AB1#1) + CE-WATER / C4: CRD2 carries verdictFlags, layerFlags, finalRefineCells, dyn/water/static/two-layer
-		// signals, layerRisk, haveObjectLayer, objectLayer, plus the 6 appended CE-WATER/C4 signal doubles (dynCurvature,
-		// dynRhoTemp, rawShare, shearEnergy, dipoleTB, dipoleLR; total 595 B) while still decoding legacy 366-byte CRD1 payloads
-		// and refusing corrupt magic, truncated CRD2 tails, or out-of-range objectLayer.type without touching target.
+		// GEM-137 (AB1#1) + CE-WATER / C4 + POD1-H2: CRD2 carries verdictFlags, layerFlags, finalRefineCells, dyn/water/static/two-layer
+		// signals, layerRisk, haveObjectLayer, objectLayer, the 6 CE-WATER/C4 signal doubles, plus POD1-H2 absThresholdPx (total 603 B)
+		// while still decoding legacy 366-byte CRD1 payloads and refusing corrupt magic, truncated CRD2 tails, or out-of-range
+		// objectLayer.type without touching target.
 		TEST_METHOD(Crd2PreservesVerdictFlagsSignalsAndDecodesLegacyCrd1)
 		{
 			constexpr size_t kCrd1Bytes = 366;
-			constexpr size_t kCrd2Bytes = 595;
+			constexpr size_t kCrd2Bytes = 603;
 			constexpr size_t kObjectLayerTypeOffset = 454;
 
 			CameraMotion a = PodRec(108);
+			a.absThresholdPx = 1.375;
 			a.reason = Reason::Ambiguous;
 			a.verdictFlags = static_cast<uint8_t>(kVerdictDynamicTexture | kVerdictStaticCamera);
 			a.layerFlags = 0x57u;
@@ -241,8 +242,10 @@ namespace VideoProcessorTest
 			b.signals.dipoleTB = 9.0;
 			b.signals.dipoleLR = 9.0;
 			b.haveObjectLayer = false;
+			b.absThresholdPx = 99.0;
 			Assert::IsTrue(CameraLink::DecodeRecordPod(buf.data(), n, b), L"CRD2 decode succeeds");
 			Assert::AreEqual(a.seq, b.seq);
+			Assert::AreEqual(a.absThresholdPx, b.absThresholdPx, 0.0, L"POD1-H2: absThresholdPx round-trips in CRD2");
 			Assert::IsTrue(a.reason == b.reason);
 			Assert::AreEqual(a.confidence, b.confidence);
 			Assert::AreEqual(a.verdictFlags, b.verdictFlags);

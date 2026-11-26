@@ -278,6 +278,14 @@ upscaleLight=linear
 adaptive=1,8,40,2,8,0.40000000596046448,1000,0.5,0,0.5,1,500,0,1,1,1,1,0,1,0,0.10000000149011612,0.40000000596046448,0,250
 debandGrain=0
 edgeBlanking=0,0,0,0
+dvDisplayMapping=vp
+dvPostDecodeDeband=off
+upscaleRoute=off
+upscaleSharp=lanczos3
+upscaleSafe=hermite
+upscaleSharpAntiring=0.5
+vpvCameraSnapshot=
+vpvSkeletonSnapshot=
 ### sample VideoProcessor.cfg
 fp live=g1 restart=g1
 + rule=scaling/default, motion/default, display/default, color/rec709, viewport/viewport_16x9, zoom/viewport_16x9, queue/normal, lldv/default, output_display/default, nls/off, standard_shaders/base
@@ -4088,11 +4096,11 @@ fp live=g10 restart=g8
 + calibrationLutStage=libplacebo
 + calibrationLutStageConfigured=libplacebo
 ### calibration_lut_stage=vp
-fp live=g11 restart=g0
+fp live=g11 restart=g9
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{calibration_lut_stage=vp;contrast_recovery=0.3;peak_detection=high_quality;}vprenderer.default{calibration_lut_stage=vp;contrast_recovery=0.3;peak_detection=high_quality;}
 + calibrationLutStageConfigured=vp
 ### calibration_lut_stage=zzz_invalid
-fp live=g3 restart=g3
+fp live=g12 restart=g10
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -10597,18 +10605,18 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### entrance_gpu_drain=off
-fp live=g12 restart=g0
+fp live=g13 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;entrance_gpu_drain=off;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;entrance_gpu_drain=off;peak_detection=high_quality;}
 ### entrance_gpu_drain=flush
-fp live=g13 restart=g9
+fp live=g14 restart=g11
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;entrance_gpu_drain=flush;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;entrance_gpu_drain=flush;peak_detection=high_quality;}
 + entranceGpuDrain=flush
 ### entrance_gpu_drain=finish
-fp live=g14 restart=g10
+fp live=g15 restart=g12
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;entrance_gpu_drain=finish;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;entrance_gpu_drain=finish;peak_detection=high_quality;}
 + entranceGpuDrain=finish
 ### entrance_gpu_drain=zzz_invalid
-fp live=g3 restart=g3
+fp live=g16 restart=g13
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -10813,14 +10821,14 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### frame_analysis_store=on
-fp live=g15 restart=g11
+fp live=g17 restart=g14
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;frame_analysis_store=on;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;frame_analysis_store=on;peak_detection=high_quality;}
 + frameAnalysisStore=1
 ### frame_analysis_store=off
-fp live=g16 restart=g0
+fp live=g18 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;frame_analysis_store=off;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;frame_analysis_store=off;peak_detection=high_quality;}
 ### frame_analysis_store=zzz_invalid
-fp live=g3 restart=g3
+fp live=g19 restart=g15
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -11121,14 +11129,14 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### hdr_inference=vp
-fp live=g17 restart=g0
+fp live=g20 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;hdr_inference=vp;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;hdr_inference=vp;peak_detection=high_quality;}
 ### hdr_inference=original
-fp live=g18 restart=g12
+fp live=g21 restart=g16
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;hdr_inference=original;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;hdr_inference=original;peak_detection=high_quality;}
 + hdrInference=original
 ### hdr_inference=zzz_invalid
-fp live=g3 restart=g3
+fp live=g22 restart=g17
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -14657,14 +14665,14 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### output_segments_merged=on
-fp live=g19 restart=g13
+fp live=g23 restart=g18
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;output_segments_merged=on;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;output_segments_merged=on;peak_detection=high_quality;}
 + outputSegmentsMerged=1
 ### output_segments_merged=off
-fp live=g20 restart=g0
+fp live=g24 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;output_segments_merged=off;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;output_segments_merged=off;peak_detection=high_quality;}
 ### output_segments_merged=zzz_invalid
-fp live=g3 restart=g3
+fp live=g25 restart=g19
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -14797,14 +14805,14 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### pipeline_entrance_once=on
-fp live=g21 restart=g0
+fp live=g26 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_entrance_once=on;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_entrance_once=on;}
 ### pipeline_entrance_once=off
-fp live=g22 restart=g14
+fp live=g27 restart=g20
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_entrance_once=off;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_entrance_once=off;}
 + pipelineEntranceOnce=0
 ### pipeline_entrance_once=zzz_invalid
-fp live=g3 restart=g3
+fp live=g28 restart=g21
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -14817,43 +14825,43 @@ fp live=g3 restart=g3
 + profileValues=
 + pipelineSettingsProblems=pipeline_entrance_once 'zzz_invalid' (on|off); 
 ### pipeline_order=on
-fp live=g23 restart=g15
+fp live=g29 restart=g22
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=on;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=on;}
 + pipelineOrder=on
 ### pipeline_order=off
-fp live=g24 restart=g16
+fp live=g30 restart=g23
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=off;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=off;}
 + pipelineOrder=off
 ### pipeline_order=auto
-fp live=g25 restart=g17
+fp live=g31 restart=g24
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=auto;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=auto;}
 + pipelineOrder=auto
 ### pipeline_order=1
-fp live=g26 restart=g18
+fp live=g32 restart=g25
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=1;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=1;}
 + pipelineOrder=1
 ### pipeline_order=0
-fp live=g27 restart=g19
+fp live=g33 restart=g26
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=0;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=0;}
 + pipelineOrder=0
 ### pipeline_order=2.5
-fp live=g28 restart=g20
+fp live=g34 restart=g27
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=2.5;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=2.5;}
 + pipelineOrder=2.5
 ### pipeline_order=10
-fp live=g29 restart=g21
+fp live=g35 restart=g28
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=10;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=10;}
 + pipelineOrder=10
 ### pipeline_order=100
-fp live=g30 restart=g22
+fp live=g36 restart=g29
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=100;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=100;}
 + pipelineOrder=100
 ### pipeline_order=zzz_invalid
-fp live=g31 restart=g23
+fp live=g37 restart=g30
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=zzz_invalid;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_order=zzz_invalid;}
 + pipelineOrder=zzz_invalid
 ### pipeline_original_pathway=on
-fp live=g32 restart=g24
+fp live=g38 restart=g31
 + chromaUpscaler=bicubic
 + dejudderEstStillZero=0
 + nativeRgbIngest=0
@@ -14897,11 +14905,12 @@ fp live=g32 restart=g24
 + extendedRangeMoreCases=0
 + adaptive=1,8,40,2,8,0.40000000596046448,1000,0.5,0,0.5,1,500,0,1,0,0,0,0,1,0,0.10000000149011612,0.40000000596046448,0,250
 + debandGrain=1
++ dvDisplayMapping=original
 ### pipeline_original_pathway=off
-fp live=g33 restart=g0
+fp live=g39 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_original_pathway=off;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_original_pathway=off;}
 ### pipeline_original_pathway=zzz_invalid
-fp live=g3 restart=g3
+fp live=g40 restart=g32
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -14914,39 +14923,39 @@ fp live=g3 restart=g3
 + profileValues=
 + pipelineSettingsProblems=pipeline_original_pathway 'zzz_invalid' (on|off); 
 ### pipeline_slots_off=on
-fp live=g34 restart=g25
+fp live=g41 restart=g33
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=on;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=on;}
 + pipelineSlotsOff=on
 ### pipeline_slots_off=off
-fp live=g35 restart=g26
+fp live=g42 restart=g34
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=off;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=off;}
 + pipelineSlotsOff=off
 ### pipeline_slots_off=auto
-fp live=g36 restart=g27
+fp live=g43 restart=g35
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=auto;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=auto;}
 + pipelineSlotsOff=auto
 ### pipeline_slots_off=1
-fp live=g37 restart=g28
+fp live=g44 restart=g36
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=1;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=1;}
 + pipelineSlotsOff=1
 ### pipeline_slots_off=0
-fp live=g38 restart=g29
+fp live=g45 restart=g37
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=0;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=0;}
 + pipelineSlotsOff=0
 ### pipeline_slots_off=2.5
-fp live=g39 restart=g30
+fp live=g46 restart=g38
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=2.5;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=2.5;}
 + pipelineSlotsOff=2.5
 ### pipeline_slots_off=10
-fp live=g40 restart=g31
+fp live=g47 restart=g39
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=10;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=10;}
 + pipelineSlotsOff=10
 ### pipeline_slots_off=100
-fp live=g41 restart=g32
+fp live=g48 restart=g40
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=100;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=100;}
 + pipelineSlotsOff=100
 ### pipeline_slots_off=zzz_invalid
-fp live=g42 restart=g33
+fp live=g49 restart=g41
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=zzz_invalid;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;pipeline_slots_off=zzz_invalid;}
 + pipelineSlotsOff=zzz_invalid
 ### preserve_extended_range=on
@@ -15886,18 +15895,18 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### resync_event=off
-fp live=g43 restart=g0
+fp live=g50 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;resync_event=off;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;resync_event=off;}
 ### resync_event=shadow
-fp live=g44 restart=g34
+fp live=g51 restart=g42
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;resync_event=shadow;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;resync_event=shadow;}
 + resyncEvent=shadow
 ### resync_event=on
-fp live=g45 restart=g35
+fp live=g52 restart=g43
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;resync_event=on;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;resync_event=on;}
 + resyncEvent=on
 ### resync_event=zzz_invalid
-fp live=g3 restart=g3
+fp live=g53 restart=g44
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -15910,10 +15919,10 @@ fp live=g3 restart=g3
 + profileValues=
 + pipelineSettingsProblems=resync_event 'zzz_invalid' (off|shadow|on); 
 ### retirement_a=approve
-fp live=g46 restart=g0
+fp live=g54 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_a=approve;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_a=approve;}
 ### retirement_a=keep
-fp live=g47 restart=g0
+fp live=g55 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_a=keep;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_a=keep;}
 ### retirement_a=zzz_invalid
 fp live=g3 restart=g3
@@ -15928,10 +15937,10 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### retirement_b=approve
-fp live=g48 restart=g0
+fp live=g56 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_b=approve;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_b=approve;}
 ### retirement_b=keep
-fp live=g49 restart=g0
+fp live=g57 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_b=keep;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_b=keep;}
 ### retirement_b=zzz_invalid
 fp live=g3 restart=g3
@@ -15946,10 +15955,10 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### retirement_c=approve
-fp live=g50 restart=g0
+fp live=g58 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_c=approve;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_c=approve;}
 ### retirement_c=keep
-fp live=g51 restart=g0
+fp live=g59 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_c=keep;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_c=keep;}
 ### retirement_c=zzz_invalid
 fp live=g3 restart=g3
@@ -15964,10 +15973,10 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### retirement_d=approve
-fp live=g52 restart=g0
+fp live=g60 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_d=approve;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_d=approve;}
 ### retirement_d=keep
-fp live=g53 restart=g0
+fp live=g61 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_d=keep;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;retirement_d=keep;}
 ### retirement_d=zzz_invalid
 fp live=g3 restart=g3
@@ -20014,7 +20023,7 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### all-keys-probe-0
-fp live=g54 restart=g36
+fp live=g62 restart=g45
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -20068,8 +20077,9 @@ fp live=g54 restart=g36
 + extendedRangeMoreCases=0
 + adaptive=1,8,40,2,8,0.40000000596046448,1000,0.5,0,0.5,1,500,0,1,0,0,0,0,1,0,0.10000000149011612,0.40000000596046448,0,250
 + debandGrain=1
++ dvDisplayMapping=original
 ### all-keys-probe-1
-fp live=g55 restart=g37
+fp live=g63 restart=g46
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -20088,7 +20098,7 @@ fp live=g55 restart=g37
 + resyncEvent=shadow
 + entranceGpuDrain=flush
 ### all-keys-probe-2
-fp live=g56 restart=g38
+fp live=g64 restart=g47
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0
@@ -20107,7 +20117,7 @@ fp live=g56 restart=g38
 + resyncEvent=on
 + entranceGpuDrain=finish
 ### all-keys-probe-3
-fp live=g57 restart=g39
+fp live=g65 restart=g48
 + rule=
 + peakDetection=0
 + hasContrastRecovery=0

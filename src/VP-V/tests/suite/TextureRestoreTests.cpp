@@ -1721,10 +1721,11 @@ namespace TextureRestoreTestsNs
 			ModGuard modVeto(gpu), modNoVeto(gpu);
 			pl_tex inputs[2] = { tex0.tex, tex1.tex };
 			pl_frame outVeto{}, outNoVeto{};
+			Assert::IsFalse(TextureRestore::Params().vectorVeto, L"W23-IR-H2: TextureRestore::Params::vectorVeto defaults false");
 			for (int k = 0; k < 2; ++k)
 			{
 				TextureRestore::Params pVeto = Frame(601u + static_cast<uint64_t>(k));
-				Assert::IsTrue(pVeto.vectorVeto, L"TextureRestore::Params::vectorVeto defaults true");
+				pVeto.vectorVeto = true;
 				pVeto.sceneReader = panCutReader;
 				pVeto.memo = &memoP7;
 				Assert::IsTrue(modVeto.mod.Apply(gpu, dev.dispatch, LumaFrame(inputs[k]), pVeto, outVeto), Wide(modVeto.mod.LastError()).c_str());
@@ -1743,6 +1744,129 @@ namespace TextureRestoreTestsNs
 			const Image imgNoVeto = Download(gpu, outNoVeto.planes[0].texture);
 			Assert::IsTrue(MaxAbsDiff(imgVeto, in1) > 0.5, L"vetoed TR retained frame 0 references and restored coarse frame 1");
 			Assert::IsTrue(MaxAbsDiff(imgVeto, imgNoVeto) > 0.5, L"negative control: suppressing vs taking restart materially alters TR GPU output");
+		}
+
+		// W23-C2-S4-H1 (bff541a87): TextureRestore::Apply declines stage-0 P11 band textures BOTH when
+		// (a) upstreamModified == true ("input plane modified by upstream entrance stage (pipelineStage > 0)"), and
+		// (b) params.picture crops letterbox/pillarbox borders ("cropped active-picture border (P11 spans frame rect)"),
+		// while same-input uncropped stage-0 negative control hits P11 cleanly.
+		BEGIN_TEST_METHOD_ATTRIBUTE(TextureRestoreGpuDeclinesP11OnUpstreamModifiedAndCroppedActivePicture)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(TextureRestoreGpuDeclinesP11OnUpstreamModifiedAndCroppedActivePicture)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				TexGuard(const TexGuard&) = delete;
+				TexGuard& operator=(const TexGuard&) = delete;
+			};
+			struct ModGuard
+			{
+				pl_gpu gpu = nullptr;
+				TextureRestore::Module mod;
+				explicit ModGuard(pl_gpu g) : gpu(g) {}
+				~ModGuard() { mod.Release(gpu); }
+				ModGuard(const ModGuard&) = delete;
+				ModGuard& operator=(const ModGuard&) = delete;
+			};
+
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+
+			const int W = 128, H = 96;
+			Image srcImg(W, H);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+					srcImg.at(x, y) = 420.0 + 24.0 * std::sin(0.25 * x) * std::cos(0.25 * y);
+			TexGuard srcTex(gpu, UploadLuma(gpu, srcImg));
+
+			const int p11B = RegionEvidence::BlockSizeFor(H);
+			const int p11W = (W + p11B - 1) / p11B, p11H = (H + p11B - 1) / p11B;
+			std::vector<float> p11S2(static_cast<size_t>(p11W) * p11H * 4u, 12.0f);
+			std::vector<float> p11S4(static_cast<size_t>(p11W) * p11H * 4u, 1.0f);
+			pl_tex_params tp{};
+			tp.w = p11W; tp.h = p11H; tp.format = pl_find_named_fmt(gpu, "rgba32f"); tp.sampleable = true;
+			tp.initial_data = p11S2.data();
+			TexGuard s2Tex(gpu, pl_tex_create(gpu, &tp));
+			tp.initial_data = p11S4.data();
+			TexGuard s4Tex(gpu, pl_tex_create(gpu, &tp));
+			Assert::IsTrue(s2Tex.tex && s4Tex.tex, L"P11 s2/s4 textures created");
+
+			Vpv::Skeleton::OwnerGpuDevice ownerDev(gpu);
+			VpSkeleton::SkeletonMemo memo;
+			memo.SetHost(&memo);
+			memo.SetRenderThread(std::this_thread::get_id());
+			memo.SetGpuDispatcherPresent(true);
+			memo.SetGpuBudget(true, uint64_t(1) << 28);
+			memo.SetGpuDevice(&ownerDev);
+
+			pl_tex s2Ptr = s2Tex.tex;
+			pl_tex s4Ptr = s4Tex.tex;
+			VpSkeleton::OwnerFill p11Fill;
+			p11Fill.view = true;
+			p11Fill.frameScoped = true;
+			p11Fill.fill = [s2Ptr, s4Ptr, p11W, p11H](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				out.gpu.resource = const_cast<void*>(static_cast<const void*>(s2Ptr));
+				out.gpu.view = const_cast<void*>(static_cast<const void*>(s4Ptr));
+				out.gpu.width = static_cast<uint32_t>(p11W);
+				out.gpu.height = static_cast<uint32_t>(p11H);
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP11RegionBlockStats, VpSkeleton::AcquireForm::Gpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP11RegionBlockStats), std::move(p11Fill)) == Reg::Registered);
+
+			// 1. Same-input negative control (uncropped, upstreamModified == false): hits shared P11 cleanly!
+			{
+				ModGuard modHit(gpu);
+				TextureRestore::Params p = Frame(701u);
+				p.memo = &memo;
+				pl_frame out{};
+				Assert::IsTrue(modHit.mod.Apply(gpu, dev.dispatch, LumaFrame(srcTex.tex), p, out, /*upstreamModified=*/false),
+					Wide(modHit.mod.LastError()).c_str());
+				Assert::AreEqual(1ull, modHit.mod.P11EnergyHits(), L"negative control: uncropped stage-0 TR hits shared P11");
+				Assert::AreEqual(0ull, modHit.mod.P11EnergyFallbacks(), L"negative control: zero P11 fallbacks on uncropped stage-0");
+				memo.OnSeal(p.sequence);
+			}
+
+			// 2. upstreamModified == true (post-deband / post-pulse stage > 0): declines stage-0 P11 visibly!
+			{
+				ModGuard modUp(gpu);
+				TextureRestore::Params p = Frame(702u);
+				p.memo = &memo;
+				pl_frame out{};
+				Assert::IsTrue(modUp.mod.Apply(gpu, dev.dispatch, LumaFrame(srcTex.tex), p, out, /*upstreamModified=*/true),
+					Wide(modUp.mod.LastError()).c_str());
+				Assert::AreEqual(0ull, modUp.mod.P11EnergyHits(), L"S4-H1: upstreamModified=true must NOT hit stage-0 P11");
+				Assert::AreEqual(1ull, modUp.mod.P11EnergyFallbacks(), L"S4-H1: upstreamModified=true increments P11EnergyFallbacks");
+				Assert::AreEqual(std::string("input plane modified by upstream entrance stage (pipelineStage > 0)"),
+					modUp.mod.LastP11EnergyFallback(), L"S4-H1: exact upstreamModified P11 decline reason");
+				memo.OnSeal(p.sequence);
+			}
+
+			// 3. Cropped active-picture border (letterbox top=12, bottom=H-12 normalised): declines full-frame P11 visibly!
+			{
+				ModGuard modCrop(gpu);
+				TextureRestore::Params p = Frame(703u);
+				p.memo = &memo;
+				p.picture = pl_rect2df{ 0.0f, 12.0f / static_cast<float>(H), 1.0f, static_cast<float>(H - 12) / static_cast<float>(H) };
+				pl_frame out{};
+				Assert::IsTrue(modCrop.mod.Apply(gpu, dev.dispatch, LumaFrame(srcTex.tex), p, out, /*upstreamModified=*/false),
+					Wide(modCrop.mod.LastError()).c_str());
+				Assert::AreEqual(0ull, modCrop.mod.P11EnergyHits(), L"S4-H1: cropped active picture must NOT use uncropped P11");
+				Assert::AreEqual(1ull, modCrop.mod.P11EnergyFallbacks(), L"S4-H1: cropped active picture increments P11EnergyFallbacks");
+				Assert::AreEqual(std::string("cropped active-picture border (P11 spans frame rect)"),
+					modCrop.mod.LastP11EnergyFallback(), L"S4-H1: exact cropped-border P11 decline reason");
+				memo.OnSeal(p.sequence);
+			}
+
+			memo.ReleaseGpuSpots();
+			ownerDev.Release();
 		}
 	};
 }

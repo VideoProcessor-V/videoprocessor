@@ -275,7 +275,8 @@ namespace GrainUnitGpuTestsNs
 			// WAIVER-GS-155 (L#3, commit 6bfb1d462: LEVEL_BODY boundary-bin zero-energy exclusion q <= 1/12 code^2, BTB/WTW preserved): 0xf33e0215cda77a66 -> 0x63b5ed5b2aa6ca3b, recomputed offline.
 			// WAIVER-W23-P2M9 (POD2-M9: LEVEL_BODY midtone NaN/+Inf histogram guard across all bins): 0x63b5ed5b2aa6ca3b -> 0x25867c1fa10f515b, recomputed offline.
 			// WAIVER-W23-P2M9-NAN-BITS (commit 19d10c929: STATS integer bounds + REDUCE/LEVEL IEEE-754 exponent bit-check for NaN/Inf immune to FXC fast-math): 0x25867c1fa10f515b -> 0xc36376ebb10388d7.
-			Assert::AreEqual(uint64_t(0xc36376ebb10388d7ull), GrainSplit::Gpu::FullShaderFingerprint(), L"pass shader texts are the unit-5 + GS-155 + POD2-M9 text");
+			// WAIVER-W23-POSTSEAL-REDTEAM (POD2-H1 432818710 crop border clamp + neutral-chroma bin exclusion, W23-NEON-B1/M2 3ad95bc94 LOW_S_GLSL LDS OOB clamp + active-border bar blocks): 0xc36376ebb10388d7 -> 0xf87972fcfd6ff22c.
+			Assert::AreEqual(uint64_t(0xf87972fcfd6ff22cull), GrainSplit::Gpu::FullShaderFingerprint(), L"pass shader texts match post-seal POD2-H1 + W23-NEON-B1/M2 text");
 			const std::string full = GrainSplit::Gpu::ViewGlsl(Storage::Full, kCu10in16);
 			const std::string compact = GrainSplit::Gpu::ViewGlsl(Storage::Compact, kCu10in16);
 			const std::string define = "#define GS_UNIT_VERSION " + std::to_string(GrainSplit::kUnitVersion);

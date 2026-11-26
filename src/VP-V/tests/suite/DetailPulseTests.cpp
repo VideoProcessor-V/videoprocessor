@@ -2239,10 +2239,11 @@ namespace DetailPulseTestsNs
 			PulseGuard dpVeto(gpu), dpNoVeto(gpu);
 			pl_tex inputs[2] = { tex0.t, tex1.t };
 			pl_frame outVeto{}, outNoVeto{};
+			Assert::IsFalse(DetailPulse::Params().vectorVeto, L"W23-IR-H2: DetailPulse::Params::vectorVeto defaults false");
 			for (int k = 0; k < 2; ++k)
 			{
 				DetailPulse::Params pVeto;
-				Assert::IsTrue(pVeto.vectorVeto, L"DetailPulse::Params::vectorVeto defaults true");
+				pVeto.vectorVeto = true;
 				pVeto.sequence = static_cast<uint64_t>(k) + 1u;
 				pVeto.sceneReader = panCutReader;
 				pVeto.memo = &memoP7;
@@ -2388,6 +2389,118 @@ namespace DetailPulseTestsNs
 			pl_tex_destroy(g.gpu, &tex1);
 			pl_tex_destroy(g.gpu, &tex2Eq);
 			pl_tex_destroy(g.gpu, &tex2Shift);
+		}
+
+		// W23-C2-S4-H1 (bff541a87): when an upstream entrance stage modified the input plane (upstreamModified == true,
+		// pipelineStage > 0, e.g. post-VpDebander), DetailPulse::Apply MUST decline stage-0 kBandMemo and P11 band
+		// energies with "input plane modified by upstream entrance stage (pipelineStage > 0)" and compute bands from
+		// the actual modified input instead of re-injecting raw stage-0 pre-deband bands; same-input stage-0
+		// (upstreamModified == false) negative control consumes cached stage-0 kBandMemo & P11 (polluting output if used post-deband).
+		TEST_METHOD(DetailPulseGpuUpstreamModifiedDeclinesStageZeroBandMemoAndP11)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			namespace GB = Vpv::GrainBand;
+
+			PulseGpu g;
+			const int W = 128, H = 96;
+			const int HW = W / 2, HH = H / 2;
+
+			// Smooth post-deband luma input (constant 400 codes), while stage-0 kBandMemo holds a +120-code step
+			// from the raw pre-deband stage-0 plane: if stage>0 mistakenly reused stage-0 kBandMemo, fine/coarse
+			// band subtraction `code - low` would inject a false -120-code phantom detail edge!
+			Image cleanInput(W, H);
+			for (size_t i = 0; i < cleanInput.v.size(); ++i)
+				cleanInput.v[i] = 400.0;
+			pl_tex cleanTex = g.Upload(cleanInput);
+
+			std::vector<float> poisonedHalfLow(static_cast<size_t>(HW) * HH, 0.0f);
+			for (int y = 0; y < HH; ++y)
+				for (int x = 0; x < HW; ++x)
+					poisonedHalfLow[static_cast<size_t>(y) * HW + x] = static_cast<float>(((x < HW / 2 ? 280 : 520) << 6) / 65535.0);
+			pl_tex_params hp{};
+			hp.w = HW; hp.h = HH; hp.format = pl_find_named_fmt(g.gpu, "r32f"); hp.sampleable = true; hp.initial_data = poisonedHalfLow.data();
+			pl_tex poisonedBandTex = pl_tex_create(g.gpu, &hp);
+			Assert::IsNotNull(poisonedBandTex, L"poisoned stage-0 kBandMemo texture created");
+
+			const int p11B = RegionEvidence::BlockSizeFor(H);
+			const int p11W = (W + p11B - 1) / p11B, p11H = (H + p11B - 1) / p11B;
+			std::vector<float> p11Data(static_cast<size_t>(p11W) * p11H * 4u, 25.0f);
+			pl_tex_params p11p{};
+			p11p.w = p11W; p11p.h = p11H; p11p.format = pl_find_named_fmt(g.gpu, "rgba32f"); p11p.sampleable = true; p11p.initial_data = p11Data.data();
+			pl_tex p11Tex = pl_tex_create(g.gpu, &p11p);
+			Assert::IsNotNull(p11Tex, L"stage-0 P11 texture created");
+
+			Vpv::Skeleton::OwnerGpuDevice ownerDev(g.gpu);
+			VpSkeleton::SkeletonMemo memo;
+			memo.SetHost(&memo);
+			memo.SetRenderThread(std::this_thread::get_id());
+			memo.SetGpuDispatcherPresent(true);
+			memo.SetGpuBudget(true, uint64_t(1) << 28);
+			memo.SetGpuDevice(&ownerDev);
+
+			VpSkeleton::OwnerFill bandFill;
+			bandFill.variantAxes = GB::MakeBandMemoOwnerFill(0).variantAxes;
+			bandFill.view = true;
+			bandFill.frameScoped = true;
+			bandFill.fill = [poisonedBandTex, HW, HH](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				out.gpu.resource = const_cast<void*>(static_cast<const void*>(poisonedBandTex));
+				out.gpu.width = static_cast<uint32_t>(HW);
+				out.gpu.height = static_cast<uint32_t>(HH);
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu,
+				GB::kBandMemoUnit, std::move(bandFill)) == Reg::Registered);
+
+			VpSkeleton::OwnerFill p11Fill;
+			p11Fill.view = true;
+			p11Fill.frameScoped = true;
+			p11Fill.fill = [p11Tex, p11W, p11H](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				out.gpu.resource = const_cast<void*>(static_cast<const void*>(p11Tex));
+				out.gpu.width = static_cast<uint32_t>(p11W);
+				out.gpu.height = static_cast<uint32_t>(p11H);
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP11RegionBlockStats, VpSkeleton::AcquireForm::Gpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP11RegionBlockStats), std::move(p11Fill)) == Reg::Registered);
+
+			DetailPulse::Params p;
+			p.sequence = 10u;
+			p.memo = &memo;
+			p.sceneReader = &NoCutReader;
+
+			// Protected stage>0 path (upstreamModified == true): declines BOTH kBandMemo and P11 with exact reason,
+			// keeping flat 400-code input completely free of the stage-0 step edge!
+			DetailPulse::Module modStage1;
+			pl_frame outStage1{};
+			Assert::IsTrue(modStage1.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(cleanTex), p, outStage1, /*upstreamModified=*/true),
+				ExtendedRangeGpuProbe::ToWide(modStage1.LastError()).c_str());
+			Assert::AreEqual(0ull, modStage1.BandMemoHits(), L"S4-H1: upstreamModified=true must NOT hit stage-0 kBandMemo");
+			Assert::AreEqual(1ull, modStage1.BandMemoFallbacks(), L"S4-H1: upstreamModified=true increments BandMemoFallbacks");
+			Assert::AreEqual(std::string("input plane modified by upstream entrance stage (pipelineStage > 0)"),
+				modStage1.LastBandMemoFallback(), L"S4-H1: exact BandMemo decline reason");
+			Assert::AreEqual(0ull, modStage1.P11EnergyHits(), L"S4-H1: upstreamModified=true must NOT hit stage-0 P11");
+			Assert::AreEqual(1ull, modStage1.P11EnergyFallbacks(), L"S4-H1: upstreamModified=true increments P11EnergyFallbacks");
+			Assert::AreEqual(std::string("input plane modified by upstream entrance stage (pipelineStage > 0)"),
+				modStage1.LastP11EnergyFallback(), L"S4-H1: exact P11 decline reason");
+			const Image imgStage1 = g.Readback(outStage1.planes[0].texture);
+			Assert::AreEqual(0.0, MaxAbsDiff(imgStage1, cleanInput), 1e-3, L"S4-H1: flat post-deband plane stays flat");
+
+			// Same-input negative control (upstreamModified == false, i.e. pre-fix stage>0 blindness): consumes stage-0 kBandMemo!
+			DetailPulse::Module modNaive;
+			pl_frame outNaive{};
+			Assert::IsTrue(modNaive.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(cleanTex), p, outNaive, /*upstreamModified=*/false),
+				ExtendedRangeGpuProbe::ToWide(modNaive.LastError()).c_str());
+			Assert::AreEqual(1ull, modNaive.BandMemoHits(),
+				L"negative control: without upstreamModified guard, Apply consumes mismatched stage-0 kBandMemo");
+
+			modStage1.Release(g.gpu);
+			modNaive.Release(g.gpu);
+			memo.OnSeal(p.sequence);
+			memo.ReleaseGpuSpots();
+			ownerDev.Release();
+			pl_tex_destroy(g.gpu, &p11Tex);
+			pl_tex_destroy(g.gpu, &poisonedBandTex);
+			pl_tex_destroy(g.gpu, &cleanTex);
 		}
 	};
 }

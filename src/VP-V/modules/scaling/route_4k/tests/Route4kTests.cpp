@@ -446,7 +446,9 @@ namespace Route4kTestsNs
 			Assert::IsTrue(mod.Apply(gpu, dev.dispatch, srcFrame, plan, cfg, outFrame, 0),
 				Wide("Route4k::Apply failed: " + mod.LastError()).c_str());
 			Assert::AreEqual(0ull, mod.Failures());
-			Assert::IsFalse(mod.Fallback().engaged);
+			// POD2-H3 (432818710): static hybrid weights (wBase > 0 without live e/g/m maps) visibly surface Fallback().
+			Assert::IsTrue(mod.Fallback().engaged && mod.Fallback().reason.find("static hybrid weights") != std::string::npos,
+				L"POD2-H3: static wBase=0.5 visibly engages static hybrid weights fallback");
 			Assert::IsNotNull(outFrame.planes[0].texture);
 			Assert::AreEqual(dw, outFrame.planes[0].texture->params.w);
 			Assert::AreEqual(dh, outFrame.planes[0].texture->params.h);

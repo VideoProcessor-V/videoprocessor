@@ -3,6 +3,7 @@
 // (every configuration here either keeps the drive off or has the projector slot off).
 #include "pch.h"
 #include "CppUnitTest.h"
+#include <VP-V/core/RunningPathwayLatch.h>
 #include <VP-V/modules/drive/led_compensation/DynamicDriveFrame.h>
 #include <VP-V/modules/drive/led_compensation/DynamicDriveHost.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
@@ -1839,6 +1840,133 @@ namespace VideoProcessorTest
 				reg.EntriesInto(buf);
 				Assert::AreEqual(size_t(2), buf.size());
 				Assert::IsTrue(buf.data() == dataPtr, L"EntriesInto reuses pre-reserved storage without reallocating");
+			}
+		}
+
+		// W23-C2-S2-H3 (bff541a87) + HIGH-2 (24d188643):
+		// (1) ApplyAcceptedSnapshot with snapshotConfig == nullptr and nextOriginal == true performs full non-blocking
+		//     Original teardown (stops running LedDriveModule, clears DynamicDriveShared module/params/rejection, sets
+		//     RunningPathway::Original()); same-input negative control with nextOriginal == false leaves running module up.
+		// (2) Attach() during Build() before Initialize() (context.implInitialized == false) defers starting a new module
+		//     until post-Initialize Attach() confirms VP-V and candidateProjectorAllowedIn == true; if candidateProjectorAllowedIn
+		//     is false (e.g. drive.projector_control in pipeline_slots_off), Attach() refuses to start or publish.
+		TEST_METHOD(ApplyAcceptedSnapshotNullOriginalTeardownAndDeferredPreInitAttach)
+		{
+			struct PathwayGuard
+			{
+				PathwayGuard() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+				~PathwayGuard() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+			} pathwayGuard;
+
+			std::mutex state;
+			std::shared_ptr<QueuedFrameStatistics::IObserver> walkObserver;
+			LedDrive::DynamicDriveShared shared(walkObserver);
+			LedDrive::DynamicDriveHost host(state);
+			auto projector = std::make_shared<FakeProjector>();
+			host.SetPortFactoryForTest([projector] { return std::make_unique<FakePort>(projector); });
+			struct LocalHostCleanup
+			{
+				LedDrive::DynamicDriveHost& h;
+				LedDrive::DynamicDriveShared* s;
+				~LocalHostCleanup()
+				{
+					LedDrive::HostContext ctx;
+					ctx.frame = s;
+					h.StopForShutdown(ctx);
+				}
+			} cleanup{ host, &shared };
+
+			const std::string validLedText =
+				"[projector.default]\n"
+				"protocol: barco_ascii\n"
+				"port: COM250\n"
+				"[led_drive.default]\n"
+				"enabled: true\n"
+				"mode: compensate\n"
+				"gamma_boost: 2.4\n";
+			AdapterConfig vpvCfg(validLedText + "[vpv]\npipeline_original_pathway: off\n");
+
+			int fakeRendererHost = 0;
+			LedDrive::HostContext liveCtx;
+			liveCtx.frame = &shared;
+			liveCtx.projectorAllowed = true;
+			liveCtx.implInitialized = true;
+
+			// Start running VP-V Dynamic Drive via ApplyAcceptedSnapshot.
+			{
+				std::lock_guard<std::mutex> lock(state);
+				host.ApplyAcceptedSnapshot(&fakeRendererHost, vpvCfg.config.get(), false, false,
+					vpvCfg.config, std::string(), liveCtx, false, true, true);
+			}
+			Assert::IsFalse(Vpv::RunningPathway::Original(), L"VP-V ApplyAcceptedSnapshot sets kVpv");
+			Assert::IsNotNull(host.Module().get(), L"precondition: VP-V Dynamic Drive module is running");
+			Assert::IsNotNull(shared.Module().get(), L"precondition: module published to DynamicDriveShared");
+			Assert::AreEqual(2.4, shared.PublishedParams().gammaBoost, 1e-12, L"precondition: gammaBoost published to shared");
+
+			// Seed a non-empty rejection on shared to prove null-snapshot Original teardown clears rejection too.
+			shared.PublishRejection("synthetic prior rejection");
+			Assert::IsFalse(shared.PublishedRejection().empty());
+
+			// Same-input negative control: snapshotConfig == nullptr when nextOriginal == false (e.g. transient non-Original
+			// candidate without profile runtime snapshot) does NOT tear down the running VP-V module.
+			{
+				std::lock_guard<std::mutex> lock(state);
+				host.ApplyAcceptedSnapshot(&fakeRendererHost, vpvCfg.config.get(), true, false,
+					std::shared_ptr<const ConfigFile>(), std::string(), liveCtx, false, true, true);
+			}
+			Assert::IsNotNull(host.Module().get(), L"negative control: null snapshot on VP-V keeps running module");
+			Assert::IsNotNull(shared.Module().get(), L"negative control: null snapshot on VP-V keeps shared module");
+
+			// Fix proof (24d188643 HIGH-2): snapshotConfig == nullptr with explicitOriginalPathway == true tears down immediately!
+			{
+				std::lock_guard<std::mutex> lock(state);
+				host.ApplyAcceptedSnapshot(&fakeRendererHost, nullptr, true, true,
+					std::shared_ptr<const ConfigFile>(), std::string(), liveCtx, false, true, true);
+			}
+			Assert::IsTrue(Vpv::RunningPathway::Original(), L"Original null-snapshot switch sets RunningPathway::Original()");
+			Assert::IsNull(host.Module().get(), L"24d188643 HIGH-2: null-snapshot Original switch stops running module");
+			Assert::IsNull(shared.Module().get(), L"24d188643 HIGH-2: null-snapshot Original switch clears shared module");
+			Assert::AreEqual(0.0, shared.PublishedParams().gammaBoost, 1e-12, L"24d188643 HIGH-2: null-snapshot Original switch resets shared params");
+			Assert::IsTrue(shared.PublishedRejection().empty(), L"24d188643 HIGH-2: null-snapshot Original switch clears shared rejection");
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"status reports off after null-snapshot Original teardown");
+
+			// Part 2 (W23-C2-S2-H3): Live Original -> VP-V rebuild defers startup while implInitialized == false,
+			// refuses Attach() when candidateProjectorAllowedIn == false, and starts cleanly once post-Initialize Attach() runs!
+			{
+				LedDrive::HostContext outgoingCtx;
+				outgoingCtx.frame = &shared;
+				outgoingCtx.projectorAllowed = false; // outgoing Original Impl
+				outgoingCtx.implInitialized = false;
+				{
+					std::lock_guard<std::mutex> lock(state);
+					host.ApplyAcceptedSnapshot(&fakeRendererHost, vpvCfg.config.get(), false, false,
+						vpvCfg.config, std::string(), outgoingCtx, /*rebuilding=*/true, /*implInitialized=*/false, /*candidateProjectorAllowedIn=*/true);
+				}
+				Assert::IsNull(host.Module().get(), L"S2-H3: ApplyAcceptedSnapshot defers module start while rebuilding pre-Init Impl");
+				Assert::IsNull(shared.Module().get(), L"S2-H3: nothing published onto outgoing/uninitialized Impl");
+
+				// Build() runs Attach() with implInitialized == false BEFORE Initialize() resolves pipelineSlots -> still deferred!
+				LedDrive::HostContext preInitAttachCtx;
+				preInitAttachCtx.frame = &shared;
+				preInitAttachCtx.projectorAllowed = true;
+				preInitAttachCtx.implInitialized = false;
+				host.Attach(preInitAttachCtx);
+				Assert::IsNull(host.Module().get(), L"S2-H3: pre-Initialize Attach(implInitialized=false) must NOT open projector port early");
+
+				// Post-Initialize Attach(implInitialized=true) starts and publishes the deferred VP-V module cleanly!
+				host.Attach(liveCtx);
+				Assert::IsNotNull(host.Module().get(), L"S2-H3: post-Initialize Attach(implInitialized=true) starts deferred module");
+				Assert::IsNotNull(shared.Module().get(), L"S2-H3: post-Initialize Attach publishes running module to shared");
+
+				// And if candidateProjectorAllowedIn == false, Attach() detaches and clears shared even if context.projectorAllowed == true!
+				{
+					std::lock_guard<std::mutex> lock(state);
+					host.ApplyAcceptedSnapshot(&fakeRendererHost, vpvCfg.config.get(), false, false,
+						vpvCfg.config, std::string(), outgoingCtx, /*rebuilding=*/true, /*implInitialized=*/false, /*candidateProjectorAllowedIn=*/false);
+				}
+				host.Attach(liveCtx);
+				Assert::IsNull(host.Module().get(), L"S2-H3: candidateProjectorAllowedIn=false prevents Attach from starting/keeping module");
+				Assert::IsNull(shared.Module().get(), L"S2-H3: candidateProjectorAllowedIn=false clears shared module");
 			}
 		}
 	};

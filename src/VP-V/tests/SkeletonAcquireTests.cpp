@@ -1024,9 +1024,10 @@ namespace SkeletonAcquireTestsNs
 			if (threads.t2.joinable())
 				threads.t2.join();
 
-			// Negative control: fill #1 genuinely ran and returned stale payload 0x11.
-			Assert::IsTrue(r1.Ok() && r1.cpuBytes == 64u && r1.cpu[0] == 0x11u,
-				L"negative control: Thread 1 fill #1 produced stale payload 0x11");
+			// W23-SK-M1 (0fd081fdb): when BumpEpoch runs mid-fill, Thread 1's own Acquire must fail closed with FrameReleased
+			// instead of returning stale-epoch payload 0x11, while fillCalls proves fill #1 genuinely ran.
+			Assert::IsTrue(!r1.Ok() && r1.status == AcquireStatus::Unavailable && r1.cause == AcquireCause::FrameReleased,
+				L"W23-SK-M1: Thread 1 in-flight fill invalidated by BumpEpoch fails closed with FrameReleased");
 
 			// K#1 protection: Thread 2 woke from cv_.wait, rejected stale 0x11, and filled 0x22 in the new epoch.
 			Assert::IsTrue(r2.Ok() && r2.status == AcquireStatus::FilledAtRead && r2.cpuBytes == 64u,
@@ -1855,18 +1856,24 @@ namespace SkeletonAcquireTestsNs
 			// 3. POD1-M2: stale GPU spot with readFence > completed defers destruction via retired_ at OnSeal().
 			{
 				SkeletonMemo memo;
+				memo.SetGpuDispatcherPresent(true);
+				memo.SetGpuBudget(true, 1024);
 				uint64_t completedFence = 0;
 				memo.SetFenceCompleted([&completedFence]() { return completedFence; });
-				bool destroyed = false;
+				bool firstDestroyed = false;
+				int fillSeq = 0;
 				int dummyTex = 1;
 				OwnerFill gpuFill;
 				gpuFill.reserveBytes = 64;
 				gpuFill.fill = [&](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out) {
+					const int myFill = fillSeq++;
 					out.gpu.resource = &dummyTex;
 					out.gpu.width = 4;
 					out.gpu.height = 4;
 					out.gpu.bytes = 64;
-					out.gpu.keepAlive = std::shared_ptr<void>(&dummyTex, [&destroyed](void*) { destroyed = true; });
+					out.gpu.keepAlive = std::shared_ptr<void>(&dummyTex, [&firstDestroyed, myFill](void*) {
+						if (myFill == 0) firstDestroyed = true;
+					});
 					return true;
 				};
 				Assert::IsTrue(memo.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Gpu, kGrainUnit, gpuFill) == SkeletonMemo::Registration::Registered);
@@ -1882,12 +1889,12 @@ namespace SkeletonAcquireTestsNs
 				// Seal while fence 5 is still in flight (completed == 4): stale GPU entry MUST move to retired_, NOT destroy!
 				completedFence = 4;
 				memo.OnSeal(11);
-				Assert::IsFalse(destroyed, L"POD1-M2: stale GPU spot with incomplete readFence must NOT be destroyed at OnSeal");
+				Assert::IsFalse(firstDestroyed, L"POD1-M2: stale GPU spot with incomplete readFence must NOT be destroyed at OnSeal");
 				Assert::IsTrue(memo.RetiredPending() >= 1u, L"POD1-M2: stale GPU spot deferred into retired_");
 				// Once fence completes (completed == 5), next OnSeal releases it cleanly.
 				completedFence = 5;
 				memo.OnSeal(12);
-				Assert::IsTrue(destroyed, L"POD1-M2: retired stale GPU spot destroyed once readFence completes");
+				Assert::IsTrue(firstDestroyed, L"POD1-M2: retired stale GPU spot destroyed once readFence completes");
 			}
 		}
 	};
