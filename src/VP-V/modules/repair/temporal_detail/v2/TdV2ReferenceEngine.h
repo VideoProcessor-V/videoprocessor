@@ -1615,14 +1615,14 @@ namespace TdV2
 							if (!std::isfinite(baseVx) || !std::isfinite(baseVy))
 								continue;
 
-							double sadGrid[5][5] = {};
+							double absDiffGrid[5][5] = {};
 							int bestDx = 0, bestDy = 0;
-							double bestSad = std::numeric_limits<double>::infinity();
+							double bestDiff = std::numeric_limits<double>::infinity();
 							for (int dy = -kSearchRad; dy <= kSearchRad; ++dy)
 							{
 								for (int dx = -kSearchRad; dx <= kSearchRad; ++dx)
 								{
-									double sad = 0.0;
+									double absDiffSum = 0.0;
 									size_t cnt = 0;
 									for (int y = y0; y < y1; y += 2)
 									{
@@ -1644,15 +1644,15 @@ namespace TdV2
 											const double a11 = anchorClean_.at(ix1, iy1);
 											const double aVal = (1.0 - fy) * ((1.0 - fx) * a00 + fx * a10) +
 											                    fy * ((1.0 - fx) * a01 + fx * a11);
-											sad += std::fabs(curClean.at(x, y) - aVal);
+											absDiffSum += std::fabs(curClean.at(x, y) - aVal);
 											++cnt;
 										}
 									}
-									const double meanSad = (cnt > 0) ? (sad / static_cast<double>(cnt)) : std::numeric_limits<double>::infinity();
-									sadGrid[dy + kSearchRad][dx + kSearchRad] = meanSad;
-									if (meanSad < bestSad)
+									const double meanDiff = (cnt > 0) ? (absDiffSum / static_cast<double>(cnt)) : std::numeric_limits<double>::infinity();
+									absDiffGrid[dy + kSearchRad][dx + kSearchRad] = meanDiff;
+									if (meanDiff < bestDiff)
 									{
-										bestSad = meanSad;
+										bestDiff = meanDiff;
 										bestDx = dx;
 										bestDy = dy;
 									}
@@ -1662,18 +1662,18 @@ namespace TdV2
 							double subDy = static_cast<double>(bestDy);
 							if (bestDx > -kSearchRad && bestDx < kSearchRad)
 							{
-								const double cL = sadGrid[bestDy + kSearchRad][bestDx + kSearchRad - 1];
-								const double c0 = sadGrid[bestDy + kSearchRad][bestDx + kSearchRad];
-								const double cR = sadGrid[bestDy + kSearchRad][bestDx + kSearchRad + 1];
+								const double cL = absDiffGrid[bestDy + kSearchRad][bestDx + kSearchRad - 1];
+								const double c0 = absDiffGrid[bestDy + kSearchRad][bestDx + kSearchRad];
+								const double cR = absDiffGrid[bestDy + kSearchRad][bestDx + kSearchRad + 1];
 								const double den = cL - 2.0 * c0 + cR;
 								if (std::isfinite(den) && den > kEngineNumFloor)
 									subDx += (std::max)(-0.5, (std::min)(0.5, 0.5 * (cL - cR) / den));
 							}
 							if (bestDy > -kSearchRad && bestDy < kSearchRad)
 							{
-								const double cU = sadGrid[bestDy + kSearchRad - 1][bestDx + kSearchRad];
-								const double c0 = sadGrid[bestDy + kSearchRad][bestDx + kSearchRad];
-								const double cD = sadGrid[bestDy + kSearchRad + 1][bestDx + kSearchRad];
+								const double cU = absDiffGrid[bestDy + kSearchRad - 1][bestDx + kSearchRad];
+								const double c0 = absDiffGrid[bestDy + kSearchRad][bestDx + kSearchRad];
+								const double cD = absDiffGrid[bestDy + kSearchRad + 1][bestDx + kSearchRad];
 								const double den = cU - 2.0 * c0 + cD;
 								if (std::isfinite(den) && den > kEngineNumFloor)
 									subDy += (std::max)(-0.5, (std::min)(0.5, 0.5 * (cU - cD) / den));

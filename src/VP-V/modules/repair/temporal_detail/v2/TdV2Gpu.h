@@ -3135,7 +3135,7 @@ namespace Gpu
 			const size_t shmemHalfH = static_cast<size_t>(16 * (16 + 2 * rHLow)) * sizeof(float);
 			const size_t shmemHalfV = static_cast<size_t>((16 + 2 * rHLow) * 16) * 2u * sizeof(float);
 			const size_t fineTileDim = static_cast<size_t>(16 + 2 * rFine);
-			const size_t shmemFullMH = (fineTileDim * fineTileDim + fineTileDim * 16u) * sizeof(float);
+			const size_t shmemFullMH = (fineTileDim * fineTileDim + fineTileDim * 16u + 100u) * sizeof(float);
 
 			auto runBandDecomp = [&](pl_tex srcTex, pl_tex dstRefFull, pl_tex dstRtMH, pl_tex dstRtLD3) -> bool
 			{
@@ -3289,7 +3289,7 @@ namespace Gpu
 			const std::string warpHdr = staticGeom +
 				VpvGpu::DefineInt("TD_CLS_CAMERA", static_cast<int>(RegionMotionClass::Camera)) +
 				Shaders::kCoreHelpers + Shaders::kPass1WarpHeader;
-			const size_t shmemWarp = (20u * 20u * 2u) * sizeof(float);
+			const size_t shmemWarp = (24u * 24u * 2u + 30u) * sizeof(float);
 			int curFlagsSlot = 0;
 
 			for (int k = K - 1; k >= 0; --k)
@@ -3598,7 +3598,7 @@ namespace Gpu
 					VpvGpu::Var("u_has_cell_drift", &uHasCellDrift),
 					VpvGpu::Var("u_anchor_ref_idx", &uAnchorRefIdx)
 				};
-				const size_t shmemP2a = (256u * 4u + 256u * 4u + 256u + 16u) * sizeof(float);
+				const size_t shmemP2a = (1920u + 64u + 4u) * sizeof(float);
 				// Distinct dummy texture (sc.cellWeights is unused in Pass 2A) when curCleanTex aliases recYTex.
 				pl_tex p2aCurCleanBind = sameCleanRec ? sc.cellWeights : p.curCleanTex;
 
@@ -3622,7 +3622,7 @@ namespace Gpu
 						VpvGpu::Storage("warp_diag", dstWarpDiag),
 						VpvGpu::Storage("cell_stats", sc.cellStats)
 					};
-					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 14, v2a, 18, cw, ch, 16, 16, shmemP2a);
+					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 14, v2a, 18, cw, ch, 16, 4, shmemP2a);
 				}
 				else
 				{
@@ -3646,7 +3646,7 @@ namespace Gpu
 						VpvGpu::Storage("warp_diag", dstWarpDiag),
 						VpvGpu::Storage("cell_stats", sc.cellStats)
 					};
-					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 18, v2a, 18, cw, ch, 16, 16, shmemP2a);
+					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 18, v2a, 18, cw, ch, 16, 4, shmemP2a);
 				}
 				if (!ok2a)
 				{
@@ -3782,7 +3782,7 @@ namespace Gpu
 						VpvGpu::Sampled("eb_scratch", ebScratchTex_),
 						VpvGpu::Storage("eb_prior_out", ebPriorTex_)
 					};
-					const size_t shmemEb = (256u * 6u + 6u) * sizeof(float);
+					const size_t shmemEb = (256u * 6u + 12u) * sizeof(float);
 					if (!runPass("td_v2_p2_eb_prior", ebRedHdr, Shaders::kPass2EbPriorReduce, deb, 2, nullptr, 0, 3, 2, 16, 16, shmemEb))
 					{
 						resetCarryIfActive();
@@ -3993,7 +3993,7 @@ namespace Gpu
 					VpvGpu::Var("u_enable_joint_bound", &uEnableJointBound)
 				};
 
-				const size_t shmemP3a = (18u * 18u * 2u) * sizeof(float);
+				const size_t shmemP3a = (18u * 18u * 2u + (compactBands ? 400u : 0u) + 27u * 8u + 1u) * sizeof(float);
 				pl_tex deltaTarget = runDctPocs ? sc.deltaScratch : dstOutDelta;
 				bool ok3a = false;
 				if (!compactBands)
@@ -4084,7 +4084,7 @@ namespace Gpu
 			{
 				const bool runSmoothGuard = cfg_.enableSmoothLayer4Guard && cfg_.ModifiesPixels();
 				const float uSmoothGuard = runSmoothGuard ? 1.0f : 0.0f;
-				pl_tex p4OutY = runSmoothGuard ? sc.warpedVal : dstOutY;
+				pl_tex p4OutY = runSmoothGuard ? sc.deltaScratch : dstOutY;
 
 				std::string p4Hdr = staticGeom;
 				p4Hdr += Shaders::BuildFineTapHeader();
@@ -4115,7 +4115,7 @@ namespace Gpu
 					VpvGpu::Var("u_fade_keep", &uFadeKeep),
 					VpvGpu::Var("u_smooth_guard", &uSmoothGuard)
 				};
-				const size_t shmemP4 = (3u * fineTileDim * fineTileDim + 3u * fineTileDim * 16u + 512u + 2u) * sizeof(float);
+				const size_t shmemP4 = (3u * fineTileDim * fineTileDim + 3u * fineTileDim * 16u + 2u * 256u + 512u + 2u) * sizeof(float);
 				const std::string p4Body = Shaders::BuildPass4FusedApplyGuardBody();
 				if (!runPass("td_v2_p4_fused_apply_guard", p4Hdr, p4Body.c_str(),
 				             d4, 9, v4, 9, cw, ch, 16, 16, shmemP4))
@@ -4126,10 +4126,9 @@ namespace Gpu
 
 				if (runSmoothGuard)
 				{
-					std::string sgHdr = staticGeom + Shaders::BuildFineTapHeader() + Shaders::kCoreHelpers + Shaders::kPass4SmoothGuardHeader;
-					pl_shader_desc dsg[5] = {
-						VpvGpu::Sampled("rec_y", p.recYTex),
-						VpvGpu::Sampled("cand_out", sc.warpedVal),
+					std::string sgHdr = staticGeom + Shaders::kCoreHelpers + Shaders::kPass4SmoothGuardHeader;
+					pl_shader_desc dsg[4] = {
+						VpvGpu::Sampled("cand_fdiff", sc.deltaScratch),
 						VpvGpu::Sampled("guard_cell", dstGuardCell),
 						VpvGpu::Sampled("cell_focus", sc.cellFocus),
 						VpvGpu::Storage("out_y", dstOutY)
@@ -4140,9 +4139,9 @@ namespace Gpu
 						VpvGpu::Var("u_ax1", &uAx1),
 						VpvGpu::Var("u_ay1", &uAy1)
 					};
-					const size_t shmemSg = (2u * fineTileDim * fineTileDim + 2u * fineTileDim * 16u) * sizeof(float);
+					const size_t shmemSg = 10u * sizeof(float);
 					if (!runPass("td_v2_p4b_smooth_guard", sgHdr, Shaders::kPass4SmoothGuardApply,
-					             dsg, 5, vsg, 4, fullGx, fullGy, 16, 16, shmemSg))
+					             dsg, 4, vsg, 4, fullGx, fullGy, 16, 16, shmemSg))
 					{
 						resetCarryIfActive();
 						return failCore("td_v2_p4b_smooth_guard dispatch failed", StandInKind::GpuDispatchFailed);
