@@ -619,7 +619,11 @@
         "src/VP-V/modules/motion/estimation/fast_objects/FastObjectRefineRef.cpp",
         "src/VP-V/modules/motion/estimation/fast_objects/FastObjectOverlay.h",
         "src/VP-V/modules/motion/estimation/fast_objects/FastObjectTracker.h",
-        "src/VP-V/modules/motion/estimation/fast_objects/FastObjectTracker.cpp"
+        "src/VP-V/modules/motion/estimation/fast_objects/FastObjectTracker.cpp",
+        "src/VP-V/modules/motion/estimation/fast_objects/tests/FastObjectSynthScenes.h",
+        "src/VP-V/modules/motion/estimation/fast_objects/tests/FastObjectResidualTests.cpp",
+        "src/VP-V/modules/motion/estimation/fast_objects/tests/FastObjectTrajectoryTests.cpp",
+        "src/VP-V/modules/motion/estimation/fast_objects/tests/FastObjectRefineTests.cpp"
       ],
       "components": {
         "files": {
