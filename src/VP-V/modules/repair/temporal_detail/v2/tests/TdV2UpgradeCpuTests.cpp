@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -1724,6 +1725,1019 @@ public:
 			Assert::IsFalse(ParseTdV2Settings("td_limit_kappa", "3.5", s, prob) || prob.empty());
 			Assert::IsFalse(ParseTdV2Settings("td_unknown_key", "on", s, prob) || prob.empty());
 			Assert::AreEqual(beforeBad.limitKappa, s.limitKappa, 1e-12, L"Rejected setting must not mutate state");
+		}
+	}
+
+	// 7. Stage A4-1 Feature 1: Continuous C^1 smoothstep region tailoring, Pass 3A edge-aware silhouette stop
+	//    vs smooth interior blending, H3 < 0 sentinel, non-finite fail-closed closure, & default-OFF bit-identity.
+	TEST_METHOD(TdA4_1RegionTailoringContinuousSmoothstepsEdgeAwareBlendAndFailClosed)
+	{
+		using namespace TdV2UpgradeCpuNs;
+		constexpr int w = 64, h = 48, cellPx = 16;
+		constexpr int cw = w / cellPx, ch = h / cellPx;
+		constexpr size_t nCells = static_cast<size_t>(cw * ch);
+
+		// (A) Default-OFF Config & bit-identity check + StandInKind::RegionMapsDerived inert when all 3 A4-1 toggles OFF.
+		{
+			const Config defCfg{};
+			Assert::IsFalse(defCfg.enableRegionTailoring, L"enableRegionTailoring must default false");
+			Assert::AreEqual(0.0, defCfg.bokehMatchDelta, 1e-12, L"bokehMatchDelta must default 0.0 (off)");
+			Assert::IsFalse(defCfg.enableRegionDeband, L"enableRegionDeband must default false");
+
+			const Config rtDef = MakePreset(Preset::RealTime, Mode::On);
+			const Config rfDef = MakePreset(Preset::Reference, Mode::On);
+			Assert::IsFalse(rtDef.enableRegionTailoring || rtDef.enableRegionDeband || rtDef.bokehMatchDelta > 0.0);
+			Assert::IsFalse(rfDef.enableRegionTailoring || rfDef.enableRegionDeband || rfDef.bokehMatchDelta > 0.0);
+
+			const TdV2Plane m = RenderMasterScene(w, h, 0.0, 0.0);
+			const TdV2Plane p1 = ApplyCrispPeakQuant(m, 4101u);
+			const TdV2Plane p2 = ApplyCrispPeakQuant(m, 4102u);
+			const TdV2Plane cur = ApplyDeblockedValleyLoss(m, 8.0, 4103u, false);
+			const CellMotionField stillMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+			FrameProcessInput in{};
+			in.seq = 1; in.receivedY = cur;
+			in.hasStepPrior = true; in.estimatedStepDelta = 8.0;
+			in.prevPeak.cleanPlane = &p1; in.prevPeak.motion = &stillMv;
+			in.nextPeak.cleanPlane = &p2; in.nextPeak.motion = &stillMv;
+
+			// Supply optional A4-1 maps while toggles are OFF -> must be 100% ignored (bit-identical to nullptr maps, RegionMapsDerived inactive!).
+			const std::vector<double> dummyFocus(nCells, 0.25);
+			const std::vector<double> dummyTex(nCells, 0.75);
+			const std::vector<double> dummyEdge(nCells, 0.90);
+			FrameProcessInput inWithUnusedMaps = in;
+			inWithUnusedMaps.p11FocusConfidence = &dummyFocus;
+			inWithUnusedMaps.p12TextureDensity = &dummyTex;
+			inWithUnusedMaps.edgeMapCells = &dummyEdge;
+
+			StandInRegistry stBase, stWithMaps;
+			const FrameProcessResult rBase = TdV2ReferenceEngine(rfDef).ProcessFrame(in, &stBase);
+			const FrameProcessResult rUnused = TdV2ReferenceEngine(rfDef).ProcessFrame(inWithUnusedMaps, &stWithMaps);
+			Assert::IsFalse(stBase.IsActive(StandInKind::RegionMapsDerived), L"Default-OFF must never engage RegionMapsDerived");
+			Assert::IsFalse(stWithMaps.IsActive(StandInKind::RegionMapsDerived), L"Default-OFF with maps must never engage RegionMapsDerived");
+			for (size_t i = 0; i < cur.v.size(); ++i)
+				Assert::AreEqual(rBase.outputY.v[i], rUnused.outputY.v[i], 0.0, L"Default-OFF must be bit-identical regardless of A4-1 map pointers");
+			for (size_t c = 0; c < nCells; ++c)
+				for (int f = 0; f < 12; ++f)
+					Assert::AreEqual(rBase.tdMaps[c].f[f], rUnused.tdMaps[c].f[f], 0.0f, L"Default-OFF td.maps must be bit-identical");
+		}
+
+		// (B) Continuous C^1 SmoothstepC1 & EvaluateCellRegionDescriptors monotonicity, grain-vs-texture H-band law, & non-finite safety.
+		{
+			const double nanV = std::numeric_limits<double>::quiet_NaN();
+			const double infV = std::numeric_limits<double>::infinity();
+			Assert::AreEqual(0.0, SmoothstepC1(nanV, 1.0, 0.5), 0.0, L"SmoothstepC1(NaN) must return 0.0");
+			Assert::AreEqual(0.0, SmoothstepC1(0.0, infV, 0.5), 0.0, L"SmoothstepC1(Inf) must return 0.0");
+			Assert::AreEqual(0.0, SmoothstepC1(0.0, 1.0, nanV), 0.0, L"SmoothstepC1(x=NaN) must return 0.0");
+			Assert::AreEqual(0.5, SmoothstepC1(2.0, 6.0, 4.0), 1e-12, L"SmoothstepC1 midpoint must equal 0.5");
+
+			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+			CellRegionInputs ri{};
+			ri.gainMid = gains.mid; ri.gainFine = gains.fine; ri.gainD3 = gains.d3;
+			ri.baseQuantVar = 1.0 / 12.0; ri.effNoiseVar = 1.0 / 12.0;
+			ri.fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
+			ri.fSharp = AnalyticalEdgeFocusRatio(0.0);
+
+			// Monotonic continuous P12 textureDensity across 200 fine steps (zero binary jumps).
+			double prevTex = -1.0;
+			double maxStepJump = 0.0;
+			const double texFloor = 2.0 * (gains.mid + gains.fine) * ri.effNoiseVar;
+			for (int i = 0; i <= 200; ++i)
+			{
+				ri.curMVar = (2.5 * texFloor * static_cast<double>(i)) / 200.0;
+				ri.curHVar = 0.0;
+				const CellRegionDescriptors d = EvaluateCellRegionDescriptors(ri);
+				Assert::IsTrue(d.textureDensity >= prevTex - 1e-12, L"P12 textureDensity must be monotonically non-decreasing");
+				if (prevTex >= 0.0)
+					maxStepJump = (std::max)(maxStepJump, d.textureDensity - prevTex);
+				prevTex = d.textureDensity;
+			}
+			Assert::IsTrue(maxStepJump < 0.03, Msg("P12 smoothstep max jump=%.4f must be C^1 continuous (<0.03)", maxStepJump).c_str());
+
+			// Heavy P10g film grain on flat background (textureDensity = 0, p10gShare = 1) suppresses H-band gain to 0,
+			// whereas dense real texture (textureDensity = 1, p10gShare = 1) preserves full H-band gain!
+			CellRegionInputs riFlatGrain = ri;
+			riFlatGrain.extCurFocus = 1.0;
+			riFlatGrain.extTextureDensity = 0.0;
+			riFlatGrain.cellOwnGrainVar = 10.0 * ri.baseQuantVar; // > 9 * baseQuantVar => p10gShare == 1.0
+			const CellRegionDescriptors dFlatGrain = EvaluateCellRegionDescriptors(riFlatGrain);
+			const double hGainFlatGrain = dFlatGrain.focusConf * (1.0 - dFlatGrain.p10gShare * (1.0 - dFlatGrain.textureDensity));
+			Assert::AreEqual(0.0, hGainFlatGrain, 1e-12, L"Heavy grain on flat region must suppress H-band region gain to 0.0");
+
+			CellRegionInputs riTexGrain = riFlatGrain;
+			riTexGrain.extTextureDensity = 1.0;
+			const CellRegionDescriptors dTexGrain = EvaluateCellRegionDescriptors(riTexGrain);
+			const double hGainTexGrain = dTexGrain.focusConf * (1.0 - dTexGrain.p10gShare * (1.0 - dTexGrain.textureDensity));
+			Assert::AreEqual(1.0, hGainTexGrain, 1e-12, L"Dense real texture must preserve H-band region gain at 1.0");
+		}
+
+		// (C) Pass 3A Edge-Aware Blending: crisp silhouette stops cross-edge weight halo bleed (vs plain bilinear negative control!)
+		//     while smooth interiors interpolate seamlessly without 16x16 cell-grid stair-stepping!
+		{
+			// Scene 1: Sharp vertical silhouette at x = 32 (between cell cx = 1 [16..31] and cell cx = 2 [32..47]).
+			// Left side (x < 32, cx = 0,1): foreground object at 180.0 with partial motion trust (fbErrorPx = 0.85 < 1.0 => small
+			// positive own weight w_fg > 0 so HIGH-5 w==0 short-circuit does not mask interpolation!) and a 5-code detail difference.
+			// Right side (x >= 32, cx = 2,3): stationary wall at 760.0 (fbErrorPx = 0.0 => high weight w_bg > 0.65)!
+			TdV2Plane curSil(w, h, 0.0), pk1Sil(w, h, 0.0), pk2Sil(w, h, 0.0);
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					if (x < 32)
+					{
+						curSil.at(x, y) = 180.0;
+						pk1Sil.at(x, y) = 185.0;
+						pk2Sil.at(x, y) = 185.0;
+					}
+					else
+					{
+						const double wallTex = 760.0 + 14.0 * std::sin(0.45 * x + 0.35 * y);
+						pk1Sil.at(x, y) = wallTex + 0.3 * std::cos(0.9 * x - 0.7 * y);
+						pk2Sil.at(x, y) = wallTex - 0.3 * std::sin(0.8 * x + 0.6 * y);
+						curSil.at(x, y) = wallTex - 9.0 * std::cos(0.45 * x + 0.35 * y);
+					}
+				}
+			}
+			CellMotionField silMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			silMv.confidence.assign(nCells, 1.0);
+			for (int cy = 0; cy < ch; ++cy)
+			{
+				silMv.confidence[static_cast<size_t>(cy) * cw + 0] = 0.12; // Small positive foreground weight w_fg > 0
+				silMv.confidence[static_cast<size_t>(cy) * cw + 1] = 0.12; // Small positive foreground weight w_fg > 0
+			}
+			// Exact same-plane uniform low-confidence baseline (confidence = 0.12 on ALL cells cx = 0..3):
+			// isolates pure cross-silhouette weight bleed from cx = 2 into cx = 1 at the exact same pixels x = 28..31!
+			CellMotionField uniformLowMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			uniformLowMv.confidence.assign(nCells, 0.12);
+
+			Config cfgA41 = MakePreset(Preset::Reference, Mode::On);
+			cfgA41.enableRegionTailoring = true;
+			cfgA41.enableBandDependentPool = false;
+			cfgA41.momentPoolRadiusCells = 0;
+			cfgA41.enableA2eEmpiricalPrior = false;
+			cfgA41.enableEmpiricalBayesShrinkage = false;
+			cfgA41.pixelBoundKappa = 3.0;
+
+			Config cfgBilinearCtrl = cfgA41;
+			cfgBilinearCtrl.enableRegionTailoring = false;
+			cfgBilinearCtrl.enableEdgeAwareWeightUpsample = false; // Same-input negative control!
+
+			FrameProcessInput silIn{};
+			silIn.seq = 1; silIn.receivedY = curSil;
+			silIn.hasCleanSplit = true; silIn.cleanY = curSil;
+			silIn.hasStepPrior = true; silIn.estimatedStepDelta = 16.0;
+			silIn.prevPeak.cleanPlane = &pk1Sil; silIn.prevPeak.motion = &silMv;
+			silIn.nextPeak.cleanPlane = &pk2Sil; silIn.nextPeak.motion = &silMv;
+
+			FrameProcessInput silUniformLowIn = silIn;
+			silUniformLowIn.prevPeak.motion = &uniformLowMv;
+			silUniformLowIn.nextPeak.motion = &uniformLowMv;
+
+			StandInRegistry stDerived;
+			const FrameProcessResult resA41 = TdV2ReferenceEngine(cfgA41).ProcessFrame(silIn, &stDerived);
+			const FrameProcessResult resA41LowRef = TdV2ReferenceEngine(cfgA41).ProcessFrame(silUniformLowIn);
+			const FrameProcessResult resBil = TdV2ReferenceEngine(cfgBilinearCtrl).ProcessFrame(silIn);
+			const FrameProcessResult resBilLowRef = TdV2ReferenceEngine(cfgBilinearCtrl).ProcessFrame(silUniformLowIn);
+			Assert::IsTrue(stDerived.IsActive(StandInKind::RegionMapsDerived),
+				L"Absent P11/P12/edgeMapCells with enableRegionTailoring=true must visibly engage RegionMapsDerived");
+
+			// H3 check: supplying pixel edgeMapPlane WITHOUT cell-level edgeMapCells must STILL report RegionMapsDerived honestly,
+			// whereas supplying all 3 cell-level maps (p11, p12, edgeMapCells) keeps RegionMapsDerived inactive!
+			{
+				const std::vector<double> fullP11(nCells, 1.0), fullP12(nCells, 0.5), fullEdgeC(nCells, 0.2);
+				const TdV2Plane pxEdgePlane(w, h, 0.2);
+				FrameProcessInput inPxOnly = silIn;
+				inPxOnly.p11FocusConfidence = &fullP11;
+				inPxOnly.p12TextureDensity = &fullP12;
+				inPxOnly.edgeMapPlane = &pxEdgePlane; // edgeMapCells still nullptr!
+				StandInRegistry stPxOnly;
+				(void)TdV2ReferenceEngine(cfgA41).ProcessFrame(inPxOnly, &stPxOnly);
+				Assert::IsTrue(stPxOnly.IsActive(StandInKind::RegionMapsDerived),
+					L"H3: Stage 2B uses cell-level edgeMapCells; absent edgeMapCells must still report RegionMapsDerived");
+
+				FrameProcessInput inAllCellMaps = inPxOnly;
+				inAllCellMaps.edgeMapCells = &fullEdgeC;
+				StandInRegistry stAllMaps;
+				(void)TdV2ReferenceEngine(cfgA41).ProcessFrame(inAllCellMaps, &stAllMaps);
+				Assert::IsFalse(stAllMaps.IsActive(StandInKind::RegionMapsDerived),
+					L"When all P11, P12, and edgeMapCells are supplied, RegionMapsDerived must remain inactive");
+			}
+
+			// Measure pure cross-silhouette weight bleed on silhouette-adjacent pixels (x = 28..31 in cx = 1):
+			// Edge-aware Pass 3A blocks cx = 2's high weight from bleeding across x = 32 (exact 0 bleed vs uniformLowMv),
+			// whereas plain bilinear bleeds cx = 2's high weight across the silhouette (> 0.5 codes halo bleed!).
+			double maxHaloA41 = 0.0, maxHaloBil = 0.0, rightRepairA41 = 0.0;
+			for (int y = 8; y < h - 8; ++y)
+			{
+				for (int x = 28; x < 32; ++x)
+				{
+					maxHaloA41 = (std::max)(maxHaloA41, std::fabs(resA41.outputY.at(x, y) - resA41LowRef.outputY.at(x, y)));
+					maxHaloBil = (std::max)(maxHaloBil, std::fabs(resBil.outputY.at(x, y) - resBilLowRef.outputY.at(x, y)));
+				}
+				for (int x = 40; x < w - 4; ++x)
+					rightRepairA41 = (std::max)(rightRepairA41, std::fabs(resA41.outputY.at(x, y) - curSil.at(x, y)));
+			}
+			Assert::IsTrue(maxHaloA41 <= 1e-6,
+				Msg("Pass 3A edge-aware blend must stop cross-silhouette weight halo bleed (halo=%.6f)", maxHaloA41).c_str());
+			Assert::IsTrue(rightRepairA41 > 2.0, Msg("Right active region must repair strongly (maxDelta=%.3f)", rightRepairA41).c_str());
+			Assert::IsTrue(maxHaloBil > 0.50,
+				Msg("Same-input negative control (plain bilinear) must bleed across silhouette: maxHalo=%.4f", maxHaloBil).c_str());
+
+			// Same-mean thin ridge test: two adjacent cells share identical mean=500.0 and std=80.0, separated by pxEdge=1.0!
+			// SpatialEdgeAwareBilinearWeight stops neighbor weight bleed to exact 0.0, whereas range-only SpatialGuidedBilinearWeight bleeds!
+			{
+				const double cwArr[2] = { 0.0, 0.80 };
+				const double cdArr[2] = { 64.0, 64.0 };
+				const double cmArr[2] = { 500.0, 500.0 };
+				const double csArr[2] = { 80.0, 80.0 };
+				const double wEdgeAware = SpatialEdgeAwareBilinearWeight(
+					cwArr, cdArr, cmArr, csArr, 2, 1, /*pxX=*/14.0, /*pxY=*/8.0, 16,
+					/*ownCx=*/0, /*ownCy=*/0, /*diff=*/2.0, /*cleanY=*/500.0, /*pxEdge=*/1.0, 1.0, true, 1.0);
+				const double wRangeOnly = SpatialGuidedBilinearWeight(
+					cwArr, cdArr, cmArr, csArr, 2, 1, /*pxX=*/14.0, /*pxY=*/8.0, 16,
+					/*diff=*/2.0, /*cleanY=*/500.0, 1.0, true);
+				Assert::AreEqual(0.0, wEdgeAware, 1e-12, L"pxEdge=1.0 barrier must completely block same-mean cross-ridge weight bleed");
+				Assert::IsTrue(wRangeOnly > 0.30,
+					Msg("Same-input negative control SpatialGuidedBilinearWeight bleeds w=%.4f across same-mean ridge", wRangeOnly).c_str());
+			}
+
+			// Smooth interior blending: on a gentle continuous ramp (pxEdge == 0, |m_1 - m_0| < sigPair), weights interpolate
+			// smoothly across the cell boundary x = 15 -> 16 without a hard block-edge step jump!
+			{
+				const double cwArr[2] = { 0.10, 0.70 };
+				const double cdArr[2] = { 64.0, 64.0 };
+				const double cmArr[2] = { 400.0, 404.0 };
+				const double csArr[2] = { 8.0, 8.0 };
+				double prevW = 0.0;
+				double maxAdjDiffSmooth = 0.0;
+				for (int x = 8; x <= 23; ++x)
+				{
+					const double cleanPx = 400.0 + 4.0 * (static_cast<double>(x - 8) / 16.0);
+					const double wVal = SpatialEdgeAwareBilinearWeight(
+						cwArr, cdArr, cmArr, csArr, 2, 1, static_cast<double>(x), 8.0, 16,
+						x / 16, 0, 1.0, cleanPx, /*pxEdge=*/0.0, 1.0, true, 1.0);
+					if (x > 8)
+						maxAdjDiffSmooth = (std::max)(maxAdjDiffSmooth, std::fabs(wVal - prevW));
+					prevW = wVal;
+				}
+				const double uninterpolatedBlockJump = std::fabs(cwArr[1] - cwArr[0]); // 0.60 hard jump at x = 15 -> 16!
+				Assert::IsTrue(maxAdjDiffSmooth < 0.08 && maxAdjDiffSmooth < 0.15 * uninterpolatedBlockJump,
+					Msg("Smooth interior max adjacent pixel weight step=%.4f vs hard block jump=%.4f",
+						maxAdjDiffSmooth, uninterpolatedBlockJump).c_str());
+			}
+		}
+
+		// (D) H3 < 0 sentinel in edgeMapCells & Non-Finite Fail-Closed (w = 0, delta = 0, NonFiniteClosure) on P11/P12/edgeMap!
+		{
+			TdV2Plane cur(w, h, 0.0), pk1(w, h, 0.0), pk2(w, h, 0.0);
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					// Intra-cell sharp step at x = 15 (right boundary of cx = 0) between two cells with nearly matching means
+					// (~356 vs ~368, sd ~ 24 => cellStepStop == 0.0) and M/H coding loss along y so derived pxEdge == 1.0
+					// differs strongly (> 0.5 codes, unclamped by U_MH) from forced edgeMapCells == 0.0!
+					const double base = ((x < 15) ? 350.0 : ((x < 17) ? 450.0 : 362.5)) + 6.0 * std::cos(0.9 * y);
+					pk1.at(x, y) = base + 0.25 * std::cos(0.7 * x);
+					pk2.at(x, y) = base - 0.25 * std::sin(0.7 * y);
+					cur.at(x, y) = base - 8.0 * std::cos(0.9 * y);
+				}
+			}
+			CellMotionField mv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			mv.confidence.assign(nCells, 1.0);
+			for (int cy = 0; cy < ch; ++cy)
+				mv.confidence[static_cast<size_t>(cy) * cw + 0] = 0.08; // Cell cx=0 has small w > 0, cell cx=1 has high w ~ 0.9
+
+			Config cfg = MakePreset(Preset::Reference, Mode::On);
+			cfg.enableRegionTailoring = true;
+			cfg.pixelBoundKappa = 3.0;
+
+			FrameProcessInput baseIn{};
+			baseIn.seq = 1; baseIn.receivedY = cur;
+			baseIn.hasCleanSplit = true; baseIn.cleanY = cur;
+			baseIn.hasStepPrior = true; baseIn.estimatedStepDelta = 16.0;
+			baseIn.prevPeak.cleanPlane = &pk1; baseIn.prevPeak.motion = &mv;
+			baseIn.nextPeak.cleanPlane = &pk2; baseIn.nextPeak.motion = &mv;
+
+			const std::vector<double> negOneSentinel(nCells, -1.0);
+			const std::vector<double> explicitZeroEdge(nCells, 0.0);
+			FrameProcessInput sentinelIn = baseIn;
+			sentinelIn.edgeMapCells = &negOneSentinel;
+			FrameProcessInput zeroEdgeIn = baseIn;
+			zeroEdgeIn.edgeMapCells = &explicitZeroEdge;
+
+			const FrameProcessResult rNull = TdV2ReferenceEngine(cfg).ProcessFrame(baseIn);
+			const FrameProcessResult rSent = TdV2ReferenceEngine(cfg).ProcessFrame(sentinelIn);
+			const FrameProcessResult rZero = TdV2ReferenceEngine(cfg).ProcessFrame(zeroEdgeIn);
+
+			double maxNullVsSent = 0.0, maxSentVsZero = 0.0;
+			for (size_t i = 0; i < cur.v.size(); ++i)
+			{
+				maxNullVsSent = (std::max)(maxNullVsSent, std::fabs(rNull.outputY.v[i] - rSent.outputY.v[i]));
+				maxSentVsZero = (std::max)(maxSentVsZero, std::fabs(rSent.outputY.v[i] - rZero.outputY.v[i]));
+			}
+			Assert::AreEqual(0.0, maxNullVsSent, 1e-12, L"H3: edgeMapCells < 0 (-1.0) sentinel must match absent/derived pxEdge bit-for-bit");
+			Assert::IsTrue(maxSentVsZero > 0.05,
+				Msg("H3: derived pxEdge via -1.0 sentinel must differ from clamped 0.0 edge map (maxDiff=%.4f)", maxSentVsZero).c_str());
+
+			// Non-finite fail-closed test across ALL region inputs: cur P11 (cell 1), ref P11 (cell 2), P12 (cell 3),
+			// edgeMapCells (cell 4), and edgeMapPlane pixel (40, 20) in cell (2, 1) = index 6!
+			const CellMotionField allValidMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			FrameProcessInput nfIn = baseIn;
+			nfIn.prevPeak.motion = &allValidMv;
+			nfIn.nextPeak.motion = &allValidMv;
+
+			const double qNan = std::numeric_limits<double>::quiet_NaN();
+			const double pInf = std::numeric_limits<double>::infinity();
+			std::vector<double> curP11(nCells, 0.90), refP11(nCells, 0.90), p12(nCells, 0.50), edgeC(nCells, 0.10);
+			curP11[1] = qNan;
+			refP11[2] = pInf;
+			p12[3] = -pInf;
+			edgeC[4] = qNan;
+
+			nfIn.p11FocusConfidence = &curP11;
+			nfIn.prevPeak.focusConfidence = &refP11;
+			nfIn.p12TextureDensity = &p12;
+			nfIn.edgeMapCells = &edgeC;
+
+			StandInRegistry nfStandIns;
+			const FrameProcessResult nfRes = TdV2ReferenceEngine(cfg).ProcessFrame(nfIn, &nfStandIns);
+			Assert::IsTrue(nfStandIns.IsActive(StandInKind::NonFiniteClosure) && nfRes.nonFiniteCells >= 4u,
+				L"H3: Non-finite P11/P12/edgeMapCells must visibly engage NonFiniteClosure");
+			for (double v : nfRes.outputY.v)
+				Assert::IsTrue(std::isfinite(v), L"Output plane must stay 100% finite under non-finite region inputs");
+
+			for (size_t badCell : { size_t(1), size_t(2), size_t(3), size_t(4) })
+			{
+				Assert::AreEqual(0.0f, nfRes.tdMaps[badCell].f[TdMapsView::kValidity], 0.0f,
+					L"H3: Non-finite region cell must fail closed with td.maps kValidity == 0");
+				for (int b = 0; b < 3; ++b)
+					for (int k = 0; k < 2; ++k)
+						Assert::AreEqual(0.0, nfRes.lumaCellWeights[b][k][badCell], 0.0,
+							L"H3: Non-finite region cell must fail closed with blend weight w == 0");
+			}
+			// Interior of clean unaffected cell (e.g. cell 11 at x=56, y=35 where cos(0.9*35) ~= +1.0) must still repair strongly!
+			Assert::IsTrue(std::fabs(nfRes.outputY.at(56, 35) - cur.at(56, 35)) > 1.0,
+				L"Clean unaffected cells must still repair normally when isolated cells fail closed");
+
+			// Also verify non-finite pixel in edgeMapPlane fails closed (delta == 0.0 on that pixel, NonFiniteClosure engaged)!
+			TdV2Plane badEdgePlane(w, h, 0.10);
+			badEdgePlane.at(40, 20) = qNan;
+			FrameProcessInput nfPxIn = baseIn;
+			nfPxIn.prevPeak.motion = &allValidMv;
+			nfPxIn.nextPeak.motion = &allValidMv;
+			nfPxIn.edgeMapPlane = &badEdgePlane;
+			StandInRegistry nfPxSt;
+			const FrameProcessResult nfPxRes = TdV2ReferenceEngine(cfg).ProcessFrame(nfPxIn, &nfPxSt);
+			Assert::IsTrue(nfPxSt.IsActive(StandInKind::NonFiniteClosure) && nfPxRes.nonFiniteCells >= 1u,
+				L"H3: Non-finite pixel in edgeMapPlane must engage NonFiniteClosure");
+			Assert::AreEqual(cur.at(40, 20), nfPxRes.outputY.at(40, 20), 0.0,
+				L"H3: Non-finite pixel in edgeMapPlane must fail closed (exact delta == 0.0), never fail open!");
+		}
+	}
+
+	// 8. Stage A4-1 Feature 2: Matched-focus bokeh tailoring (`td_bokeh_match_delta`), H1 rack-focus peer non-instrumentation
+	//    & zero frame-wide A2e/ebTauSq contamination, and L1 authoritative external P11 non-override.
+	TEST_METHOD(TdA4_1BokehMatchDeltaMatchedStabilizationRackFocusVetoH1NoContaminationAndL1ExternalP11)
+	{
+		using namespace TdV2UpgradeCpuNs;
+		constexpr int w = 64, h = 48, cellPx = 16;
+		constexpr int cw = w / cellPx, ch = h / cellPx;
+		constexpr size_t nCells = static_cast<size_t>(cw * ch);
+		const CellMotionField stillMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+		// (A) Matched out-of-focus bokeh (`|focus_ref - focus_cur| = 0.04 < 0.25`): allows safe L-band stabilization
+		//     while keeping M = H = 0, whereas default OFF (`BokehMode::Untouched`) leaves explicit bokeh untouched!
+		{
+			TdV2Plane masterBokeh(w, h, 0.0), curBokeh(w, h, 0.0), pk1Bokeh(w, h, 0.0), pk2Bokeh(w, h, 0.0);
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					// Genuine low-frequency defocused bokeh wash (~20-px contour plateaus that live in L = G(2.5))
+					// plus small M/H reference differences that must stay strictly vetoed (M = H = 0).
+					const double softWash = 320.0 + 0.45 * static_cast<double>(x) + 0.25 * static_cast<double>(y);
+					masterBokeh.at(x, y) = softWash;
+					pk1Bokeh.at(x, y) = softWash + 1.5 * std::sin(1.2 * x);
+					pk2Bokeh.at(x, y) = softWash - 1.5 * std::sin(1.2 * x);
+					curBokeh.at(x, y) = std::round(softWash / 9.0) * 9.0;
+				}
+			}
+			const std::vector<uint8_t> explicitBokeh(nCells, 1u);
+			const std::vector<double> curF(nCells, 0.10), refF(nCells, 0.14); // Matched defocused depth (delta = 0.04 < 0.25)
+
+			Config cfgMatch = MakePreset(Preset::Reference, Mode::On);
+			cfgMatch.bokehMatchDelta = kBokehMatchDeltaNormal; // 0.25
+			cfgMatch.pixelBoundKappa = 2.0;
+
+			Config cfgOffCtrl = cfgMatch;
+			cfgOffCtrl.bokehMatchDelta = 0.0; // Same-input negative control (BokehMode::Untouched default)!
+
+			FrameProcessInput bIn{};
+			bIn.seq = 1; bIn.receivedY = curBokeh;
+			bIn.hasCleanSplit = true; bIn.cleanY = curBokeh;
+			bIn.hasStepPrior = false;
+			bIn.frameRole = QualityPattern::FrameRole::NonReference;
+			bIn.explicitDefocusedCells = &explicitBokeh;
+			bIn.p11FocusConfidence = &curF;
+			bIn.prevPeak.cleanPlane = &pk1Bokeh; bIn.prevPeak.motion = &stillMv; bIn.prevPeak.focusConfidence = &refF;
+			bIn.nextPeak.cleanPlane = &pk2Bokeh; bIn.nextPeak.motion = &stillMv; bIn.nextPeak.focusConfidence = &refF;
+
+			const FrameProcessResult rMatch = TdV2ReferenceEngine(cfgMatch).ProcessFrame(bIn);
+			const FrameProcessResult rOff = TdV2ReferenceEngine(cfgOffCtrl).ProcessFrame(bIn);
+
+			double mseRec = 0.0, mseMatch = 0.0, maxDiffOff = 0.0;
+			for (size_t i = 0; i < masterBokeh.v.size(); ++i)
+			{
+				mseRec += (curBokeh.v[i] - masterBokeh.v[i]) * (curBokeh.v[i] - masterBokeh.v[i]);
+				mseMatch += (rMatch.outputY.v[i] - masterBokeh.v[i]) * (rMatch.outputY.v[i] - masterBokeh.v[i]);
+				maxDiffOff = (std::max)(maxDiffOff, std::fabs(rOff.outputY.v[i] - curBokeh.v[i]));
+			}
+			Assert::AreEqual(0.0, maxDiffOff, 1e-12, L"Default OFF (BokehMode::Untouched) must keep explicit bokeh bit-exact");
+			Assert::IsTrue(mseMatch < mseRec * 0.65,
+				Msg("Matched-focus bokeh must stabilize L-band MSE (mseMatch=%.1f vs mseRec=%.1f)", mseMatch, mseRec).c_str());
+			for (size_t c = 0; c < nCells; ++c)
+			{
+				Assert::IsTrue(rMatch.lumaCellWeights[0][0][c] + rMatch.lumaCellWeights[0][1][c] > 0.25,
+					L"Matched-focus bokeh must grant positive L-band weight");
+				for (int b : { 1, 2 })
+					for (int k : { 0, 1 })
+						Assert::AreEqual(0.0, rMatch.lumaCellWeights[b][k][c], 0.0,
+							L"Matched-focus out-of-focus bokeh must keep M and H weights strictly 0.0");
+			}
+		}
+
+		// (B) H1 Closure: Multi-ref K=2 where Ref 0 (PrevPeak) is focus-matched (0.90) and Ref 1 (NextPeak) is rack-focus
+		//     blurred (0.05, |0.05 - 0.90| = 0.85 >= 0.25). Vetoed Ref 1 must get exact w = 0, NEVER instrument Ref 0's c_A1,
+		//     and NEVER grant Ref 0 the multi-ref +3*tau A2e envelope (matching a pure K=1 PrevPeak-only solve within 1e-9)!
+		{
+			const TdV2Plane master = RenderMasterScene(w, h, 0.0, 0.0);
+			const TdV2Plane pk0Sharp = ApplyCrispPeakQuant(master, 4201u);
+			const TdV2Plane warmPkA = ApplyCrispPeakQuant(master, 4202u);
+			const TdV2Plane warmPkB = ApplyCrispPeakQuant(master, 4203u);
+			const TdV2Plane warmVal = ApplyDeblockedValleyLoss(master, 9.0, 4204u, /*heavyPatch=*/true);
+			const TdV2Plane testVal = ApplyDeblockedValleyLoss(master, 9.0, 4205u, false);
+
+			// Rack-focused blurred NextPeak (heavy 11x11 box blur + brightness pull so d_1 is huge across L/M/H!).
+			TdV2Plane pk1RackBlur(w, h, 0.0);
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					double acc = 0.0; int cnt = 0;
+					for (int dy = -5; dy <= 5; ++dy)
+						for (int dx = -5; dx <= 5; ++dx)
+						{
+							acc += master.at((std::max)(0, (std::min)(w - 1, x + dx)), (std::max)(0, (std::min)(h - 1, y + dy)));
+							++cnt;
+						}
+					pk1RackBlur.at(x, y) = (acc / cnt) + 18.0;
+				}
+			}
+
+			const std::vector<double> sharpF(nCells, 0.90);
+			const std::vector<double> blurF(nCells, 0.05);
+
+			Config cfgBokeh = MakePreset(Preset::Reference, Mode::On);
+			cfgBokeh.bokehMatchDelta = kBokehMatchDeltaNormal; // 0.25
+			cfgBokeh.pixelBoundKappa = 2.0;
+
+			TdV2ReferenceEngine engK2WithVetoedPeer(cfgBokeh);
+			TdV2ReferenceEngine engK1PureSingleRef(cfgBokeh);
+
+			// Frame 0: identical K=2 in-focus warm-up on both engines so A2e rolling history is populated (hasStepPrior = false!).
+			FrameProcessInput warmIn{};
+			warmIn.seq = 0; warmIn.receivedY = warmVal; warmIn.hasStepPrior = false;
+			warmIn.frameRole = QualityPattern::FrameRole::NonReference;
+			warmIn.p11FocusConfidence = &sharpF;
+			warmIn.prevPeak.cleanPlane = &warmPkA; warmIn.prevPeak.motion = &stillMv; warmIn.prevPeak.focusConfidence = &sharpF;
+			warmIn.nextPeak.cleanPlane = &warmPkB; warmIn.nextPeak.motion = &stillMv; warmIn.nextPeak.focusConfidence = &sharpF;
+			(void)engK2WithVetoedPeer.ProcessFrame(warmIn);
+			(void)engK1PureSingleRef.ProcessFrame(warmIn);
+
+			// Frame 1: K=2 with rack-focus-vetoed NextPeak vs K=1 with NextPeak absent (hasStepPrior = false)!
+			FrameProcessInput inK2{};
+			inK2.seq = 1; inK2.receivedY = testVal; inK2.hasStepPrior = false;
+			inK2.frameRole = QualityPattern::FrameRole::NonReference;
+			inK2.p11FocusConfidence = &sharpF;
+			inK2.prevPeak.cleanPlane = &pk0Sharp;    inK2.prevPeak.motion = &stillMv; inK2.prevPeak.focusConfidence = &sharpF;
+			inK2.nextPeak.cleanPlane = &pk1RackBlur; inK2.nextPeak.motion = &stillMv; inK2.nextPeak.focusConfidence = &blurF;
+
+			FrameProcessInput inK1 = inK2;
+			inK1.nextPeak = ReferenceInput{};
+
+			const FrameProcessResult resK2 = engK2WithVetoedPeer.ProcessFrame(inK2);
+			const FrameProcessResult resK1 = engK1PureSingleRef.ProcessFrame(inK1);
+
+			Assert::AreEqual(nCells, resK2.singleRefA2Cells,
+				L"H1: Rack-focus-vetoed NextPeak must NOT serve as an independent A1 partner for PrevPeak");
+			for (int b = 0; b < 3; ++b)
+				for (size_t c = 0; c < nCells; ++c)
+					Assert::AreEqual(0.0, resK2.lumaCellWeights[b][1][c], 0.0, L"Rack-focus-vetoed ref must have exact 0.0 weight");
+
+			double maxK2VsK1 = 0.0;
+			for (size_t i = 0; i < testVal.v.size(); ++i)
+				maxK2VsK1 = (std::max)(maxK2VsK1, std::fabs(resK2.outputY.v[i] - resK1.outputY.v[i]));
+			Assert::IsTrue(maxK2VsK1 < 1e-9,
+				Msg("H1: K=2 with rack-focus-vetoed peer must match pure K=1 output within 1e-9 (got %.9f)", maxK2VsK1).c_str());
+
+			// Same-input negative control: if P11 mistakenly claimed NextPeak was matched (sharpF), the blurred NextPeak
+			// contaminates c_A1 / L-band blend and diverges strongly (> 1.5 codes) from pure K=1!
+			FrameProcessInput inUnvetoedCtrl = inK2;
+			inUnvetoedCtrl.nextPeak.focusConfidence = &sharpF;
+			TdV2ReferenceEngine engUnvetoedCtrl(cfgBokeh);
+			(void)engUnvetoedCtrl.ProcessFrame(warmIn);
+			const FrameProcessResult resUnvetoed = engUnvetoedCtrl.ProcessFrame(inUnvetoedCtrl);
+			double maxCtrlDiff = 0.0;
+			for (size_t i = 0; i < testVal.v.size(); ++i)
+				maxCtrlDiff = (std::max)(maxCtrlDiff, std::fabs(resUnvetoed.outputY.v[i] - resK1.outputY.v[i]));
+			Assert::IsTrue(maxCtrlDiff > 1.5,
+				Msg("Negative control (unvetoed rack-blurred peer) must diverge >1.5 codes (got %.4f)", maxCtrlDiff).c_str());
+
+			// H1 Frame-Wide A2e Non-Contamination Proof: use 64x96 (6 cell rows cy = 0..5).
+			// Top 3 cell rows (cy = 0..2, y = 0..47) have BOTH refs rack-focus-vetoed (0.05 vs 0.90) with huge blur discrepancy
+			// written on y = 0..35 (>12 px clear of G(2.5)'s 8-px filter radius before in-focus rows cy = 3..5, y = 48..95!).
+			// Frame-wide empiricalOwnError must match an all-in-focus reference frame (< 8.0), NOT blow up >8x!
+			constexpr int mixH = 96, mixCh = mixH / cellPx;
+			constexpr size_t nMixCells = static_cast<size_t>(cw * mixCh);
+			const CellMotionField mixStillMv = CellMotionField::Uniform(cw, mixCh, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			const TdV2Plane mixMaster = RenderMasterScene(w, mixH, 0.0, 0.0);
+			TdV2Plane mixCur = ApplyDeblockedValleyLoss(mixMaster, 9.0, 4215u, false);
+			TdV2Plane mixPk0 = ApplyCrispPeakQuant(mixMaster, 4211u);
+			TdV2Plane mixPk1 = ApplyCrispPeakQuant(mixMaster, 4212u);
+			std::vector<double> mixCurF(nMixCells, 0.90), mixRefF(nMixCells, 0.90);
+			for (int cy = 0; cy < 3; ++cy)
+			{
+				for (int cx = 0; cx < cw; ++cx)
+				{
+					mixRefF[static_cast<size_t>(cy) * cw + cx] = 0.05; // Top 3 cell rows rack-focus mismatch (0.85 >= 0.25)!
+				}
+			}
+			for (int y = 0; y < 36; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					mixPk0.at(x, y) = mixMaster.at(x, y) + 32.0; // >1000 codes^2 error if leaked into A2e!
+					mixPk1.at(x, y) = mixMaster.at(x, y) + 32.0;
+				}
+
+			FrameProcessInput mixIn{};
+			mixIn.seq = 1; mixIn.receivedY = mixCur; mixIn.hasStepPrior = false;
+			mixIn.frameRole = QualityPattern::FrameRole::NonReference;
+			mixIn.p11FocusConfidence = &mixCurF;
+			mixIn.prevPeak.cleanPlane = &mixPk0; mixIn.prevPeak.motion = &mixStillMv; mixIn.prevPeak.focusConfidence = &mixRefF;
+			mixIn.nextPeak.cleanPlane = &mixPk1; mixIn.nextPeak.motion = &mixStillMv; mixIn.nextPeak.focusConfidence = &mixRefF;
+
+			const FrameProcessResult mixRes = TdV2ReferenceEngine(cfgBokeh).ProcessFrame(mixIn);
+			Assert::IsTrue(mixRes.empiricalOwnError.valid && mixRes.empiricalOwnError.ForBandClass(0, 1) < 8.0,
+				Msg("H1: Rack-focused half must NOT contaminate frame-wide A2e U[0][1]=%.4f", mixRes.empiricalOwnError.ForBandClass(0, 1)).c_str());
+
+			// Negative control: without focus mismatch tags on the blurred top half, A2e U[0][1] blows up > 8x!
+			FrameProcessInput mixPoisonCtrl = mixIn;
+			mixPoisonCtrl.prevPeak.focusConfidence = &mixCurF;
+			mixPoisonCtrl.nextPeak.focusConfidence = &mixCurF;
+			const FrameProcessResult mixPoisonRes = TdV2ReferenceEngine(cfgBokeh).ProcessFrame(mixPoisonCtrl);
+			Assert::IsTrue(mixPoisonRes.empiricalOwnError.ForBandClass(0, 1) > 8.0 * mixRes.empiricalOwnError.ForBandClass(0, 1),
+				Msg("Negative control: unexcluded rack-focus blur inflates A2e U[0][1]=%.3f vs protected=%.3f",
+					mixPoisonRes.empiricalOwnError.ForBandClass(0, 1), mixRes.empiricalOwnError.ForBandClass(0, 1)).c_str());
+		}
+
+		// (C) L1 Closure: Authoritative external P11 (`extCurFocus >= 0`, e.g. 1.0 crisp in-focus) is NEVER overridden by
+		//     the internal clean-band stand-in `opticalIsDefocused` on soft/mid-frequency in-focus structure!
+		{
+			CellRegionInputs ri{};
+			ri.opticalIsDefocused = true;
+			ri.extCurFocus = 0.95;
+			const CellRegionDescriptors dAuth = EvaluateCellRegionDescriptors(ri);
+			Assert::IsFalse(dAuth.curIsOutOfFocus, L"L1: Authoritative extCurFocus=0.95 must NOT set curIsOutOfFocus=true");
+
+			ri.extCurFocus = -1.0; // Absent external P11 => stand-in opticalIsDefocused governs
+			const CellRegionDescriptors dStandIn = EvaluateCellRegionDescriptors(ri);
+			Assert::IsTrue(dStandIn.curIsOutOfFocus, L"Negative control: absent extCurFocus honors stand-in opticalIsDefocused");
+
+			// End-to-end engine check: 32-px wavelength soft sinusoidal pattern (`curM2 ~ 10.3, curM3 ~ 172.4 => curFDebiased = 0.056 <= fDefocus`),
+			// so `focusCells[c].isDefocused == true`. With authoritative P11 = 1.0, M-band MUST blend (> 0.15), NOT be vetoed to 0!
+			TdV2Plane softMaster(w, h, 0.0), softCur(w, h, 0.0), softPk1(w, h, 0.0), softPk2(w, h, 0.0);
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					const double v = 500.0 + 48.0 * std::sin(2.0 * kPi * x / 32.0);
+					softMaster.at(x, y) = v;
+					softPk1.at(x, y) = v;
+					softPk2.at(x, y) = v;
+					softCur.at(x, y) = 500.0 + 34.0 * std::sin(2.0 * kPi * x / 32.0);
+				}
+			}
+			const std::vector<double> authInFocus(nCells, 1.0);
+			Config cfgL1 = MakePreset(Preset::Reference, Mode::On);
+			cfgL1.bokehMatchDelta = kBokehMatchDeltaNormal;
+			cfgL1.pixelBoundKappa = 2.5;
+
+			FrameProcessInput inAuth{};
+			inAuth.seq = 1; inAuth.receivedY = softCur;
+			inAuth.hasCleanSplit = true; inAuth.cleanY = softCur;
+			inAuth.hasStepPrior = true; inAuth.estimatedStepDelta = 6.0;
+			inAuth.p11FocusConfidence = &authInFocus;
+			inAuth.prevPeak.cleanPlane = &softPk1; inAuth.prevPeak.motion = &stillMv; inAuth.prevPeak.focusConfidence = &authInFocus;
+			inAuth.nextPeak.cleanPlane = &softPk2; inAuth.nextPeak.motion = &stillMv; inAuth.nextPeak.focusConfidence = &authInFocus;
+
+			FrameProcessInput inNoExtCtrl = inAuth;
+			inNoExtCtrl.p11FocusConfidence = nullptr; // Negative control: internal opticalIsDefocused vetoes M-band!
+			inNoExtCtrl.prevPeak.focusConfidence = nullptr;
+			inNoExtCtrl.nextPeak.focusConfidence = nullptr;
+
+			const FrameProcessResult rAuth = TdV2ReferenceEngine(cfgL1).ProcessFrame(inAuth);
+			const FrameProcessResult rNoExt = TdV2ReferenceEngine(cfgL1).ProcessFrame(inNoExtCtrl);
+			Assert::IsTrue(rAuth.lumaCellWeights[1][0][5] + rAuth.lumaCellWeights[1][1][5] > 0.15,
+				Msg("L1: Authoritative P11=1.0 must preserve M-band weight (sum=%.4f)",
+					rAuth.lumaCellWeights[1][0][5] + rAuth.lumaCellWeights[1][1][5]).c_str());
+			Assert::AreEqual(0.0, rNoExt.lumaCellWeights[1][0][5] + rNoExt.lumaCellWeights[1][1][5], 1e-12,
+				L"Negative control: without external P11, low-frequency pattern triggers opticalIsDefocused M-band veto");
+		}
+	}
+
+	// 9. Stage A4-1 Feature 3 & M2/M3: Direct L-band region debanding (`td_region_deband` -> `td.maps`), H2 coherent step
+	//    (zero 8.9x gains.low inflation), non-destructive QP weight lift, strict `debandAdded > 0` gating,
+	//    `ReadRegionDebandGuidanceFromMaps` (`kValidity | kStability`), 12-bit `DepthScale`, & 19-key Settings UI round-trip.
+	TEST_METHOD(TdA4_1RegionDebandCoherentStepPreservesQpWeightsTdMapsGuidanceAnd12BitDepthScale)
+	{
+		using namespace TdV2UpgradeCpuNs;
+		constexpr int w = 96, h = 64, cellPx = 16;
+		constexpr int cw = w / cellPx, ch = h / cellPx;
+		constexpr size_t nCells = static_cast<size_t>(cw * ch);
+		const CellMotionField stillMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+		// (A) Banded shallow gradient improves cleanly WITHOUT H2's 8.9x step smearing of real 14-code shadow differences!
+		//     Use 96x96 (6 cell rows cy = 0..5) so Preset::Reference's 5x5 L-band pool (radius = 2) keeps top sky rows
+		//     (cy = 0, pooled over cy = 0..2) completely separate from bottom shadow rows (cy = 5, pooled over cy = 3..5)!
+		{
+			constexpr int debH = 96, debCh = debH / cellPx;
+			const CellMotionField debStillMv = CellMotionField::Uniform(cw, debCh, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			TdV2Plane master(w, debH, 0.0), cur(w, debH, 0.0), pk1(w, debH, 0.0), pk2(w, debH, 0.0);
+			std::mt19937 r1(4301u), r2(4302u);
+			std::normal_distribution<double> dither(0.0, 0.25);
+			for (int y = 0; y < debH; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					const double skyRamp = 240.0 + 0.30 * static_cast<double>(x);
+					master.at(x, y) = skyRamp;
+					if (y < 48)
+					{
+						// Top 3 cell rows (cy = 0..2): 6-code quantized sky contours on cur; clean peaks on pk1/pk2!
+						cur.at(x, y) = std::round(skyRamp / 6.0) * 6.0;
+						pk1.at(x, y) = skyRamp + dither(r1);
+						pk2.at(x, y) = skyRamp + dither(r2);
+					}
+					else
+					{
+						// Bottom 3 cell rows (cy = 3..5): real 14-code shadow lighting difference on cur vs peaks (`rmsDiff = 14.0 >> quantStep = 6.0`)!
+						// Under pre-H2 `blockOwnU / gains.low` (8.9x inflation -> quantStep ~ 53 codes!), `stepAgree` was ~1.0
+						// and smeared this 14-code real brightness change by ~8+ codes! Fixed H2 keeps `stepAgree == 0.0`!
+						cur.at(x, y) = skyRamp;
+						pk1.at(x, y) = skyRamp + 14.0 + dither(r1);
+						pk2.at(x, y) = skyRamp + 14.0 + dither(r2);
+					}
+				}
+			}
+
+			Config cfgDeb = MakePreset(Preset::Reference, Mode::On);
+			cfgDeb.enableRegionDeband = true;
+			cfgDeb.pixelBoundKappa = 1.0; // Default strict kappa = 1.0!
+
+			Config cfgNoDeb = cfgDeb;
+			cfgNoDeb.enableRegionDeband = false; // Same-input negative control!
+
+			FrameProcessInput in{};
+			in.seq = 1; in.receivedY = cur;
+			in.hasCleanSplit = true; in.cleanY = cur;
+			in.hasStepPrior = true; in.estimatedStepDelta = 6.0; // Coherent contour step where baseline c_A2 = Var * gains.low under-weights L!
+			in.frameRole = QualityPattern::FrameRole::NonReference;
+			in.prevPeak.cleanPlane = &pk1; in.prevPeak.motion = &debStillMv;
+			in.nextPeak.cleanPlane = &pk2; in.nextPeak.motion = &debStillMv;
+
+			const FrameProcessResult resDeb = TdV2ReferenceEngine(cfgDeb).ProcessFrame(in);
+			const FrameProcessResult resNoDeb = TdV2ReferenceEngine(cfgNoDeb).ProcessFrame(in);
+
+			// Also verify `hasStepPrior = false` (`quantStep = sqrt(12 * coherentVarL)`):
+			// rows cy = 0..3 (y = 0..63 on 96x80, 24 of 30 cells) have a deblocked 96-px L-band contour wave (`curMVar ~ 0, curHVar ~ 0`
+			// so derived `textureDensity == 0` and `edgeStrength == 0` even at 1-LSB noise floor!) with +/-1.15 peak dither so
+			// `2*C_01 < C_00 < 3*C_01` (`wBaseSum < 2/3` AND `rmsDiff < 0.5*quantStep` => `debandAdded > 0`),
+			// while row cy = 4 (y = 64..79) has a +/-14-code transient shadow discrepancy (`rmsDiff = 14 >> quantStep` -> 0 smearing!).
+			{
+				constexpr int cohH = 80, cohCh = cohH / cellPx;
+				const CellMotionField cohStillMv = CellMotionField::Uniform(cw, cohCh, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				TdV2Plane cohCur(w, cohH, 0.0), cohPk1(w, cohH, 0.0), cohPk2(w, cohH, 0.0);
+				for (int y = 0; y < cohH; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						const double skyRamp = 240.0 + 0.15 * static_cast<double>(x);
+						if (y < 64)
+						{
+							cohCur.at(x, y) = skyRamp + 2.6 * std::cos(2.0 * kPi * x / 96.0);
+							cohPk1.at(x, y) = skyRamp + 1.15;
+							cohPk2.at(x, y) = skyRamp - 1.15;
+						}
+						else
+						{
+							cohCur.at(x, y) = skyRamp;
+							cohPk1.at(x, y) = skyRamp + 14.0;
+							cohPk2.at(x, y) = skyRamp - 14.0;
+						}
+					}
+				}
+				FrameProcessInput cohIn{};
+				cohIn.seq = 1; cohIn.receivedY = cohCur;
+				cohIn.hasCleanSplit = true; cohIn.cleanY = cohCur;
+				cohIn.hasStepPrior = false;
+				cohIn.frameRole = QualityPattern::FrameRole::NonReference;
+				cohIn.prevPeak.cleanPlane = &cohPk1; cohIn.prevPeak.motion = &cohStillMv;
+				cohIn.nextPeak.cleanPlane = &cohPk2; cohIn.nextPeak.motion = &cohStillMv;
+
+				Config cfgCohDeb = cfgDeb;
+				cfgCohDeb.enableBandDependentPool = false;
+				cfgCohDeb.momentPoolRadiusCells = 0;
+				Config cfgCohNoDeb = cfgCohDeb;
+				cfgCohNoDeb.enableRegionDeband = false;
+
+				const FrameProcessResult rCohDeb = TdV2ReferenceEngine(cfgCohDeb).ProcessFrame(cohIn);
+				const FrameProcessResult rCohNoDeb = TdV2ReferenceEngine(cfgCohNoDeb).ProcessFrame(cohIn);
+				const uint32_t cohTopMask = static_cast<uint32_t>(std::lround(rCohDeb.tdMaps[1u * cw + 2u].f[TdMapsView::kBandMask]));
+				const uint32_t cohBotMask = static_cast<uint32_t>(std::lround(rCohDeb.tdMaps[4u * cw + 2u].f[TdMapsView::kBandMask]));
+				Assert::IsTrue((cohTopMask & kTdMapsBandMaskRegionDebandBit) != 0u,
+					L"H2 (hasStepPrior=false): coherentVarL sky cell must engage td_region_deband");
+				Assert::AreEqual(0u, cohBotMask & kTdMapsBandMaskRegionDebandBit,
+					L"H2 (hasStepPrior=false): 14-code shadow discrepancy must NOT falsely trigger td_region_deband");
+				for (int y = 72; y < 78; ++y)
+					for (int x = 16; x < w - 16; ++x)
+						Assert::AreEqual(rCohNoDeb.outputY.at(x, y), rCohDeb.outputY.at(x, y), 1e-9,
+							L"H2 (hasStepPrior=false): 14-code shadow discrepancy must remain completely un-smeared");
+			}
+
+			double skyMseRec = 0.0, skyMseNoDeb = 0.0, skyMseDeb = 0.0;
+			for (int y = 4; y < 24; ++y)
+			{
+				for (int x = 8; x < w - 8; ++x)
+				{
+					const double eR = cur.at(x, y) - master.at(x, y);
+					const double eN = resNoDeb.outputY.at(x, y) - master.at(x, y);
+					const double eD = resDeb.outputY.at(x, y) - master.at(x, y);
+					skyMseRec += eR * eR;
+					skyMseNoDeb += eN * eN;
+					skyMseDeb += eD * eD;
+				}
+			}
+			Assert::IsTrue(skyMseDeb < skyMseRec * 0.45 && skyMseDeb < skyMseNoDeb * 0.75,
+				Msg("td_region_deband sky MSE=%.1f must beat baseline no-deband=%.1f and received=%.1f",
+					skyMseDeb, skyMseNoDeb, skyMseRec).c_str());
+
+			// Top-half sky cells MUST set kTdMapsBandMaskRegionDebandBit (8u) and activate ReadRegionDebandGuidanceFromMaps!
+			const size_t topCell = 0u * cw + 2u;
+			const uint32_t topMask = static_cast<uint32_t>(std::lround(resDeb.tdMaps[topCell].f[TdMapsView::kBandMask]));
+			Assert::IsTrue((topMask & kTdMapsBandMaskRegionDebandBit) != 0u,
+				L"Active td_region_deband sky cell must set kTdMapsBandMaskRegionDebandBit (bit 3 = 8u) in kBandMask");
+			const TdRegionDebandGuidance topGuid = ReadRegionDebandGuidanceFromMaps(resDeb.tdMaps[topCell]);
+			Assert::IsTrue(topGuid.active && topGuid.appliedStrength > 0.15 &&
+			               resDeb.tdMaps[topCell].f[TdMapsView::kStability] > resNoDeb.tdMaps[topCell].f[TdMapsView::kStability],
+				L"Active td_region_deband must raise kStability and activate ReadRegionDebandGuidanceFromMaps");
+
+			// Bottom-half 14-code shadow step cells (row cy = 5, 5x5 pool cy = 3..5): `stepAgree == 0`, `debandAdded == 0`!
+			const size_t botCell = 5u * cw + 2u;
+			const uint32_t botMask = static_cast<uint32_t>(std::lround(resDeb.tdMaps[botCell].f[TdMapsView::kBandMask]));
+			Assert::AreEqual(0u, botMask & kTdMapsBandMaskRegionDebandBit,
+				L"H2: 14-code real shadow step must NOT trigger false td_region_deband (no 8.9x gains.low step inflation!)");
+			for (int y = 82; y < 92; ++y)
+				for (int x = 16; x < w - 16; ++x)
+					Assert::AreEqual(resNoDeb.outputY.at(x, y), resDeb.outputY.at(x, y), 1e-9,
+						L"H2: Inactive deband on 14-code shadow region must not smear or widen Pass 3A pixel bounds");
+		}
+
+		// (B) H2 Non-Destructive QP Peak Weight Preservation (`w_k` NEVER reduced!) + False-Activation Gate (`debandAdded == 0`).
+		{
+			// K = 3 flat cells with explicit quantStep = 8.0:
+			// Ref 0 (PrevPeak) and Ref 1 (NextPeak) carry a legitimate +9.2-code keyframe L-band correction
+			// (`rmsDiff = 9.2 > quantStep = 8.0 => stepAgree = 0.0`), earning QP weights `w_0 ~ 0.24, w_1 ~ 0.24` (`wBaseSum ~ 0.48`).
+			// Ref 2 (PrevPeak2) carries an orthogonal +-2.0-code low-freq ripple (`rmsDiff = 2.0 <= 4.0 => stepAgree = 1.0`)
+			// with `E[d_2 d_1] == 0 => c_2 == 0 => QP w_2 == 0.0`!
+			// Notice `wEq = {0, 0, 0.50}` has `sum(wEq) = 0.50 > wBaseSum = 0.48`!
+			// Fixed H2 MUST preserve `w_0` and `w_1` (`>= baseline`), lifting ONLY `w_2` within `room = 1 - wBaseSum`!
+			TdV2Plane cur(w, h, 300.0), pk0(w, h, 300.0), pk1(w, h, 300.0), pk2(w, h, 300.0);
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					// Orthogonal zero-product spatial cosines on L-band scale so E[d_0 d_1] ~ 38 while E[d_2 d_1] == 0!
+					const double modeA = std::cos(2.0 * kPi * x / 48.0);
+					const double modeB = std::sin(2.0 * kPi * x / 48.0);
+					const double modeC = std::cos(2.0 * kPi * y / 32.0);
+					pk0.at(x, y) = 300.0 + 9.0 * modeA + 9.0 * modeB;  // E[d_0^2] = 0.5*(81+81) = 81 => rmsDiff = 9.0 > 8.0!
+					pk1.at(x, y) = 300.0 + 9.0 * modeA - 9.0 * modeB;  // E[d_1^2] = 81 => rmsDiff = 9.0 > 8.0; E[d_0 d_1] = 0? Wait: 0.5*(81-81)=0 -> use 11 & 6!
+					pk2.at(x, y) = 300.0 + 2.8 * modeC;                // E[d_2^2] = 3.92 => rmsDiff = 1.98 < 4.0 (agree=1.0), E[d_2 d_1] == 0!
+				}
+			}
+			// Adjust pk0/pk1 amplitudes to (11.5 * modeA + 5.0 * modeB) and (11.5 * modeA - 5.0 * modeB):
+			// E[d_0^2] = E[d_1^2] = 0.5 * (132.25 + 25.0) = 78.625 => rmsDiff = 8.867 > quantStep(8.0) => agree[0]=agree[1]=0!
+			// E[d_0 d_1] = 0.5 * (132.25 - 25.0) = 53.625 => w_0 = w_1 = 53.625 / (78.625 + 53.625 + 0.786) = 0.403, WAIT:
+			// Use (10.5 * modeA + 7.5 * modeB) and (10.5 * modeA - 7.5 * modeB):
+			// E[d^2] = 0.5 * (110.25 + 56.25) = 83.25 => rmsDiff = 9.124 > 8.0 (agree=0!),
+			// E[d_0 d_1] = 0.5 * (110.25 - 56.25) = 27.0 => w_0 = w_1 = 27.0 / (83.25 + 27.0 + 0.83) = 0.243, wBaseSum = 0.486 < 0.50!
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					const double modeA = std::cos(2.0 * kPi * x / 96.0);
+					const double modeB = std::sin(2.0 * kPi * x / 96.0);
+					const double modeC = std::cos(2.0 * kPi * y / 64.0);
+					pk0.at(x, y) = 300.0 + 11.0 * modeA + 8.0 * modeB;
+					pk1.at(x, y) = 300.0 + 11.0 * modeA - 8.0 * modeB;
+					pk2.at(x, y) = 300.0 + 2.5 * modeC;
+				}
+			}
+
+			Config cfgQp = MakePreset(Preset::Reference, Mode::On);
+			cfgQp.estimator = VarianceEstimator::A1_ThreeCorneredHat;
+			cfgQp.enableA2eEmpiricalPrior = false;
+			cfgQp.enableEmpiricalBayesShrinkage = false;
+			cfgQp.enableBandDependentPool = false;
+			cfgQp.momentPoolRadiusCells = 2; // Full 96x64 periodicity orthogonality
+			cfgQp.enableRegionDeband = true;
+			cfgQp.pixelBoundKappa = 2.0;
+
+			Config cfgQpBase = cfgQp;
+			cfgQpBase.enableRegionDeband = false;
+
+			const std::vector<double> zeroTex(nCells, 0.0), zeroEdge(nCells, 0.0);
+			FrameProcessInput qpIn{};
+			qpIn.seq = 1; qpIn.receivedY = cur;
+			qpIn.hasCleanSplit = true; qpIn.cleanY = cur;
+			qpIn.hasStepPrior = true; qpIn.estimatedStepDelta = 8.0;
+			qpIn.p12TextureDensity = &zeroTex;
+			qpIn.edgeMapCells = &zeroEdge;
+			qpIn.prevPeak.cleanPlane = &pk0;  qpIn.prevPeak.motion = &stillMv;
+			qpIn.nextPeak.cleanPlane = &pk1;  qpIn.nextPeak.motion = &stillMv;
+			qpIn.prevPeak2.cleanPlane = &pk2; qpIn.prevPeak2.motion = &stillMv;
+
+			const FrameProcessResult rDeb = TdV2ReferenceEngine(cfgQp).ProcessFrame(qpIn);
+			const FrameProcessResult rBas = TdV2ReferenceEngine(cfgQpBase).ProcessFrame(qpIn);
+			const size_t midCell = 2u * cw + 3u;
+			const double w0Base = rBas.lumaCellWeights[0][0][midCell];
+			const double w1Base = rBas.lumaCellWeights[0][1][midCell];
+			const double w2Base = rBas.lumaCellWeights[0][2][midCell];
+			const double w0Deb = rDeb.lumaCellWeights[0][0][midCell];
+			const double w1Deb = rDeb.lumaCellWeights[0][1][midCell];
+			const double w2Deb = rDeb.lumaCellWeights[0][2][midCell];
+			Assert::IsTrue(w0Base > 0.15 && w1Base > 0.15 && w2Base < 0.02,
+				Msg("Baseline QP weights expected (w0=%.3f, w1=%.3f > 0.15, w2=%.3f ~ 0)", w0Base, w1Base, w2Base).c_str());
+			Assert::IsTrue(w0Deb >= w0Base - 1e-12,
+				Msg("H2: td_region_deband must NEVER wipe or reduce QP peak w0 (%.3f -> %.3f)", w0Base, w0Deb).c_str());
+			Assert::IsTrue(w1Deb >= w1Base - 1e-12,
+				Msg("H2: td_region_deband must NEVER wipe or reduce QP peak w1 (%.3f -> %.3f)", w1Base, w1Deb).c_str());
+			Assert::IsTrue(w2Deb > w2Base + 0.15 && (w0Deb + w1Deb + w2Deb) <= 1.0 + 1e-9,
+				Msg("H2: Step-consistent Ref 2 must lift non-destructively within simplex room (w2=%.3f, sum=%.4f)",
+					w2Deb, w0Deb + w1Deb + w2Deb).c_str());
+
+			// H2 False-Activation Gate: when K=2 baseline QP ALREADY solves `w_0 > 1/3` and `w_1 > 1/3` (`debandAdded == 0`),
+			// `kTdMapsBandMaskRegionDebandBit` must stay 0 and `kStability` must equal baseline!
+			TdV2Plane hiPk0(w, h, 300.0), hiPk1(w, h, 300.0);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					const double mCell = std::cos(2.0 * kPi * x / 16.0); // Exact 1-cell period => zero mean & symmetric C_00 == C_11!
+					hiPk0.at(x, y) = 303.0 + 0.6 * mCell;                // w_0 == w_1 ~= 0.495 > wEqK (1/3) => lift == 0!
+					hiPk1.at(x, y) = 303.0 - 0.6 * mCell;
+				}
+			FrameProcessInput hiIn = qpIn;
+			hiIn.prevPeak.cleanPlane = &hiPk0;
+			hiIn.nextPeak.cleanPlane = &hiPk1;
+			hiIn.prevPeak2 = ReferenceInput{};
+			const FrameProcessResult rHiDeb = TdV2ReferenceEngine(cfgQp).ProcessFrame(hiIn);
+			const FrameProcessResult rHiBas = TdV2ReferenceEngine(cfgQpBase).ProcessFrame(hiIn);
+			const uint32_t hiMask = static_cast<uint32_t>(std::lround(rHiDeb.tdMaps[midCell].f[TdMapsView::kBandMask]));
+			Assert::AreEqual(0u, hiMask & kTdMapsBandMaskRegionDebandBit,
+				L"H2: When baseline QP already exceeds wEq (debandAdded == 0), kBandMask deband bit must remain 0");
+			Assert::AreEqual(rHiBas.tdMaps[midCell].f[TdMapsView::kStability], rHiDeb.tdMaps[midCell].f[TdMapsView::kStability], 1e-6f,
+				L"H2: debandAdded == 0 must leave kStability bit-identical to baseline");
+
+			// M3 Contract Check: ReadRegionDebandGuidanceFromMaps strictly reads ONLY FieldsOf(Reader::Deband) == (kValidity | kStability)!
+			Assert::AreEqual(
+				TdMapsView::Bit(TdMapsView::kValidity) | TdMapsView::Bit(TdMapsView::kStability),
+				TdMapsView::FieldsOf(TdMapsView::Reader::Deband),
+				L"U19 Reader::Deband contract must be kValidity | kStability");
+			TdMapsView::Block blkA{};
+			blkA.f[TdMapsView::kValidity] = 1.0f;
+			blkA.f[TdMapsView::kStability] = 0.62f;
+			blkA.f[TdMapsView::kBandMask] = static_cast<float>(kTdMapsBandMaskRegionDebandBit | 1u);
+			TdMapsView::Block blkB{};
+			for (int fi = 0; fi < 12; ++fi) blkB.f[fi] = -999.0f; // Scramble every non-Deband field including kBandMask!
+			blkB.f[TdMapsView::kValidity] = 1.0f;
+			blkB.f[TdMapsView::kStability] = 0.62f;
+			const TdRegionDebandGuidance gA = ReadRegionDebandGuidanceFromMaps(blkA);
+			const TdRegionDebandGuidance gB = ReadRegionDebandGuidanceFromMaps(blkB);
+			Assert::IsTrue(gA.active && gB.active && std::fabs(gA.appliedStrength - 0.62) < 1e-6 &&
+			               std::fabs(gA.appliedStrength - gB.appliedStrength) < 1e-12,
+				L"M3: ReadRegionDebandGuidanceFromMaps must depend strictly on kValidity and kStability only");
+			blkB.f[TdMapsView::kValidity] = 0.0f;
+			Assert::IsFalse(ReadRegionDebandGuidanceFromMaps(blkB).active, L"kValidity == 0 must return inactive guidance");
+			blkB.f[TdMapsView::kValidity] = 1.0f;
+			blkB.f[TdMapsView::kStability] = std::numeric_limits<float>::quiet_NaN();
+			Assert::IsFalse(ReadRegionDebandGuidanceFromMaps(blkB).active, L"Non-finite kStability must fail closed");
+		}
+
+		// (C) M2 12-Bit `DepthScale(sourceBits = 12)` Scaling Invariance + 19-Key Settings UI Round-Trip!
+		{
+			// 10-bit vs 12-bit (4x code amplitude, 16x variance): ordinary 1-LSB 12-bit noise (variance = 16/12 = 1.333)
+			// must NOT saturate p10gShare at 1.0, and full engine output must scale by exact 4.0x!
+			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+			CellRegionInputs ri10{}, ri12{};
+			ri10.gainMid = ri12.gainMid = gains.mid;
+			ri10.gainFine = ri12.gainFine = gains.fine;
+			ri10.gainD3 = ri12.gainD3 = gains.d3;
+			ri10.baseQuantVar = 1.0 / 12.0;   ri10.effNoiseVar = 1.0 / 12.0;
+			ri12.baseQuantVar = 16.0 / 12.0;  ri12.effNoiseVar = 16.0 / 12.0;
+			ri10.cellOwnGrainVar = 1.0 / 12.0;  // 1-LSB 10-bit noise -> 1.0 * baseQuantVar (inside [0.5, 9.0], p10gShare < 0.02!)
+			ri12.cellOwnGrainVar = 16.0 / 12.0; // 1-LSB 12-bit noise -> 1.0 * baseQuantVar (would saturate 1.0 if hardcoded 1/12!)
+			ri10.curMVar = 0.08; ri12.curMVar = 0.08 * 16.0;
+			const CellRegionDescriptors d10 = EvaluateCellRegionDescriptors(ri10);
+			const CellRegionDescriptors d12 = EvaluateCellRegionDescriptors(ri12);
+			Assert::IsTrue(d12.p10gShare < 0.02 && std::fabs(d12.p10gShare - d10.p10gShare) < 1e-12 &&
+			               std::fabs(d12.textureDensity - d10.textureDensity) < 1e-12,
+				Msg("M2: 12-bit region descriptors (p10g12=%.6f vs p10g10=%.6f, texDiff=%.8f)",
+					d12.p10gShare, d10.p10gShare, std::fabs(d12.textureDensity - d10.textureDensity)).c_str());
+
+			TdV2Plane m10 = RenderMasterScene(w, h, 0.0, 0.0);
+			for (int y = 0; y < 16; ++y)
+				for (int x = 0; x < w; ++x)
+					m10.at(x, y) = 240.0 + 0.22 * std::sin(2.0 * kPi * x / 24.0); // Near-floor soft row testing 12-bit FocusGuard scaling!
+			const TdV2Plane p1_10 = ApplyCrispPeakQuant(m10, 4401u);
+			const TdV2Plane p2_10 = ApplyCrispPeakQuant(m10, 4402u);
+			TdV2Plane cur10 = ApplyDeblockedValleyLoss(m10, 8.0, 4403u, false);
+			for (int y = 0; y < 16; ++y)
+				for (int x = 0; x < w; ++x)
+					cur10.at(x, y) = 240.0 + 0.16 * std::sin(2.0 * kPi * x / 24.0) - 2.0;
+			auto scalePlane4x = [](const TdV2Plane& src) -> TdV2Plane
+			{
+				TdV2Plane dst(src.w, src.h, 0.0);
+				for (size_t i = 0; i < src.v.size(); ++i) dst.v[i] = 4.0 * src.v[i];
+				return dst;
+			};
+			const TdV2Plane p1_12 = scalePlane4x(p1_10), p2_12 = scalePlane4x(p2_10), cur12 = scalePlane4x(cur10);
+
+			Config cfg10 = MakePreset(Preset::Reference, Mode::On);
+			cfg10.sourceBits = 10;
+			cfg10.enableRegionTailoring = true;
+			cfg10.bokehMatchDelta = kBokehMatchDeltaNormal;
+			cfg10.enableRegionDeband = true;
+			cfg10.pixelBoundKappa = 2.0;
+
+			Config cfg12 = cfg10;
+			cfg12.sourceBits = 12;
+
+			FrameProcessInput in10{}, in12{};
+			in10.seq = 1; in10.receivedY = cur10; in10.hasCleanSplit = true; in10.cleanY = cur10;
+			in10.retainedGrainVar.assign(nCells, 1.0 / 12.0);
+			in10.prevPeak.cleanPlane = &p1_10; in10.prevPeak.motion = &stillMv;
+			in10.nextPeak.cleanPlane = &p2_10; in10.nextPeak.motion = &stillMv;
+
+			in12.seq = 1; in12.receivedY = cur12; in12.hasCleanSplit = true; in12.cleanY = cur12;
+			in12.retainedGrainVar.assign(nCells, 16.0 / 12.0);
+			in12.prevPeak.cleanPlane = &p1_12; in12.prevPeak.motion = &stillMv;
+			in12.nextPeak.cleanPlane = &p2_12; in12.nextPeak.motion = &stillMv;
+
+			const FrameProcessResult out10 = TdV2ReferenceEngine(cfg10).ProcessFrame(in10);
+			const FrameProcessResult out12 = TdV2ReferenceEngine(cfg12).ProcessFrame(in12);
+			double maxScaleErr = 0.0;
+			for (size_t i = 0; i < cur10.v.size(); ++i)
+				maxScaleErr = (std::max)(maxScaleErr, std::fabs(out12.outputY.v[i] - 4.0 * out10.outputY.v[i]));
+			Assert::IsTrue(maxScaleErr < 1e-6,
+				Msg("M2: 12-bit A4-1 engine output must equal 4.0 * 10-bit output (maxScaleErr=%.8f)", maxScaleErr).c_str());
+
+			// ParseTdV2Settings & BuildTdV2Config round-trip for all 3 new Stage A4-1 keys + fail-closed validation!
+			TdV2RuntimeSettings s{};
+			std::string prob;
+			Assert::IsTrue(ParseTdV2Settings("temporal_detail", "on", s, prob) && prob.empty());
+			Assert::IsTrue(ParseTdV2Settings("td_region_tailoring", "on", s, prob) && prob.empty());
+			Assert::IsTrue(ParseTdV2Settings("td_region_deband", "on", s, prob) && prob.empty());
+			for (const auto& bk : { std::make_pair("0.125", kBokehMatchDeltaTight),
+			                        std::make_pair("0.25", kBokehMatchDeltaNormal),
+			                        std::make_pair("0.375", kBokehMatchDeltaWide),
+			                        std::make_pair("off", 0.0) })
+			{
+				Assert::IsTrue(ParseTdV2Settings("td_bokeh_match_delta", bk.first, s, prob) && prob.empty());
+				const Config cBuilt = BuildTdV2Config(s, false);
+				Assert::IsTrue(cBuilt.enableRegionTailoring && cBuilt.enableRegionDeband &&
+				               std::fabs(cBuilt.bokehMatchDelta - bk.second) < 1e-12);
+			}
+			Assert::IsTrue(ParseTdV2Settings("td_bokeh_match_delta", "0.25", s, prob));
+			const TdV2RuntimeSettings snapS = s;
+			Assert::IsFalse(ParseTdV2Settings("td_bokeh_match_delta", "0.5", s, prob) || prob.empty());
+			Assert::IsFalse(ParseTdV2Settings("td_region_tailoring", "invalid", s, prob) || prob.empty());
+			Assert::IsFalse(ParseTdV2Settings("td_region_deband", "2", s, prob) || prob.empty());
+			Assert::AreEqual(snapS.bokehMatchDelta, s.bokehMatchDelta, 0.0, L"Invalid A4-1 setting must not mutate state");
+			Assert::AreEqual(0.5, ClampBokehMatchDelta(0.95), 1e-12, L"ClampBokehMatchDelta must cap >0.5 to kBokehMatchDeltaMax=0.5");
+			Assert::AreEqual(0.0, ClampBokehMatchDelta(-0.1), 0.0, L"ClampBokehMatchDelta must clamp <=0 to 0.0");
+			const Config origC = BuildTdV2Config(s, /*originalPathway=*/true);
+			Assert::IsTrue(origC.mode == Mode::Off && !origC.ModifiesPixels(), L"Original pathway must keep TD completely inert");
 		}
 	}
 };

@@ -937,6 +937,629 @@ public:
 		lArena.Release();
 		cArena.Release();
 	}
+
+	// 7. Stage A4-1 GPU WARP Parity: Default-OFF 0-byte ScratchArena & bit-identity (M1), Pass 3A edge-aware silhouette stop,
+	//    H3 `regionPriorsTex.y < 0` (-1.0) derived `pxEdge` sentinel, non-finite fail-closed closure, & M3 persistent VRAM accounting.
+	BEGIN_TEST_METHOD_ATTRIBUTE(GpuA4_1RegionTailoringEdgeAwareBlendSentinelNonFiniteAndVramParity)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(GpuA4_1RegionTailoringEdgeAwareBlendSentinelNonFiniteAndVramParity)
+	{
+		using namespace TdV2UpgradeWarpNs;
+		WarpContext ctx;
+		constexpr int w = 64, h = 48, cellPx = 16;
+		const int cw = w / cellPx, ch = h / cellPx;
+		const size_t nCells = static_cast<size_t>(cw * ch);
+
+		VpSkeleton::PlTexBackend backend(ctx.gpu);
+		VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> refArena(backend), rtArena(backend);
+		Assert::IsTrue(refArena.Reserve(VpSkeleton::PlanArena(
+			TdV2GpuEngine::ArenaRequests(ctx.gpu, w, h, cellPx, Preset::Reference), VpSkeleton::Tier::T2)));
+		Assert::IsTrue(rtArena.Reserve(VpSkeleton::PlanArena(
+			TdV2GpuEngine::ArenaRequests(ctx.gpu, w, h, cellPx, Preset::RealTime), VpSkeleton::Tier::T2)));
+
+		// (A) M1 Default-OFF: 0 extra ScratchArena bytes, 0 cellRegionAuxTex_ / inRegion*Tex_ persistent VRAM,
+		//     StandInKind::RegionMapsDerived inactive, and <= 1e-3 CPU-vs-GPU parity across pixels and td.maps!
+		{
+			const TdV2Plane m = MakeAnalyticalMaster(w, h, 0.0, 0.0);
+			const TdV2Plane v = MakeValleyLoss(m, 8.0, 4701u);
+			const CellMotionField stillMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+			Config defCfg = MakePreset(Preset::Reference, Mode::On);
+			defCfg.pixelBoundKappa = 2.0;
+
+			FrameProcessInput in{};
+			in.seq = 1; in.receivedY = v;
+			in.hasStepPrior = true; in.estimatedStepDelta = 8.0;
+			in.prevPeak.cleanPlane = &m; in.prevPeak.motion = &stillMv;
+			in.nextPeak.cleanPlane = &m; in.nextPeak.motion = &stillMv;
+
+			StandInRegistry stCpu, stGpu;
+			const FrameProcessResult cpuRes = TdV2ReferenceEngine(defCfg).ProcessFrame(in, &stCpu);
+			LumaGpuGuard gpuDef(ctx.gpu, defCfg);
+			refArena.BeginFrame();
+			const GpuProcessResult gpuRes = gpuDef.eng.ProcessFrame(ctx.gpu, ctx.dispatch, in, &refArena, &stGpu);
+			Assert::IsTrue(gpuRes.succeeded && !gpuRes.scratchShort, L"Default-OFF GPU dispatch failed");
+			Assert::IsFalse(stGpu.IsActive(StandInKind::RegionMapsDerived), L"Default-OFF GPU must not engage RegionMapsDerived");
+			const uint64_t estDefBytes = TdV2GpuEngine::EstimatedPersistentVramBytes(w, h, cellPx, Preset::Reference);
+			Assert::IsTrue(
+				gpuDef.eng.AllocatedPersistentLumaVramBytes() <= estDefBytes,
+				L"M1: Default-OFF GPU allocated VRAM must stay <= EstimatedPersistentVramBytes");
+			Assert::IsTrue(MaxAbsPlaneDiff(cpuRes.outputY, gpuRes.outputY) <= kParityTol,
+				WMsg("Default-OFF CPU-vs-GPU diff=%.6f", MaxAbsPlaneDiff(cpuRes.outputY, gpuRes.outputY)).c_str());
+
+			// Populate all non-A4-1 staging inputs (cleanY, codecModelPb, faceMask) with A4-1 OFF -> exact 1:1 byte match (0 region bytes)!
+			std::vector<uint8_t> oneFace(nCells, 0u);
+			oneFace[0] = 1u;
+			FrameProcessInput inFullStaging = in;
+			inFullStaging.hasCleanSplit = true;
+			inFullStaging.cleanY = v;
+			inFullStaging.transformIdentified8x8 = true;
+			inFullStaging.codecModelPb = &m;
+			inFullStaging.faceMask = &oneFace;
+			refArena.BeginFrame();
+			Assert::IsTrue(gpuDef.eng.ProcessFrame(ctx.gpu, ctx.dispatch, inFullStaging, &refArena).succeeded);
+			Assert::AreEqual(
+				estDefBytes,
+				gpuDef.eng.AllocatedPersistentLumaVramBytes(),
+				L"M1: Default-OFF GPU with full non-region staging must allocate exact EstimatedPersistentVramBytes (0 region bytes)");
+		}
+
+		// (B) Pass 3A Edge-Aware Blending (`td_region_tailoring = on`): stops silhouette halo bleed on GPU (vs plain bilinear GPU control)
+		//     and matches CPU within <= 1e-3 on Preset::Reference (and verifies RealTime execution & bleed stop)!
+		{
+			TdV2Plane curSil(w, h, 0.0), pk1Sil(w, h, 0.0), pk2Sil(w, h, 0.0);
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					if (x < 32)
+					{
+						curSil.at(x, y) = 180.0;
+						pk1Sil.at(x, y) = 185.0;
+						pk2Sil.at(x, y) = 185.0;
+					}
+					else
+					{
+						const double wall = 760.0 + 14.0 * std::sin(0.45 * x + 0.35 * y);
+						pk1Sil.at(x, y) = wall + 0.3 * std::cos(0.9 * x - 0.7 * y);
+						pk2Sil.at(x, y) = wall - 0.3 * std::sin(0.8 * x + 0.6 * y);
+						curSil.at(x, y) = wall - 9.0 * std::cos(0.45 * x + 0.35 * y);
+					}
+				}
+			}
+			CellMotionField silMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			silMv.confidence.assign(nCells, 1.0);
+			for (int cy = 0; cy < ch; ++cy)
+			{
+				silMv.confidence[static_cast<size_t>(cy) * cw + 0] = 0.12;
+				silMv.confidence[static_cast<size_t>(cy) * cw + 1] = 0.12;
+			}
+			CellMotionField uniformLowMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			uniformLowMv.confidence.assign(nCells, 0.12);
+
+			FrameProcessInput silIn{};
+			silIn.seq = 1; silIn.receivedY = curSil;
+			silIn.hasCleanSplit = true; silIn.cleanY = curSil;
+			silIn.hasStepPrior = true; silIn.estimatedStepDelta = 16.0;
+			silIn.prevPeak.cleanPlane = &pk1Sil; silIn.prevPeak.motion = &silMv;
+			silIn.nextPeak.cleanPlane = &pk2Sil; silIn.nextPeak.motion = &silMv;
+
+			FrameProcessInput silUniformLowIn = silIn;
+			silUniformLowIn.prevPeak.motion = &uniformLowMv;
+			silUniformLowIn.nextPeak.motion = &uniformLowMv;
+
+			for (Preset pr : { Preset::Reference, Preset::RealTime })
+			{
+				Config cfgOn = MakePreset(pr, Mode::On);
+				cfgOn.enableRegionTailoring = true;
+				cfgOn.enableBandDependentPool = false;
+				cfgOn.momentPoolRadiusCells = 0;
+				cfgOn.enableA2eEmpiricalPrior = false;
+				cfgOn.enableEmpiricalBayesShrinkage = false;
+				cfgOn.pixelBoundKappa = 3.0;
+				Config cfgOff = cfgOn;
+				cfgOff.enableRegionTailoring = false;
+				cfgOff.enableEdgeAwareWeightUpsample = false;
+
+				auto& curArena = (pr == Preset::Reference) ? refArena : rtArena;
+				StandInRegistry stGpuOn;
+				const FrameProcessResult cpuOn = TdV2ReferenceEngine(cfgOn).ProcessFrame(silIn);
+				LumaGpuGuard gOn(ctx.gpu, cfgOn), gOnLow(ctx.gpu, cfgOn), gOff(ctx.gpu, cfgOff), gOffLow(ctx.gpu, cfgOff);
+				curArena.BeginFrame();
+				const GpuProcessResult gpuOn = gOn.eng.ProcessFrame(ctx.gpu, ctx.dispatch, silIn, &curArena, &stGpuOn);
+				curArena.BeginFrame();
+				const GpuProcessResult gpuOnLow = gOnLow.eng.ProcessFrame(ctx.gpu, ctx.dispatch, silUniformLowIn, &curArena);
+				curArena.BeginFrame();
+				const GpuProcessResult gpuOff = gOff.eng.ProcessFrame(ctx.gpu, ctx.dispatch, silIn, &curArena);
+				curArena.BeginFrame();
+				const GpuProcessResult gpuOffLow = gOffLow.eng.ProcessFrame(ctx.gpu, ctx.dispatch, silUniformLowIn, &curArena);
+				Assert::IsTrue(gpuOn.succeeded && gpuOnLow.succeeded && gpuOff.succeeded && gpuOffLow.succeeded);
+				Assert::IsTrue(stGpuOn.IsActive(StandInKind::RegionMapsDerived),
+					L"GPU enableRegionTailoring without external maps must engage RegionMapsDerived");
+				if (pr == Preset::Reference)
+				{
+					Assert::IsTrue(MaxAbsPlaneDiff(cpuOn.outputY, gpuOn.outputY) <= kParityTol,
+						WMsg("GPU Reference region_tailoring parity diff=%.6f", MaxAbsPlaneDiff(cpuOn.outputY, gpuOn.outputY)).c_str());
+				}
+
+				double maxGpuHaloOn = 0.0, maxGpuHaloOff = 0.0;
+				for (int y = 8; y < h - 8; ++y)
+				{
+					for (int x = 28; x < 32; ++x)
+					{
+						maxGpuHaloOn = (std::max)(maxGpuHaloOn, std::fabs(gpuOn.outputY.at(x, y) - gpuOnLow.outputY.at(x, y)));
+						maxGpuHaloOff = (std::max)(maxGpuHaloOff, std::fabs(gpuOff.outputY.at(x, y) - gpuOffLow.outputY.at(x, y)));
+					}
+				}
+				Assert::IsTrue(maxGpuHaloOn <= 1e-5, L"GPU Pass 3A edge-aware blend must stop silhouette weight halo bleed");
+				Assert::IsTrue(maxGpuHaloOff > 0.50, L"GPU negative control (plain bilinear) must bleed across silhouette");
+			}
+		}
+
+		// (C) H3 Closure: Zero-copy GPU `regionPriorsTex` with `.y = -1.0f` (`< 0` sentinel) MUST keep `td_p3_clean_y` LDS loaded
+		//     and derive `pxEdge` identically to CPU (`<= 1e-3`), differing from `.y = 0.0f` on an intra-cell sharp gradient!
+		{
+			TdV2Plane cur(w, h, 0.0), pk1(w, h, 0.0), pk2(w, h, 0.0);
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					const double base = ((x < 15) ? 350.0 : ((x < 17) ? 450.0 : 362.5)) + 6.0 * std::cos(0.9 * y);
+					pk1.at(x, y) = base + 0.25 * std::cos(0.7 * x);
+					pk2.at(x, y) = base - 0.25 * std::sin(0.7 * y);
+					cur.at(x, y) = base - 8.0 * std::cos(0.9 * y);
+				}
+			}
+			CellMotionField mv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			mv.confidence.assign(nCells, 1.0);
+			for (int cy = 0; cy < ch; ++cy)
+				mv.confidence[static_cast<size_t>(cy) * cw + 0] = 0.08;
+
+			const std::vector<double> p12Vec(nCells, 0.40);
+			const std::vector<double> edgeNegOne(nCells, -1.0);
+			const std::vector<double> edgeZero(nCells, 0.0);
+
+			Config cfg = MakePreset(Preset::Reference, Mode::On);
+			cfg.enableRegionTailoring = true;
+			cfg.pixelBoundKappa = 3.0;
+
+			FrameProcessInput cpuSentIn{};
+			cpuSentIn.seq = 1; cpuSentIn.receivedY = cur;
+			cpuSentIn.hasCleanSplit = true; cpuSentIn.cleanY = cur;
+			cpuSentIn.hasStepPrior = true; cpuSentIn.estimatedStepDelta = 16.0;
+			cpuSentIn.p12TextureDensity = &p12Vec;
+			cpuSentIn.edgeMapCells = &edgeNegOne;
+			cpuSentIn.prevPeak.cleanPlane = &pk1; cpuSentIn.prevPeak.motion = &mv;
+			cpuSentIn.nextPeak.cleanPlane = &pk2; cpuSentIn.nextPeak.motion = &mv;
+			const FrameProcessResult cpuSentRes = TdV2ReferenceEngine(cfg).ProcessFrame(cpuSentIn);
+
+			// Build explicit RGBA32F `regionPriorsTex` on GPU: `.x = 0.40f`, `.y = -1.0f` (`< 0` sentinel!), `.zw = -1.0f`!
+			pl_tex recTex = UploadR32Tex(ctx.gpu, cur);
+			pl_tex pk1Tex = UploadR32Tex(ctx.gpu, pk1);
+			pl_tex pk2Tex = UploadR32Tex(ctx.gpu, pk2);
+			pl_tex outSentTex = UploadR32Tex(ctx.gpu, cur, /*storable=*/true, /*readable=*/true);
+			pl_tex outZeroTex = UploadR32Tex(ctx.gpu, cur, /*storable=*/true, /*readable=*/true);
+
+			pl_tex_params tpPrior{};
+			tpPrior.w = cw; tpPrior.h = ch;
+			tpPrior.format = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RGBA32F);
+			tpPrior.sampleable = true; tpPrior.host_writable = true;
+			pl_tex priorsSentTex = pl_tex_create(ctx.gpu, &tpPrior);
+			pl_tex priorsZeroTex = pl_tex_create(ctx.gpu, &tpPrior);
+			std::vector<float> bufSent(nCells * 4u, -1.0f), bufZero(nCells * 4u, -1.0f);
+			for (size_t ci = 0; ci < nCells; ++ci)
+			{
+				bufSent[ci * 4u + 0u] = 0.40f; bufSent[ci * 4u + 1u] = -1.0f;
+				bufZero[ci * 4u + 0u] = 0.40f; bufZero[ci * 4u + 1u] = 0.0f;
+			}
+			pl_tex_transfer_params xs{}; xs.tex = priorsSentTex; xs.ptr = bufSent.data();
+			pl_tex_transfer_params xz{}; xz.tex = priorsZeroTex; xz.ptr = bufZero.data();
+			Assert::IsTrue(pl_tex_upload(ctx.gpu, &xs) && pl_tex_upload(ctx.gpu, &xz));
+
+			GpuFrameInput gInSent{};
+			gInSent.seq = 1; gInSent.w = w; gInSent.h = h;
+			gInSent.receivedYTex = recTex; gInSent.cleanYTex = recTex; gInSent.hasCleanSplit = true;
+			gInSent.hasStepPrior = true; gInSent.estimatedStepDelta = 16.0;
+			gInSent.regionPriorsTex = priorsSentTex;
+			gInSent.prevPeak.cleanTex = pk1Tex; gInSent.prevPeak.motion = &mv;
+			gInSent.nextPeak.cleanTex = pk2Tex; gInSent.nextPeak.motion = &mv;
+
+			GpuFrameOutput gOutSent{}; gOutSent.outputYTex = outSentTex;
+			LumaGpuGuard gEngSent(ctx.gpu, cfg), gEngZero(ctx.gpu, cfg);
+			refArena.BeginFrame();
+			Assert::IsTrue(gEngSent.eng.ProcessFrameGpu(ctx.gpu, ctx.dispatch, gInSent, gOutSent, &refArena));
+			const TdV2Plane gpuSentPlane = DownloadR32Tex(ctx.gpu, outSentTex);
+
+			GpuFrameInput gInZero = gInSent;
+			gInZero.regionPriorsTex = priorsZeroTex;
+			GpuFrameOutput gOutZero{}; gOutZero.outputYTex = outZeroTex;
+			refArena.BeginFrame();
+			Assert::IsTrue(gEngZero.eng.ProcessFrameGpu(ctx.gpu, ctx.dispatch, gInZero, gOutZero, &refArena));
+			const TdV2Plane gpuZeroPlane = DownloadR32Tex(ctx.gpu, outZeroTex);
+
+			Assert::IsTrue(MaxAbsPlaneDiff(cpuSentRes.outputY, gpuSentPlane) <= kParityTol,
+				WMsg("H3 GPU Reference regionPriorsTex.y = -1.0 sentinel parity diff=%.6f",
+					MaxAbsPlaneDiff(cpuSentRes.outputY, gpuSentPlane)).c_str());
+			Assert::IsTrue(MaxAbsPlaneDiff(gpuSentPlane, gpuZeroPlane) > 0.05,
+				WMsg("H3 GPU regionPriorsTex.y = -1.0 must derive pxEdge (not clamp -1->0): diffVsZero=%.4f",
+					MaxAbsPlaneDiff(gpuSentPlane, gpuZeroPlane)).c_str());
+
+			// Also verify Preset::RealTime (`TD_COMPACT_BANDS == 1`) keeps `td_p3_clean_y` loaded when `.y = -1.0f`!
+			Config cfgRtSent = MakePreset(Preset::RealTime, Mode::On);
+			cfgRtSent.enableRegionTailoring = true;
+			cfgRtSent.pixelBoundKappa = 3.0;
+			LumaGpuGuard gRtSent(ctx.gpu, cfgRtSent), gRtZero(ctx.gpu, cfgRtSent);
+			rtArena.BeginFrame();
+			Assert::IsTrue(gRtSent.eng.ProcessFrameGpu(ctx.gpu, ctx.dispatch, gInSent, gOutSent, &rtArena));
+			const TdV2Plane rtSentPlane = DownloadR32Tex(ctx.gpu, outSentTex);
+			rtArena.BeginFrame();
+			Assert::IsTrue(gRtZero.eng.ProcessFrameGpu(ctx.gpu, ctx.dispatch, gInZero, gOutZero, &rtArena));
+			const TdV2Plane rtZeroPlane = DownloadR32Tex(ctx.gpu, outZeroTex);
+			Assert::IsTrue(MaxAbsPlaneDiff(rtSentPlane, rtZeroPlane) > 0.05,
+				WMsg("H3 GPU RealTime regionPriorsTex.y = -1.0 must also derive pxEdge: diffVsZero=%.4f",
+					MaxAbsPlaneDiff(rtSentPlane, rtZeroPlane)).c_str());
+
+			for (pl_tex* t : { &recTex, &pk1Tex, &pk2Tex, &outSentTex, &outZeroTex, &priorsSentTex, &priorsZeroTex })
+				pl_tex_destroy(ctx.gpu, t);
+		}
+
+		// (D) H3 Non-Finite Fail-Closed GPU Parity + M3 Persistent VRAM Accounting with CPU Region Staging Inputs!
+		{
+			const TdV2Plane m = MakeAnalyticalMaster(w, h, 0.0, 0.0);
+			const TdV2Plane v = MakeValleyLoss(m, 8.0, 4709u);
+			const CellMotionField stillMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+			const double qNan = std::numeric_limits<double>::quiet_NaN();
+			const double pInf = std::numeric_limits<double>::infinity();
+			std::vector<double> curP11(nCells, 0.90), refP11(nCells, 0.90), p12(nCells, 0.50), edgeC(nCells, 0.15);
+			curP11[0] = qNan;
+			refP11[1] = pInf;
+			p12[2] = -pInf;
+			edgeC[3] = qNan;
+			TdV2Plane edgePlane(w, h, 0.15);
+			edgePlane.at(40, 24) = qNan; // Pixel inside cell (2, 1) = index 6!
+
+			Config cfg = MakePreset(Preset::Reference, Mode::On);
+			cfg.enableRegionTailoring = true;
+			cfg.pixelBoundKappa = 2.0;
+
+			FrameProcessInput nfIn{};
+			nfIn.seq = 1; nfIn.receivedY = v;
+			nfIn.hasCleanSplit = true; nfIn.cleanY = v;
+			nfIn.hasStepPrior = true; nfIn.estimatedStepDelta = 8.0;
+			nfIn.p11FocusConfidence = &curP11;
+			nfIn.prevPeak.cleanPlane = &m; nfIn.prevPeak.motion = &stillMv; nfIn.prevPeak.focusConfidence = &refP11;
+			nfIn.nextPeak.cleanPlane = &m; nfIn.nextPeak.motion = &stillMv;
+			nfIn.p12TextureDensity = &p12;
+			nfIn.edgeMapCells = &edgeC;
+			nfIn.edgeMapPlane = &edgePlane;
+
+			StandInRegistry stCpuNf, stGpuNf;
+			const FrameProcessResult cpuNf = TdV2ReferenceEngine(cfg).ProcessFrame(nfIn, &stCpuNf);
+			LumaGpuGuard gNf(ctx.gpu, cfg);
+			refArena.BeginFrame();
+			const GpuProcessResult gpuNf = gNf.eng.ProcessFrame(ctx.gpu, ctx.dispatch, nfIn, &refArena, &stGpuNf);
+			Assert::IsTrue(gpuNf.succeeded, L"GPU dispatch must succeed cleanly with fail-closed non-finite region inputs");
+			Assert::IsTrue(stGpuNf.IsActive(StandInKind::NonFiniteClosure) && gpuNf.nonFiniteCells >= 4u,
+				L"H3 GPU must engage NonFiniteClosure and count nonFiniteCells on non-finite P11/P12/edgeMap");
+			for (double val : gpuNf.outputY.v)
+				Assert::IsTrue(std::isfinite(val), L"GPU outputY must contain zero NaN/Inf pixels");
+			Assert::AreEqual(0.0, gpuNf.tdDelta.at(40, 24), 0.0,
+				L"H3 GPU non-finite edgeMapPlane pixel (40,24) must fail closed (exact tdDelta == 0.0)");
+			Assert::AreEqual(static_cast<double>(static_cast<float>(v.at(40, 24))), gpuNf.outputY.at(40, 24), 0.0,
+				L"H3 GPU non-finite edgeMapPlane pixel (40,24) must fail closed (bit-exact FP32 receivedY passthrough)");
+			for (size_t badCell : { size_t(0), size_t(1), size_t(2), size_t(3) })
+				Assert::AreEqual(0.0f, gpuNf.tdMaps[badCell].f[TdMapsView::kValidity], 0.0f,
+					L"H3 GPU non-finite region cell must fail closed with kValidity == 0");
+			Assert::IsTrue(MaxAbsPlaneDiff(cpuNf.outputY, gpuNf.outputY) <= kParityTol,
+				WMsg("H3 non-finite fail-closed CPU-vs-GPU parity diff=%.6f", MaxAbsPlaneDiff(cpuNf.outputY, gpuNf.outputY)).c_str());
+
+			// M3: Verify exact persistent VRAM accounting now that all 4 region textures
+			// (`inRegionFocusTex_`, `inRegionPriorsTex_`, `inEdgeMapTex_`, `cellRegionAuxTex_`) are allocated!
+			const uint64_t estWithRegion = TdV2GpuEngine::EstimatedPersistentVramBytes(
+				w, h, cellPx, Preset::Reference, false, false, false, false, false, false, /*includeRegionStagingInputs=*/true);
+			Assert::IsTrue(
+				gNf.eng.AllocatedPersistentLumaVramBytes() <= estWithRegion,
+				L"M3: AllocatedPersistentLumaVramBytes with region inputs must stay <= EstimatedPersistentVramBytes(..., includeRegionStagingInputs=true)");
+			// Also populate the remaining 2 lazy CPU staging inputs (`codecModelPb` + `faceMask`) -> exact 1:1 byte equality!
+			std::vector<uint8_t> oneFace(nCells, 0u);
+			oneFace[5] = 1u;
+			FrameProcessInput nfFullStaging = nfIn;
+			nfFullStaging.transformIdentified8x8 = true;
+			nfFullStaging.codecModelPb = &m;
+			nfFullStaging.faceMask = &oneFace;
+			refArena.BeginFrame();
+			Assert::IsTrue(gNf.eng.ProcessFrame(ctx.gpu, ctx.dispatch, nfFullStaging, &refArena).succeeded);
+			Assert::AreEqual(
+				estWithRegion,
+				gNf.eng.AllocatedPersistentLumaVramBytes(),
+				L"M3: AllocatedPersistentLumaVramBytes with full CPU + region staging must match EstimatedPersistentVramBytes(..., includeRegionStagingInputs=true) bit-for-bit");
+		}
+
+		refArena.Release();
+		rtArena.Release();
+	}
+
+	// 8. Stage A4-1 GPU WARP Parity: Matched-focus bokeh (`td_bokeh_match_delta`), H1 multi-ref rack-focus peer veto
+	//    (K=2 & K=3), L1 authoritative external P11, Direct L-band `td_region_deband` -> `td.maps`, & M2 12-bit `DepthScale`.
+	BEGIN_TEST_METHOD_ATTRIBUTE(GpuA4_1BokehMatchDeltaH1MultiRefVetoL1ExternalP11AndRegionDebandM2Parity)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(GpuA4_1BokehMatchDeltaH1MultiRefVetoL1ExternalP11AndRegionDebandM2Parity)
+	{
+		using namespace TdV2UpgradeWarpNs;
+		WarpContext ctx;
+		constexpr int w = 64, h = 48, cellPx = 16;
+		const int cw = w / cellPx, ch = h / cellPx;
+		const size_t nCells = static_cast<size_t>(cw * ch);
+		const CellMotionField stillMv = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+		VpSkeleton::PlTexBackend backend(ctx.gpu);
+		VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> refArena(backend), rtArena(backend);
+		Assert::IsTrue(refArena.Reserve(VpSkeleton::PlanArena(
+			TdV2GpuEngine::ArenaRequests(ctx.gpu, w, h, cellPx, Preset::Reference), VpSkeleton::Tier::T2)));
+		Assert::IsTrue(rtArena.Reserve(VpSkeleton::PlanArena(
+			TdV2GpuEngine::ArenaRequests(ctx.gpu, w, h, cellPx, Preset::RealTime), VpSkeleton::Tier::T2)));
+
+		// (A) Matched-focus bokeh + H1 multi-ref rack-focus veto (K=2 -> singleRefA2 & K=3 -> partner switch to PrevPeak2)
+		//     + L1 authoritative P11 non-override CPU-vs-GPU parity (<= 1e-3)!
+		{
+			const TdV2Plane master = MakeAnalyticalMaster(w, h, 0.0, 0.0);
+			const TdV2Plane curVal = MakeValleyLoss(master, 9.0, 4801u);
+			TdV2Plane pk0Sharp = master, pk2Sharp = master, pk1RackBlur(w, h, 0.0);
+			{
+				std::mt19937 r0(4802u), r2(4803u);
+				std::normal_distribution<double> nd(0.0, 0.35);
+				for (size_t i = 0; i < master.v.size(); ++i)
+				{
+					pk0Sharp.v[i] += nd(r0);
+					pk2Sharp.v[i] += nd(r2);
+				}
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+					{
+						double acc = 0.0; int cnt = 0;
+						for (int dy = -4; dy <= 4; ++dy)
+							for (int dx = -4; dx <= 4; ++dx)
+							{
+								acc += master.at((std::max)(0, (std::min)(w - 1, x + dx)), (std::max)(0, (std::min)(h - 1, y + dy)));
+								++cnt;
+							}
+						pk1RackBlur.at(x, y) = (acc / cnt) + 16.0;
+					}
+			}
+
+			// Top half (cells 0..5): in-focus cur (0.90), Ref 0 sharp (0.88), Ref 1 rack-blurred (0.05 -> vetoed!).
+			// Bottom half (cells 6..11): matched defocused bokeh cur (0.12), Ref 0 (0.15), Ref 1 (0.10 -> both matched L-band!).
+			std::vector<double> curF(nCells, 0.12), ref0F(nCells, 0.15), ref1F(nCells, 0.10), ref2F(nCells, 0.14);
+			for (size_t ci = 0; ci < nCells / 2; ++ci)
+			{
+				curF[ci] = 0.90;
+				ref0F[ci] = 0.88;
+				ref1F[ci] = 0.05; // Rack-focus mismatch |0.05 - 0.90| = 0.85 >= 0.25!
+				ref2F[ci] = 0.91;
+			}
+
+			Config cfgBokeh = MakePreset(Preset::Reference, Mode::On);
+			cfgBokeh.bokehMatchDelta = kBokehMatchDeltaNormal;
+			cfgBokeh.pixelBoundKappa = 2.0;
+
+			// K = 2 (`hasStepPrior = false` so A2e + EB shrinkage & singleRefA2Cells are exercised simultaneously!)
+			FrameProcessInput inK2{};
+			inK2.seq = 1; inK2.receivedY = curVal; inK2.hasStepPrior = false;
+			inK2.frameRole = QualityPattern::FrameRole::NonReference;
+			inK2.p11FocusConfidence = &curF;
+			inK2.prevPeak.cleanPlane = &pk0Sharp;    inK2.prevPeak.motion = &stillMv; inK2.prevPeak.focusConfidence = &ref0F;
+			inK2.nextPeak.cleanPlane = &pk1RackBlur; inK2.nextPeak.motion = &stillMv; inK2.nextPeak.focusConfidence = &ref1F;
+
+			const FrameProcessResult cpuK2 = TdV2ReferenceEngine(cfgBokeh).ProcessFrame(inK2);
+			LumaGpuGuard gK2(ctx.gpu, cfgBokeh);
+			refArena.BeginFrame();
+			const GpuProcessResult gpuK2 = gK2.eng.ProcessFrame(ctx.gpu, ctx.dispatch, inK2, &refArena);
+			Assert::IsTrue(gpuK2.succeeded);
+			Assert::AreEqual(cpuK2.singleRefA2Cells, gpuK2.singleRefA2Cells,
+				L"H1: CPU and GPU singleRefA2Cells must match 1:1 under multi-ref rack-focus veto");
+			Assert::IsTrue(MaxAbsPlaneDiff(cpuK2.outputY, gpuK2.outputY) <= kParityTol,
+				WMsg("H1 K=2 bokeh/rack-focus CPU-vs-GPU parity diff=%.6f", MaxAbsPlaneDiff(cpuK2.outputY, gpuK2.outputY)).c_str());
+
+			// K = 3 (`PrevPeak` matched + `NextPeak` rack-vetoed on top half + `PrevPeak2` matched => top half switches A1 partner to Ref 2!)
+			FrameProcessInput inK3 = inK2;
+			inK3.prevPeak2.cleanPlane = &pk2Sharp; inK3.prevPeak2.motion = &stillMv; inK3.prevPeak2.focusConfidence = &ref2F;
+			const FrameProcessResult cpuK3 = TdV2ReferenceEngine(cfgBokeh).ProcessFrame(inK3);
+			LumaGpuGuard gK3(ctx.gpu, cfgBokeh);
+			refArena.BeginFrame();
+			const GpuProcessResult gpuK3 = gK3.eng.ProcessFrame(ctx.gpu, ctx.dispatch, inK3, &refArena);
+			Assert::IsTrue(gpuK3.succeeded && gpuK3.singleRefA2Cells == 0u && cpuK3.singleRefA2Cells == 0u,
+				L"H1 K=3: PrevPeak must switch A1 partner cleanly to matched PrevPeak2 when NextPeak is rack-focus-vetoed");
+			Assert::IsTrue(MaxAbsPlaneDiff(cpuK3.outputY, gpuK3.outputY) <= kParityTol,
+				WMsg("H1 K=3 bokeh/rack-focus CPU-vs-GPU parity diff=%.6f", MaxAbsPlaneDiff(cpuK3.outputY, gpuK3.outputY)).c_str());
+
+			// L1: 32-px soft sinusoidal pattern (`opticalIsDefocused == true`) with authoritative P11 = 1.0 preserves M-band on GPU & matches CPU!
+			TdV2Plane softCur(w, h, 0.0), softPk(w, h, 0.0);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					softPk.at(x, y) = 500.0 + 48.0 * std::sin(2.0 * 3.14159265358979323846 * x / 32.0);
+					softCur.at(x, y) = 500.0 + 34.0 * std::sin(2.0 * 3.14159265358979323846 * x / 32.0);
+				}
+			const std::vector<double> authSharp(nCells, 1.0);
+			FrameProcessInput l1In{};
+			l1In.seq = 1; l1In.receivedY = softCur; l1In.hasCleanSplit = true; l1In.cleanY = softCur;
+			l1In.hasStepPrior = true; l1In.estimatedStepDelta = 6.0;
+			l1In.p11FocusConfidence = &authSharp;
+			l1In.prevPeak.cleanPlane = &softPk; l1In.prevPeak.motion = &stillMv; l1In.prevPeak.focusConfidence = &authSharp;
+			l1In.nextPeak.cleanPlane = &softPk; l1In.nextPeak.motion = &stillMv; l1In.nextPeak.focusConfidence = &authSharp;
+			const FrameProcessResult cpuL1 = TdV2ReferenceEngine(cfgBokeh).ProcessFrame(l1In);
+			LumaGpuGuard gL1(ctx.gpu, cfgBokeh);
+			refArena.BeginFrame();
+			const GpuProcessResult gpuL1 = gL1.eng.ProcessFrame(ctx.gpu, ctx.dispatch, l1In, &refArena);
+			Assert::IsTrue(gpuL1.succeeded && MaxAbsPlaneDiff(cpuL1.outputY, gpuL1.outputY) <= kParityTol,
+				WMsg("L1 external P11 CPU-vs-GPU parity diff=%.6f", MaxAbsPlaneDiff(cpuL1.outputY, gpuL1.outputY)).c_str());
+			Assert::IsTrue(gpuL1.tdMaps[5].f[TdMapsView::kTrailConfidence1] > 0.15f,
+				L"L1 GPU: Authoritative P11=1.0 must keep M-band (kTrailConfidence1) active despite opticalIsDefocused");
+		}
+
+		// (B) Direct L-band `td_region_deband` -> `td.maps` (H2 coherent step, non-destructive lift, `debandAdded > 0` gate)
+		//     + M2 12-bit `DepthScale(12)` CPU-vs-GPU parity across Reference and RealTime presets!
+		{
+			constexpr int debH = 96, debCh = debH / cellPx;
+			const size_t nDebCells = static_cast<size_t>(cw * debCh);
+			const CellMotionField debStillMv = CellMotionField::Uniform(cw, debCh, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> debRefArena(backend), debRtArena(backend);
+			Assert::IsTrue(debRefArena.Reserve(VpSkeleton::PlanArena(
+				TdV2GpuEngine::ArenaRequests(ctx.gpu, w, debH, cellPx, Preset::Reference), VpSkeleton::Tier::T2)));
+			Assert::IsTrue(debRtArena.Reserve(VpSkeleton::PlanArena(
+				TdV2GpuEngine::ArenaRequests(ctx.gpu, w, debH, cellPx, Preset::RealTime), VpSkeleton::Tier::T2)));
+
+			TdV2Plane cur(w, debH, 0.0), pk1(w, debH, 0.0), pk2(w, debH, 0.0);
+			std::mt19937 r1(4811u), r2(4812u);
+			std::normal_distribution<double> dither(0.0, 0.25);
+			for (int y = 0; y < debH; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					const double sky = 240.0 + 0.30 * static_cast<double>(x);
+					if (y < 48)
+					{
+						cur.at(x, y) = std::round(sky / 6.0) * 6.0;
+						pk1.at(x, y) = sky + dither(r1);
+						pk2.at(x, y) = sky + dither(r2);
+					}
+					else
+					{
+						cur.at(x, y) = sky;
+						pk1.at(x, y) = sky + 14.0 + dither(r1);
+						pk2.at(x, y) = sky + 14.0 + dither(r2);
+					}
+				}
+			}
+
+			for (Preset pr : { Preset::Reference, Preset::RealTime })
+			{
+				Config cfgDeb = MakePreset(pr, Mode::On);
+				cfgDeb.enableRegionDeband = true;
+				cfgDeb.pixelBoundKappa = 1.0;
+
+				FrameProcessInput debIn{};
+				debIn.seq = 1; debIn.receivedY = cur; debIn.hasCleanSplit = true; debIn.cleanY = cur;
+				debIn.hasStepPrior = true; debIn.estimatedStepDelta = 6.0;
+				debIn.frameRole = QualityPattern::FrameRole::NonReference;
+				debIn.prevPeak.cleanPlane = &pk1; debIn.prevPeak.motion = &debStillMv;
+				debIn.nextPeak.cleanPlane = &pk2; debIn.nextPeak.motion = &debStillMv;
+
+				auto& curArena = (pr == Preset::Reference) ? debRefArena : debRtArena;
+				const FrameProcessResult cpuDeb = TdV2ReferenceEngine(cfgDeb).ProcessFrame(debIn);
+				LumaGpuGuard gDeb(ctx.gpu, cfgDeb);
+				curArena.BeginFrame();
+				const GpuProcessResult gpuDeb = gDeb.eng.ProcessFrame(ctx.gpu, ctx.dispatch, debIn, &curArena);
+				Assert::IsTrue(gpuDeb.succeeded);
+				// Preset::Reference matches full-res CPU <= 1e-3; Preset::RealTime uses SC-05 half-res L/D3 split (~0.04 code shift on 6-code steps).
+				const double debTol = (pr == Preset::Reference) ? kParityTol : 0.08;
+				Assert::IsTrue(MaxAbsPlaneDiff(cpuDeb.outputY, gpuDeb.outputY) <= debTol,
+					WMsg("H2 td_region_deband CPU-vs-GPU parity diff=%.6f", MaxAbsPlaneDiff(cpuDeb.outputY, gpuDeb.outputY)).c_str());
+
+				for (size_t ci = 0; ci < nDebCells; ++ci)
+				{
+					const uint32_t cMask = static_cast<uint32_t>(std::lround(cpuDeb.tdMaps[ci].f[TdMapsView::kBandMask]));
+					const uint32_t gMask = static_cast<uint32_t>(std::lround(gpuDeb.tdMaps[ci].f[TdMapsView::kBandMask]));
+					Assert::AreEqual(cMask & kTdMapsBandMaskRegionDebandBit, gMask & kTdMapsBandMaskRegionDebandBit,
+						L"CPU and GPU td.maps kBandMask deband bit (8u) must match on every cell");
+					const float stabTol = (pr == Preset::Reference) ? 1e-3f : 2e-2f;
+					Assert::IsTrue(std::fabs(cpuDeb.tdMaps[ci].f[TdMapsView::kStability] - gpuDeb.tdMaps[ci].f[TdMapsView::kStability]) <= stabTol,
+						L"CPU and GPU td.maps kStability must match");
+				}
+				const uint32_t topMask = static_cast<uint32_t>(std::lround(gpuDeb.tdMaps[1].f[TdMapsView::kBandMask]));
+				Assert::IsTrue((topMask & kTdMapsBandMaskRegionDebandBit) != 0u,
+					L"GPU banded sky cell must set kTdMapsBandMaskRegionDebandBit (8u)");
+				const TdRegionDebandGuidance gTop = ReadRegionDebandGuidanceFromMaps(gpuDeb.tdMaps[1]);
+				Assert::IsTrue(gTop.active && gTop.appliedStrength > 0.15,
+					L"GPU td.maps on banded sky cell must activate ReadRegionDebandGuidanceFromMaps");
+				const uint32_t botMask = static_cast<uint32_t>(std::lround(gpuDeb.tdMaps[5u * cw + 1u].f[TdMapsView::kBandMask]));
+				Assert::AreEqual(0u, botMask & kTdMapsBandMaskRegionDebandBit,
+					L"GPU 14-code shadow step cell must NOT falsely activate td_region_deband");
+			}
+			debRefArena.Release();
+			debRtArena.Release();
+
+			// M2: 12-bit (`sourceBits = 12`) combined Stage A4-1 (all 3 toggles ON) CPU-vs-GPU parity & 4.0x scaling vs 10-bit!
+			// Includes both structured detail AND a soft near-floor gradient row (cy = 0, sub-LSB 10-bit = ~0.9-code 12-bit ripple)
+			// so internal FocusGuard / region descriptors (`TD_BASE_QUANT_VAR` & `structureFloor`) are genuinely tested at 12-bit!
+			auto scale4x = [](const TdV2Plane& p) -> TdV2Plane
+			{
+				TdV2Plane d(p.w, p.h, 0.0);
+				for (size_t i = 0; i < p.v.size(); ++i) d.v[i] = 4.0 * p.v[i];
+				return d;
+			};
+			TdV2Plane m10 = MakeAnalyticalMaster(w, h, 0.0, 0.0);
+			for (int y = 0; y < 16; ++y)
+				for (int x = 0; x < w; ++x)
+					m10.at(x, y) = 240.0 + 0.22 * std::sin(2.0 * 3.14159265358979323846 * x / 24.0);
+			TdV2Plane pk1_10 = m10, pk2_10 = m10;
+			{
+				std::mt19937 rp1(4822u), rp2(4823u);
+				std::normal_distribution<double> pn(0.0, 0.20);
+				for (size_t i = 0; i < m10.v.size(); ++i)
+				{
+					pk1_10.v[i] += pn(rp1);
+					pk2_10.v[i] += pn(rp2);
+				}
+			}
+			TdV2Plane v10 = MakeValleyLoss(m10, 8.0, 4821u);
+			for (int y = 0; y < 16; ++y)
+				for (int x = 0; x < w; ++x)
+					v10.at(x, y) = 240.0 + 0.16 * std::sin(2.0 * 3.14159265358979323846 * x / 24.0) - 2.0;
+			const TdV2Plane pk1_12 = scale4x(pk1_10), pk2_12 = scale4x(pk2_10), v12 = scale4x(v10);
+
+			Config cfgAll10 = MakePreset(Preset::Reference, Mode::On);
+			cfgAll10.sourceBits = 10;
+			cfgAll10.enableRegionTailoring = true;
+			cfgAll10.bokehMatchDelta = kBokehMatchDeltaNormal;
+			cfgAll10.enableRegionDeband = true;
+			cfgAll10.pixelBoundKappa = 2.0;
+
+			Config cfgAll12 = cfgAll10;
+			cfgAll12.sourceBits = 12;
+
+			FrameProcessInput in10{}, in12{};
+			in10.seq = 1; in10.receivedY = v10; in10.hasCleanSplit = true; in10.cleanY = v10;
+			in10.retainedGrainVar.assign(nCells, 1.0 / 12.0);
+			in10.prevPeak.cleanPlane = &pk1_10; in10.prevPeak.motion = &stillMv;
+			in10.nextPeak.cleanPlane = &pk2_10; in10.nextPeak.motion = &stillMv;
+
+			in12.seq = 1; in12.receivedY = v12; in12.hasCleanSplit = true; in12.cleanY = v12;
+			in12.retainedGrainVar.assign(nCells, 16.0 / 12.0);
+			in12.prevPeak.cleanPlane = &pk1_12; in12.prevPeak.motion = &stillMv;
+			in12.nextPeak.cleanPlane = &pk2_12; in12.nextPeak.motion = &stillMv;
+
+			const FrameProcessResult cpu10 = TdV2ReferenceEngine(cfgAll10).ProcessFrame(in10);
+			const FrameProcessResult cpu12 = TdV2ReferenceEngine(cfgAll12).ProcessFrame(in12);
+			LumaGpuGuard g10(ctx.gpu, cfgAll10), g12(ctx.gpu, cfgAll12);
+			refArena.BeginFrame();
+			const GpuProcessResult gpu10 = g10.eng.ProcessFrame(ctx.gpu, ctx.dispatch, in10, &refArena);
+			refArena.BeginFrame();
+			const GpuProcessResult gpu12 = g12.eng.ProcessFrame(ctx.gpu, ctx.dispatch, in12, &refArena);
+			Assert::IsTrue(gpu10.succeeded && gpu12.succeeded);
+			const double kParityTol12 = DepthScale(12) * kParityTol; // 4e-3 12-bit codes (== 1e-3 10-bit LSB)
+			Assert::IsTrue(MaxAbsPlaneDiff(cpu12.outputY, gpu12.outputY) <= kParityTol12,
+				WMsg("M2 12-bit combined A4-1 CPU-vs-GPU parity diff=%.6f (tol=%.6f)",
+					MaxAbsPlaneDiff(cpu12.outputY, gpu12.outputY), kParityTol12).c_str());
+
+			double maxCpuScaleDiff = 0.0, maxGpuScaleDiff = 0.0;
+			for (size_t i = 0; i < v10.v.size(); ++i)
+			{
+				maxCpuScaleDiff = (std::max)(maxCpuScaleDiff, std::fabs(cpu12.outputY.v[i] - 4.0 * cpu10.outputY.v[i]));
+				maxGpuScaleDiff = (std::max)(maxGpuScaleDiff, std::fabs(gpu12.outputY.v[i] - 4.0 * gpu10.outputY.v[i]));
+			}
+			Assert::IsTrue(maxCpuScaleDiff <= kParityTol12,
+				WMsg("M2 12-bit CPU output vs 4.0 * 10-bit CPU output diff=%.6f", maxCpuScaleDiff).c_str());
+			Assert::IsTrue(maxGpuScaleDiff <= kParityTol12,
+				WMsg("M2 12-bit GPU output vs 4.0 * 10-bit GPU output diff=%.6f", maxGpuScaleDiff).c_str());
+		}
+
+		refArena.Release();
+		rtArena.Release();
+	}
 };
 
 } // namespace Tests

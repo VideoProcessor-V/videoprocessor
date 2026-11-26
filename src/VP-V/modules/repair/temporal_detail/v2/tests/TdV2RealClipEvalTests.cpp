@@ -994,6 +994,24 @@ public:
 
 			Config oracleCfg = k3;
 			arms.push_back(AblationArmSpec{ "13_Oracle_A4_Ceiling", false, true, oracleCfg, false, false });
+
+			Config a41k1 = makeBaseCfg();
+			a41k1.enableRegionTailoring = true;
+			a41k1.bokehMatchDelta = kBokehMatchDeltaNormal;
+			a41k1.enableRegionDeband = true;
+			arms.push_back(AblationArmSpec{ "14_Blind_A4_1_k1", false, false, a41k1, false, false });
+
+			Config a41k2 = k2;
+			a41k2.enableRegionTailoring = true;
+			a41k2.bokehMatchDelta = kBokehMatchDeltaNormal;
+			a41k2.enableRegionDeband = true;
+			arms.push_back(AblationArmSpec{ "15_Blind_A4_1_k2", false, false, a41k2, false, false });
+
+			Config a41k3 = k3;
+			a41k3.enableRegionTailoring = true;
+			a41k3.bokehMatchDelta = kBokehMatchDeltaNormal;
+			a41k3.enableRegionDeband = true;
+			arms.push_back(AblationArmSpec{ "16_Blind_A4_1_k3", false, false, a41k3, false, false });
 		}
 
 		std::ostringstream report;
