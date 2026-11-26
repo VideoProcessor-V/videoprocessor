@@ -76,17 +76,17 @@
      "evidence": [
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       114,
+       211,
        "bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH, HalfLumaPo"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       1063,
+       1167,
        "if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH, \"motion_ahead\"))"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       1188,
+       1293,
        "bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, i"
       ]
      ],
@@ -348,17 +348,17 @@
      "evidence": [
       [
        "motion/estimation/global_model/link/CameraExtension.cpp",
-       161,
+       163,
        "SceneRead ReadScene(FrameAnalysis::Store* store, uint64_t seq, bool& have, bool& cut, bool& fade, CameraModel:"
       ],
       [
        "motion/estimation/global_model/link/CameraExtension.cpp",
-       204,
+       206,
        "ReadScene(store, f.pairTo, have, cut, fade, &facts.picture);"
       ],
       [
        "motion/estimation/global_model/link/CameraExtension.cpp",
-       221,
+       223,
        "ReadScene(store, f.pairTo, have, cut, fade, &d.facts.picture);"
       ]
      ],
@@ -377,17 +377,17 @@
      "evidence": [
       [
        "motion/estimation/global_model/link/CameraExtension.cpp",
-       239,
+       241,
        "if (!engine.FlowOf(seq, v))"
       ],
       [
        "motion/estimation/global_model/link/CameraExtension.cpp",
-       475,
+       477,
        "if (!engine->SeedFieldOf(latest, sf) || sf.sourceGridW <= 0 || sf.sourceGridH <= 0)"
       ],
       [
        "motion/estimation/global_model/link/CameraExtension.cpp",
-       628,
+       630,
        "if (engine->SeedFieldOf(s, sf))"
       ]
      ],
@@ -548,12 +548,12 @@
      "evidence": [
       [
        "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
-       538,
+       753,
        "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ],
       [
        "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
-       613,
+       854,
        "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ]
      ],
@@ -572,12 +572,12 @@
      "evidence": [
       [
        "repair/grain_split/GrainSplitVariantOwner.h",
-       227,
+       251,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ],
       [
        "repair/grain_split/GrainSplitVariantOwner.h",
-       269,
+       295,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -629,12 +629,12 @@
      "evidence": [
       [
        "repair/grain_split/GrainSplitVariantOwner.h",
-       227,
+       251,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ],
       [
        "repair/grain_split/GrainSplitVariantOwner.h",
-       269,
+       295,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -746,7 +746,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuLightKernel.cpp",
-       178,
+       183,
        "const GpuInput* p11 = c.Input(VpSkeleton::kP11RegionBlockStats);"
       ]
      ],
@@ -765,7 +765,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuLightKernel.cpp",
-       196,
+       201,
        "const GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ]
      ],
@@ -1269,7 +1269,7 @@
      "evidence": [
       [
        "input/source_analysis/focus_map/FocusMapFill.h",
-       246,
+       251,
        "const AcquireResult r7 = memo.Acquire(kP7CameraFit, sampleSeq, AcquireForm::Cpu);"
       ]
      ],
@@ -1308,12 +1308,12 @@
      "evidence": [
       [
        "input/source_analysis/regions/EdgeMapFill.h",
-       102,
+       103,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ],
       [
        "input/source_analysis/regions/EdgeMapFill.h",
-       152,
+       166,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1352,7 +1352,7 @@
      "evidence": [
       [
        "repair/grain_split/GrainLevelGpu.h",
-       219,
+       240,
        "const VpSkeleton::AcquireResult split = memo.Acquire(VpSkeleton::kP10GrainSplit, req.seq, VpSkeleton::AcquireF"
       ]
      ],
@@ -1371,7 +1371,7 @@
      "evidence": [
       [
        "repair/grain_split/GrainLevelGpu.h",
-       208,
+       229,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1457,7 +1457,7 @@
      "evidence": [
       [
        "control/skeleton/SkeletonModule.cpp",
-       2344,
+       2362,
        "const AnalysisLane::ProductRead r10 = b->lane.ReadOf(VpSkeleton::kP10GrainSplit, seq);"
       ]
      ],
@@ -1476,7 +1476,7 @@
      "evidence": [
       [
        "control/skeleton/SkeletonModule.cpp",
-       2366,
+       2384,
        "const AnalysisLane::ProductRead r11 = b->lane.ReadOf(VpSkeleton::kP11RegionBlockStats, seq);"
       ]
      ],
