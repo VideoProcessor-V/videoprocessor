@@ -298,34 +298,37 @@ namespace DvTrimSelection
 			s.reason = "display at or above the mastering peak (identity)";
 			return;
 		}
+		// W23-C2-S3-M2: trims at/above mastering peak anchor to neutral at sourceMaxPq so displayPq -> sourceMaxPq- is C0.
+		auto candParams = [&](int i) { return (sourcePeak && cands[i].targetPq >= dm.sourceMaxPq) ? ExtParams() : cands[i].params; };
+		auto candTarget = [&](int i) { return static_cast<double>((sourcePeak && cands[i].targetPq >= dm.sourceMaxPq) ? dm.sourceMaxPq : cands[i].targetPq); };
 		if (lower >= 0 && upper >= 0)
 		{
-			const double lo = cands[lower].targetPq, hi = cands[upper].targetPq;
+			const double lo = candTarget(lower), hi = candTarget(upper);
 			s.weight = hi > lo ? (s.displayPq - lo) / (hi - lo) : 0.0;
-			s.params = Lerp(cands[lower].params, cands[upper].params, s.weight);
+			s.params = Lerp(candParams(lower), candParams(upper), s.weight);
 			s.targetMaxNits = DolbyVisionTrims::NitsFromPq((lo + (hi - lo) * s.weight) / 4095.0);
 			s.reason = lower == upper || hi <= lo ? "trim at the display peak" : "interpolated between two trims";
 		}
 		else if (upper >= 0)
 		{
-			s.params = cands[upper].params;
-			s.targetMaxNits = DolbyVisionTrims::NitsFromPq(static_cast<double>(cands[upper].targetPq) / 4095.0);
+			s.params = candParams(upper);
+			s.targetMaxNits = DolbyVisionTrims::NitsFromPq(candTarget(upper) / 4095.0);
 			s.reason = "display below every trim target: the lowest-target trim";
 		}
 		else
 		{
-			const double lo = cands[lower].targetPq;
+			const double lo = candTarget(lower);
 			if (sourcePeak && dm.sourceMaxPq > lo)
 			{
 				s.weight = (s.displayPq - lo) / (dm.sourceMaxPq - lo);
-				s.params = Lerp(cands[lower].params, ExtParams(), s.weight);
+				s.params = Lerp(candParams(lower), ExtParams(), s.weight);
 				// W23-REG-L2: interpolate targetMaxNits smoothly toward sourceMaxPq during fade-to-neutral.
 				s.targetMaxNits = DolbyVisionTrims::NitsFromPq((lo + (dm.sourceMaxPq - lo) * s.weight) / 4095.0);
 				s.reason = "above every trim target: fading to neutral at the mastering peak";
 			}
 			else
 			{
-				s.params = cands[lower].params;
+				s.params = candParams(lower);
 				s.targetMaxNits = DolbyVisionTrims::NitsFromPq(lo / 4095.0);
 				s.reason = "above every trim target: the highest-target trim";
 			}
@@ -357,6 +360,17 @@ namespace DvTrimSelection
 			s.level = Level::L2;
 			s.l8CoveredWorse = !l8.empty();
 			SelectAmong(dm, l2, s);
+			// W23-C2-S3-M2: fade L8-vs-L2 delta smoothly to 0 across (l8MaxPq, hiL2] when unresolved L8 leaves L8 unbracketed.
+			if (s.l8Unresolved > 0 && !l8.empty()) {
+				double l8MaxPq = -1.0, hiL2 = -1.0; for (const Candidate& c : l8) if (c.targetPq > l8MaxPq) l8MaxPq = c.targetPq;
+				for (const Candidate& c : l2) if (c.targetPq > l8MaxPq && (hiL2 < 0.0 || c.targetPq < hiL2)) hiL2 = c.targetPq; if (dm.sourceMaxPq > dm.sourceMinPq && dm.sourceMaxPq <= 4095 && dm.sourceMaxPq > l8MaxPq && (hiL2 < 0.0 || dm.sourceMaxPq < hiL2)) hiL2 = static_cast<double>(dm.sourceMaxPq);
+				if (l8MaxPq >= 0.0 && hiL2 > l8MaxPq && s.displayPq > l8MaxPq && s.displayPq < hiL2) {
+					Selection e8, e2; e8.displayPq = e2.displayPq = l8MaxPq; SelectAmong(dm, l8, e8); SelectAmong(dm, l2, e2);
+					const double f = (hiL2 - s.displayPq) / (hiL2 - l8MaxPq); auto mix = [&](double& d, double a, double b) { d += f * (a - b); };
+					mix(s.params.base.slope, e8.params.base.slope, e2.params.base.slope); mix(s.params.base.offset, e8.params.base.offset, e2.params.base.offset); mix(s.params.base.power, e8.params.base.power, e2.params.base.power); mix(s.params.base.chromaWeight, e8.params.base.chromaWeight, e2.params.base.chromaWeight); mix(s.params.base.saturationGain, e8.params.base.saturationGain, e2.params.base.saturationGain);
+					mix(s.params.midContrast, e8.params.midContrast, e2.params.midContrast); mix(s.params.clipTrim, e8.params.clipTrim, e2.params.clipTrim); for (int k = 0; k < kHues; ++k) { mix(s.params.saturation[k], e8.params.saturation[k], e2.params.saturation[k]); mix(s.params.hueDegrees[k], e8.params.hueDegrees[k], e2.params.hueDegrees[k]); }
+					s.apply = !Neutral(s.params); }
+			}
 			return s;
 		}
 		s.reason = s.l8Unresolved ? "no L2 trim; L8 targets unknown" : "no L2/L8 trim";

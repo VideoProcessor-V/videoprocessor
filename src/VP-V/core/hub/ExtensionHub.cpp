@@ -525,6 +525,16 @@ namespace Vpv
 			return e.traceEnabled;
 		}
 
+		bool CoreSegmentCaches::ShouldLogHookList(const void* host, const std::string& list)
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			Entry& e = FindOrAddLocked(host);
+			if (e.lastHookList == list)
+				return false;
+			e.lastHookList = list;
+			return true;
+		}
+
 		void CoreSegmentCaches::ResetForTesting()
 		{
 			std::lock_guard<std::mutex> lock(mutex_);

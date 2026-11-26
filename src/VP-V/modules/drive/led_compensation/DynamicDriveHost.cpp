@@ -432,18 +432,20 @@ namespace LedDrive
 	void DynamicDriveHost::ApplyAcceptedSnapshot(const void* rendererHost, const ConfigFile* candidateConfig,
 		bool hasExplicitPathway, bool explicitOriginalPathway,
 		const std::shared_ptr<const ConfigFile>& snapshotConfig, const std::string& sourceKind,
-		const HostContext& context, bool rebuilding, bool implInitialized)
+		const HostContext& context, bool rebuilding, bool implInitialized, bool candidateProjectorAllowedIn)
 	{
 		const bool nextOriginal = hasExplicitPathway ? explicitOriginalPathway :
 			(candidateConfig != nullptr && OriginalPathwayForConfig([candidateConfig](const char* section, const char* key, std::string& out)
 				{ return candidateConfig->TryGetString(section, key, out); }));
+		explicitOriginal = nextOriginal;
+		candidateProjectorAllowed = !nextOriginal && candidateProjectorAllowedIn;
 		Vpv::RunningPathway::Store(nextOriginal);
 		Vpv::RunningPathway::NotifyHostPathway(rendererHost, nextOriginal);
 		if (!snapshotConfig)
 			return;
-		// W23-REG-H3: never publish VP-V Dynamic Drive state onto an outgoing Original/uninitialized Impl or
-		// open the projector port prematurely; save the snapshot and let the newly built Impl's Attach() start it.
-		const bool deferUntilAttach = (rebuilding || !implInitialized) && (!context.projectorAllowed || !implInitialized);
+		// W23-REG-H3 / W23-C2-S2-H3: on Original, stop/clear immediately (never defer); on VP-V, never
+		// publish onto an outgoing Original/uninitialized Impl — defer until post-Initialize Attach().
+		const bool deferUntilAttach = !nextOriginal && (rebuilding || !implInitialized) && (!context.projectorAllowed || !implInitialized);
 		ApplySnapshot(snapshotConfig, sourceKind, context, deferUntilAttach);
 	}
 
@@ -453,9 +455,13 @@ namespace LedDrive
 		std::shared_ptr<LedDriveModule> attached;
 		DynamicDriveParams publishedParams;
 		std::string publishedRejection;
+		bool allowPublish = false;
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
-			if (!context.projectorAllowed)
+			const bool isOriginal = explicitOriginal || Vpv::RunningPathway::Original();
+			const bool allowAttach = context.projectorAllowed && candidateProjectorAllowed && !isOriginal;
+			allowPublish = allowAttach;
+			if (!allowAttach)
 			{
 				if (deferredSnapshot && configuration && !suspended)
 				{
@@ -463,12 +469,27 @@ namespace LedDrive
 					Update(*configuration, context);
 				}
 				stopped = DetachLocked(context);
+				if (isOriginal)
+				{
+					params = DynamicDriveParams();
+					if (!rejection.empty())
+					{
+						rejection.clear();
+						std::atomic_store(&statusRejection, std::shared_ptr<const std::string>());
+					}
+				}
+			}
+			else if (!context.implInitialized)
+			{
+				// W23-C2-S2-H3: Build() runs before Initialize() resolves pipelineSlots; preserve an
+				// already-running module across internal resets, but defer starting a new module until
+				// post-Initialize Attach() confirms VP-V and drive.projector_control.
+				if (configuration && !std::atomic_load(&module))
+					deferredSnapshot = true;
+				attached = std::atomic_load(&module);
 			}
 			else
 			{
-				// W23-NEON-H1 / W23-REG-H3: when live-switching Original -> VP-V (or re-enabling drive.projector_control),
-				// ApplySnapshot may have been deferred while the outgoing Original/uninitialized Impl awaited rebuild.
-				// Re-evaluate the saved configuration here on Attach() so Dynamic Drive starts cleanly on the new Impl.
 				if (!suspended && configuration && (deferredSnapshot || !std::atomic_load(&module)))
 				{
 					deferredSnapshot = false;
@@ -487,7 +508,7 @@ namespace LedDrive
 		}
 		if (!context.frame)
 			return;
-		if (context.projectorAllowed)
+		if (allowPublish)
 		{
 			context.frame->PublishModule(attached);
 			if (attached)
@@ -538,7 +559,8 @@ namespace LedDrive
 	{
 		// Original == Bill: inert on pipeline_original_pathway: on — no [led_drive.*] parsing,
 		// no validation rejections/fallbacks, no gamma boost/shadow lift, stop any active LED module.
-		if (OriginalPathwayForConfig([&config](const char* section, const char* key, std::string& out)
+		if (explicitOriginal || Vpv::RunningPathway::Original() ||
+			OriginalPathwayForConfig([&config](const char* section, const char* key, std::string& out)
 			{ return config.TryGetString(section, key, out); }))
 		{
 			if (!rejection.empty())
@@ -619,8 +641,8 @@ namespace LedDrive
 		// level): the RS-232 LED/CNTR drive is not started, and a running module is stopped.
 		// On cold startup (context.frame == nullptr, before Build creates Impl), also honour the
 		// latched process pathway so an Original process stays off even if the snapshot lacks [vpv].
-		const bool projectorAllowed = context.projectorAllowed && ConfigAllowsProjectorControl(config) &&
-			(context.frame != nullptr || !Vpv::RunningPathway::Original());
+		const bool projectorAllowed = context.projectorAllowed && candidateProjectorAllowed &&
+			ConfigAllowsProjectorControl(config) && !explicitOriginal && !Vpv::RunningPathway::Original();
 		const LedDriveConfig& led = boostConfig;
 		std::shared_ptr<LedDriveModule> current = std::atomic_load(&module);
 		if (next == signature && (current != nullptr) == (valid && projectorAllowed && led.enabled))

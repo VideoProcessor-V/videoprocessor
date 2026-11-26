@@ -152,30 +152,33 @@ namespace DolbyVisionTrims
 			s.reason = "display at or above the mastering peak (identity)";
 			return s;
 		}
+		// W23-C2-S3-M2: trims at/above mastering peak anchor to neutral at sourceMaxPq so displayPq -> sourceMaxPq- is C0.
+		auto trimParams = [&](int i) { return (sourcePeak && dm.trims[i].targetMaxPq >= dm.sourceMaxPq) ? Params() : Decode(dm.trims[i]); };
+		auto trimTarget = [&](int i) { return static_cast<double>((sourcePeak && dm.trims[i].targetMaxPq >= dm.sourceMaxPq) ? dm.sourceMaxPq : dm.trims[i].targetMaxPq); };
 		if (s.lowerIndex >= 0 && s.upperIndex >= 0)
 		{
-			const double lo = dm.trims[s.lowerIndex].targetMaxPq, hi = dm.trims[s.upperIndex].targetMaxPq;
+			const double lo = trimTarget(s.lowerIndex), hi = trimTarget(s.upperIndex);
 			s.weight = hi > lo ? (s.displayPq - lo) / (hi - lo) : 0.0;
-			s.params = Lerp(Decode(dm.trims[s.lowerIndex]), Decode(dm.trims[s.upperIndex]), s.weight);
+			s.params = Lerp(trimParams(s.lowerIndex), trimParams(s.upperIndex), s.weight);
 			s.reason = s.lowerIndex == s.upperIndex || hi <= lo ? "trim at the display peak" : "interpolated between two trims";
 		}
 		else if (s.upperIndex >= 0)
 		{
-			s.params = Decode(dm.trims[s.upperIndex]);
+			s.params = trimParams(s.upperIndex);
 			s.reason = "display below every trim target: the lowest-target trim";
 		}
 		else
 		{
-			const double lo = dm.trims[s.lowerIndex].targetMaxPq;
+			const double lo = trimTarget(s.lowerIndex);
 			if (sourcePeak && dm.sourceMaxPq > lo)
 			{
 				s.weight = (s.displayPq - lo) / (dm.sourceMaxPq - lo);
-				s.params = Lerp(Decode(dm.trims[s.lowerIndex]), Params(), s.weight);
+				s.params = Lerp(trimParams(s.lowerIndex), Params(), s.weight);
 				s.reason = "above every trim target: fading to neutral at the mastering peak";
 			}
 			else
 			{
-				s.params = Decode(dm.trims[s.lowerIndex]);
+				s.params = trimParams(s.lowerIndex);
 				s.reason = "above every trim target: the highest-target trim";
 			}
 		}

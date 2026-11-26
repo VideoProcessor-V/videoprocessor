@@ -1054,8 +1054,8 @@ namespace MotionAhead
 			// An exception escaping the worker would end the process: counted as a failure instead.
 			// Three failures IN A ROW stop the producer (audit 2026-10-16: three over a whole session did).
 			bool ok = false;
-			bool engineRan = true;   // W2-C5b: a request answered without engine work leaves the failure count alone
-			try { ok = isRequest ? ProcessRequest(request, engineRan) : testEngine ? ProcessJobForTest(job) : Process(job); }
+			bool engineRan = true;   // W2-C5b: a request or job skipped without engine work leaves the failure count alone
+			try { ok = isRequest ? ProcessRequest(request, engineRan) : testEngine ? ProcessJobForTest(job) : Process(job, engineRan); }
 			catch (...) { ok = false; }
 			if (isRequest && request.state && !request.state->fulfilled.load(std::memory_order_acquire))
 			{
@@ -1157,8 +1157,9 @@ namespace MotionAhead
 		return true;
 	}
 
-	bool Producer::Process(const Job& job)
+	bool Producer::Process(const Job& job, bool& engineRan)
 	{
+		engineRan = false;
 		const auto started = std::chrono::steady_clock::now();
 		const double queueWaitMs = job.submitTime.time_since_epoch().count() != 0 ?
 			(std::max)(0.0, std::chrono::duration<double, std::milli>(started - job.submitTime).count()) : 0.0;
@@ -1236,6 +1237,7 @@ namespace MotionAhead
 			bool ran = false;
 			int setIdx = Pipeline::StagingRing<kStagingSets>::kNoSlot;
 			ok = SubmitPairAsync(lumaTex[prev], lumaTex[texIndex], halfW, halfH, continuous, job.sequence, ran, setIdx);
+			engineRan = ran;
 			if (ran)
 			{
 				hintSequence = job.sequence;

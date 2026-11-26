@@ -102,7 +102,7 @@ namespace EntranceSegment
 		bool aNeeded = false;      // A goes through the stages alongside (hold / history)
 		bool aReady = true;
 		pl_frame aFrame{};
-		bool ready = true;         // CrossfadeFrom: false when its re-base failed (no fade)
+		bool ready = true, debandRan = false, debandRanA = false;   // CrossfadeFrom ready; W23-C2-S4-H1 stage > 0 flags
 	};
 
 	// B3: a processed picture as the ring's OWN copy.

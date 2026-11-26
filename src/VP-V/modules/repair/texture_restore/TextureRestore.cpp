@@ -726,11 +726,22 @@ if (p.x < sz.x && p.y < sz.y) {
 			n2Share = static_cast<float>(a2 / a12);
 		}
 
-		bool TryAcquireP11Bands(const Params& params, int w, int h, VpSkeleton::AcquireResult& pin,
+		bool TryAcquireP11Bands(const Params& params, int w, int h, bool upstreamModified, VpSkeleton::AcquireResult& pin,
 			VpLaneProducts::P11BandTextures& texOut, int& p11BlockOut, std::string& why)
 		{
 			texOut = VpLaneProducts::P11BandTextures();
 			p11BlockOut = 0;
+			if (upstreamModified)
+			{
+				why = "input plane modified by upstream entrance stage (pipelineStage > 0)";
+				return false;
+			}
+			int picBounds[4] = {};
+			if (PictureBounds(params.picture, w, h, picBounds))
+			{
+				why = "cropped active-picture border (P11 spans frame rect)";
+				return false;
+			}
 			if (params.memo == nullptr || params.sequence == 0u)
 			{
 				why = params.memo == nullptr ? "no skeleton memo bound" : "frame sequence 0 (unkeyed)";
@@ -965,7 +976,7 @@ if (p.x < sz.x && p.y < sz.y) {
 		return true;
 	}
 
-	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result)
+	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result, bool upstreamModified)
 	{
 		error.clear();
 		scratchShort = false;
@@ -1149,7 +1160,7 @@ if (p.x < sz.x && p.y < sz.y) {
 			VpLaneProducts::P11BandTextures p11Tex;
 			int p11Block = 0;
 			std::string p11Why;
-			const bool useP11 = TryAcquireP11Bands(params, w, h, memoP11, p11Tex, p11Block, p11Why);
+			const bool useP11 = TryAcquireP11Bands(params, w, h, upstreamModified, memoP11, p11Tex, p11Block, p11Why);
 			bool needGrainPass = true;
 			if (useP11)
 			{

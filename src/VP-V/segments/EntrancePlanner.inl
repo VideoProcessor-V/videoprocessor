@@ -289,6 +289,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		vpDebandParams.sequence = sourceSequence;
 		vpDebandParams.grainGuard = activeSettings.debandVpGrainGuard;
 		vpDebandParams.grainSplit = activeSettings.debandVpGrainSplit;
+		vpDebandParams.memo = Vpv::Skeleton::CurrentFrameMemo().memo.get();
 		char text[200];
 		if (temporal)
 			snprintf(text, sizeof(text), "VP deband: not applied while smooth motion or deinterlacing runs (deband_vp %s)", activeSettings.debandVp.c_str());

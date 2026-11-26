@@ -23,15 +23,9 @@ namespace RenderAhead
 		// The delay-budget step (r6 fix 4) with render_ahead on: `decided` false = rates not known, the last decision
 		// stands. Otherwise `credit` is the new budget credit; `changed` = the veto flips to `veto` (logged here); `why`
 		// is the fallback text while vetoed.
-		struct BudgetStep
-		{
-			bool decided = false;
-			size_t credit = 0;
-			bool changed = false;
-			bool veto = false;
-			char why[200] = {};
-		};
+		struct BudgetStep { bool decided = false; size_t credit = 0; bool changed = false; bool veto = false; char why[200] = {}; char floorWhy[240] = {}; };
 		BudgetStep StepDelayBudget(bool vetoNow, double captureRateHz, double displayHz, size_t queueFrames, bool queueCredit);
+		BudgetStep StepDelayBudget(const Presenter& presenter, bool vetoNow, double captureRateHz, double displayHz, size_t queueFrames, bool queueCredit);
 
 		// The VP-owned chain's depth settle (bug hunt 05 M6): true once the depth wanted has differed from the current
 		// one for kChainSettleSeconds (logged here; the caller then makes the chain again). `wantedSince` < 0 = no

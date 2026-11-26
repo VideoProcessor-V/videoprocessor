@@ -72,7 +72,7 @@ namespace HdrInferenceChoice
 				r.problem = std::string(kKey) + " '" + raw + "' (vp|original)";
 		std::string pathway;
 		if (config.TryGetString(kSection, "pipeline_original_pathway", pathway) ||
-			config.TryGetString("vprenderer", "pipeline_original_pathway", pathway))
+			config.TryGetString("vprenderer", "pipeline_original_pathway", pathway) || config.TryGetString("vpvr.display", "pipeline_original_pathway", pathway) || config.TryGetString("display", "pipeline_original_pathway", pathway))
 			r.originalPathway = ConfigFile::NormalizeName(pathway) == "on";
 		PipelineSlots::Registry registry;
 		if (r.originalPathway)

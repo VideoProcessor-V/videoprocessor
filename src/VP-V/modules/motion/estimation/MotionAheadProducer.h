@@ -465,7 +465,7 @@ namespace MotionAhead
 			std::chrono::steady_clock::time_point deadline{};
 		};
 		void Worker();
-		bool Process(const Job& job);
+		bool Process(const Job& job, bool& engineRan);
 		bool ProcessJobForTest(const Job& job);
 		// W2-C5b; false = an engine failure (counted like a job's). engineRan = the engine did work (only that resets the
 		// consecutive-failure count; a Late / FromSlot / nothing-to-run answer does not).

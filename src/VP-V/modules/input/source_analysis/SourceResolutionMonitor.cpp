@@ -352,6 +352,15 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::LookAheadFrameCoded(uint64_t sequence, int width, int height, const LumaSampler& luma, uint32_t codeMaximum,
 		int left, int top, int right, int bottom)
 	{
+		const uint64_t curEpoch = epoch.load(std::memory_order_acquire);
+		if (aheadSeenEpoch != curEpoch)
+		{
+			aheadSeenEpoch = curEpoch;
+			aheadLastSequence = 0;
+			aheadLastMean = -1.0;
+			aheadLastPattern.clear();
+			aheadCutJudge = {};
+		}
 		if (!luma || sequence <= aheadLastSequence || codeMaximum == 0) return;
 		const double axisRange = static_cast<double>(Vpv::AnalysisDomain::kAxisMax);   // axis-level thresholds (spread, noise) keep their meaning
 		aheadLastSequence = sequence;
@@ -684,7 +693,15 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		const char* const text = cause ? cause : "discontinuity";
 		{
+			std::lock_guard<std::mutex> aheadLock(aheadMutex);
+			ahead.eventSequence = 0;
+			ahead.ready = false;
+			aheadAwaitTarget = false;
+			aheadHaveJob = false;
+		}
+		{
 			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			frameJudge.Reset();
 			u7AheadHistory.clear();
 		}
 		if (chainEnabled.load(std::memory_order_acquire)) chainEst->NoteDiscontinuity(text);   // any thread: a leaf lock
@@ -2450,6 +2467,27 @@ if (tile < int(tiles) && g.y < ts) {
 		const bool resetFlagged = autoReset.exchange(false, std::memory_order_acq_rel);
 		if (resetFlagged || boundReset)
 		{
+			{
+				std::lock_guard<std::mutex> aheadLock(aheadMutex);
+				ahead.eventSequence = 0;
+				ahead.ready = false;
+				aheadAwaitTarget = false;
+				aheadHaveJob = false;
+			}
+			{
+				std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+				frameJudge.Reset();
+				u7AheadHistory.clear();
+			}
+			aheadSeenEpoch = epoch.load(std::memory_order_acquire);
+			aheadLastSequence = 0;
+			aheadLastMean = -1.0;
+			aheadLastPattern.clear();
+			aheadCutJudge = {};
+			autoNotBeforeCuts = 0;
+			cutsNotUsable = ~0ull;
+			clockSequence = 0;
+			panSequence = 0;
 			autoApplied = autoPending = 1.0;
 			disengagePending = false;
 			nextFadeSeconds = 0.0;   // a discontinuity: the old picture is not faded from

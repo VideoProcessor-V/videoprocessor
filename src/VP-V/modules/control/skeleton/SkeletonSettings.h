@@ -152,7 +152,9 @@ namespace Vpv
 			}
 			std::string pathway;
 			if (config.TryGetString("vpv", "pipeline_original_pathway", pathway) ||
-				config.TryGetString("vprenderer", "pipeline_original_pathway", pathway))
+				config.TryGetString("vprenderer", "pipeline_original_pathway", pathway) ||
+				config.TryGetString("vpvr.display", "pipeline_original_pathway", pathway) ||
+				config.TryGetString("display", "pipeline_original_pathway", pathway))
 				s.originalPathway = ConfigFile::NormalizeName(pathway) == "on";
 			return s;
 		}

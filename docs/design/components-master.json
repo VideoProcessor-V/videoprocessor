@@ -1906,6 +1906,7 @@
         "src/VP-V/modules/control/config/VpvProfileQueueAdvice.h",
         "src/VP-V/modules/control/config/VpvProfileQueueAdvice.cpp",
         "src/VideoProcessor-Lib/RendererProfileConfig.h",
+        "src/VP-V/modules/control/config/config_pages/ConfigEditorAccess.inl",
         "src/VP-V/modules/control/config/config_pages/VpvBothPathwayCards.h",
         "src/VP-V/modules/control/config/config_pages/VpvConfigFormApi.h",
         "src/VP-V/modules/control/config/config_pages/VpvConfigPages.h",
@@ -1932,7 +1933,8 @@
         "src/VP-V/modules/control/config/editor/ApplyEffects.h",
         "src/VP-V/modules/control/config/editor/Helpers.h",
         "src/VP-V/modules/control/config/editor/Migrations.h",
-        "src/VP-V/modules/control/config/editor/Migrations.cpp"
+        "src/VP-V/modules/control/config/editor/Migrations.cpp",
+        "src/VP-V/modules/control/config/editor/SharpResidualMigration.h"
       ],
       "components": {
         "files": {

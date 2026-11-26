@@ -48,13 +48,11 @@ const QueueTimingPolicy::IQueueTimingPolicy& LibplaceboVideoRenderer::QueuePolic
 
 void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double signalRateHz)
 {
-	if (m_impl && m_impl->pipelineSlots.OriginalPathway()) return;
+	const bool original = m_impl && m_impl->pipelineSlots.OriginalPathway();
 	const int budgetMs = m_queueDelayBudgetMs.load(std::memory_order_acquire);
 	const bool lowLatency = m_impl && m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
-	// The decision is the policy's (VP fixed total delay, or upstream's frame-count queue); the host
-	// keeps the status, the log and the wake-up.
 	QueueTimingPolicy::HoldContext context;
-	context.budgetMs = m_impl ? budgetMs : 0;
+	context.budgetMs = (m_impl && !original) ? budgetMs : 0;
 	context.sourceRateHz = sourceRateHz;
 	context.signalRateHz = signalRateHz;
 	context.lowLatency = lowLatency;
@@ -84,6 +82,7 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
 	}
 	if (m_impl)
 	{
+		m_impl->renderAheadPresenter.activeQueueTarget.store(next.active ? AlphaQueuePolicy::ClampDesiredDepthToCapacity(next.targetFrames, context.queueCapacity) : LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(m_frameQueueDesiredDepth, context.queueCapacity)), std::memory_order_release);
 		if (budgetNote.empty())
 			m_impl->ReleaseFallback("delay budget");
 		else
@@ -94,7 +93,7 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
 			(std::max)(lookaheadFloor, AlphaQueuePolicy::DEFAULT_DESIRED_DEPTH)));
 		const int analysisQueue = next.active ? (std::max)(plan.queueFrames, static_cast<int>(plan.targetFrames)) : static_cast<int>(fallbackDepth);
 		const int analysisLookahead = (std::max)(analysisQueue, static_cast<int>(lookaheadFloor));
-		m_impl->frameAnalysis.SetRingDepth(analysisQueue, analysisLookahead);
+		if (!original) m_impl->frameAnalysis.SetRingDepth(analysisQueue, analysisLookahead);
 		// The frame fallback ladder (owner 2026-10-20/24): below the design depth every look-ahead
 		// consumer uses what is queued (shorter look-ahead, never waiting, never adding delay);
 		// visible, not silent.

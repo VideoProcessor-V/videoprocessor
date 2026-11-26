@@ -603,12 +603,21 @@ namespace Vpv
 			victim->pinned = false;
 			victim->seq = seq;
 			victim->bands = 0;
+			victim->tapLuma = nullptr;
+			victim->tapShift = 0;
 			victim->extendedDone = false;
 			return victim;
 		}
 
 		bool SkeletonGpuDispatcher::EnsureTap(Tap& t, const VpSkeleton::SourceFrameView& view, const RegionEvidence::Rect& picture, pl_timer timer)
 		{
+			if (t.tapLuma != view.luma || t.tapShift != view.msbShift)
+			{
+				t.bands = 0;
+				t.extendedDone = false;
+				t.tapLuma = view.luma;
+				t.tapShift = view.msbShift;
+			}
 			const Dims d = m_dims;
 			const uint32_t rpb = VpLaneProducts::TapRowsPerBand(d);
 			const uint32_t bands = VpLaneProducts::TapBands(d);
@@ -621,13 +630,15 @@ namespace Vpv
 				++t.bands;
 				++m_counters.tapBands;
 			}
-			if (!t.extendedDone)
+			const bool pictureChanged = t.picture.left != picture.left || t.picture.top != picture.top ||
+				t.picture.right != picture.right || t.picture.bottom != picture.bottom;
+			if (!t.extendedDone || pictureChanged)
 			{
 				t.picture = picture;
 				// W23-SK-M3: time the extend pass with the owning product's timer, and record ComputeOnce (W23-SK-H2).
 				if (!VpLaneProducts::ExtendTap(m_dispatch, t.tap, t.extended, picture, timer))
 					return Fail("the extend pass failed");
-				::ComputeOnce::Note("lane_tap_extend", int64_t(t.seq), 0, nullptr, "SkeletonGpuDispatcher::EnsureTap");
+				VPV_COMPUTE_ONCE_AT("lane_tap_extend", t.seq, 0);
 				t.extendedDone = true;
 				++m_counters.extends;
 			}
@@ -753,6 +764,8 @@ namespace Vpv
 					// A new job for this seq (a graph swap hands an unfinished job to the next runner, possibly for the same
 					// frame): the tap's upload progress restarts with it, and stays pinned until P10 finishes.
 					t->bands = 0;
+					t->tapLuma = job.source->luma;
+					t->tapShift = job.source->msbShift;
 					t->extendedDone = false;
 					t->pinned = true;
 				}
@@ -840,6 +853,7 @@ namespace Vpv
 			const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);
 			c.picture = VpLaneProducts::PictureFromStats(p4 && !p4->missing ? p4->cpu : nullptr, p4 ? p4->cpuBytes : 0u,
 				int(m_dims.width), int(m_dims.height));
+			Tap* usedTap = nullptr;
 			if (k->NeedsTap())
 			{
 				VpSkeleton::SourceFrameView view;
@@ -850,7 +864,12 @@ namespace Vpv
 				if (!t)
 					return Fail("the tap plane could not be made: " + m_tapError);
 				if (!EnsureTap(*t, view, c.picture, ps.timer))
+				{
+					if (node.id == VpSkeleton::kP10GrainSplit)
+						t->pinned = false;
 					return Fail(m_error.empty() ? "the tap plane could not be made" : m_error);
+				}
+				usedTap = t;
 				c.tap = t->tap;
 				c.extended = t->extended;
 				c.picture = t->picture;
@@ -858,7 +877,13 @@ namespace Vpv
 			const uint32_t steps = k->Steps(m_dims);
 			for (uint32_t i = 0; i < steps; ++i)
 				if (!k->Step(c, i))
+				{
+					if (usedTap && node.id == VpSkeleton::kP10GrainSplit)
+						usedTap->pinned = false;
 					return Fail(c.error.empty() ? k->LastError() : c.error);
+				}
+			if (usedTap && node.id == VpSkeleton::kP10GrainSplit)
+				usedTap->pinned = false;
 			++m_counters.liveFills;
 			ps.cost.NoteFrameDone();
 			return true;

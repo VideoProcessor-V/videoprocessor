@@ -658,13 +658,18 @@ namespace EntranceSegment
 		const DetailPulse::Params savedPulse = detailPulseParams;
 		const TextureRestore::Params savedRestore = textureRestoreParams;
 		const Host::Field bField = host.FieldOf(bSequence);
+		const Vpv::Hub::CurrentFrame cf = Vpv::Hub::ThisThreadFrame();
+		VpSkeleton::SkeletonMemo* bMemo = cf.Valid() ? Vpv::Skeleton::MemoForHost(cf.host, bSequence).memo.get() : nullptr;
 		vpDebandParams.field = bField.field;
 		vpDebandParams.grainError = bField.grainError;
 		vpDebandParams.sequence = bSequence;
+		vpDebandParams.memo = bMemo;
 		detailPulseParams.field = bField.field;
 		detailPulseParams.sequence = bSequence;
+		detailPulseParams.memo = bMemo;
 		textureRestoreParams.field = bField.field;
 		textureRestoreParams.sequence = bSequence;
+		textureRestoreParams.memo = bMemo;
 		StageRun run;
 		run.path = Path::Main;
 		run.factorX = rebaseFactorX();
@@ -765,7 +770,10 @@ namespace EntranceSegment
 	void Segment::Deband(StageRun& run, pl_frame& frame)
 	{
 		if (!(debandThreshold() > 0.0))
+		{
+			host.ReleaseFallback("product.debander");
 			return;
+		}
 		VpDebander::Module& debander = *b.debander;
 		const VpDebander::Params& vpDebandParams = *b.vpDebandParams;
 		const pl_dispatch dispatch = host.Dispatch();
@@ -779,6 +787,19 @@ namespace EntranceSegment
 				debandFailLogged = debander.LastError();
 			}
 		};
+		auto syncDebandProductFallback = [&]()
+		{
+			const std::string& gWhy = debander.LastGrainGuardFallback();
+			const std::string& bWhy = debander.LastBandMemoFallback();
+			const std::string& pWhy = !gWhy.empty() ? gWhy : bWhy;
+			if (!pWhy.empty())
+			{
+				const FallbackCatalog::Decision pd = FallbackCatalog::ProductFallback("product.debander", pWhy);
+				host.EngageFallback(pd.id, pd.reason);
+			}
+			else
+				host.ReleaseFallback("product.debander");
+		};
 		if (run.path == Path::Main)
 		{
 			// (6) The hold (slot 0) advances once per source frame on A itself, even when every
@@ -789,7 +810,10 @@ namespace EntranceSegment
 			{
 				pl_frame heldA{};
 				if (debander.Apply(gpu, dispatch, run.aFrame, vpDebandParams, heldA, 0))
+				{
 					run.aFrame = heldA;
+					run.debandRanA = true;
+				}
 				else
 					logDebandFailure();
 			}
@@ -799,9 +823,16 @@ namespace EntranceSegment
 			pl_frame debanded{};
 			if (debander.Apply(gpu, dispatch, frame, run.phasePicture ? phaseParams : vpDebandParams, debanded,
 				run.phasePicture ? 1 : 0))
+			{
 				frame = debanded;
+				run.debandRan = true;
+				syncDebandProductFallback();
+			}
 			else
+			{
 				logDebandFailure();
+				host.ReleaseFallback("product.debander");
+			}
 			return;
 		}
 		VpDebander::Params p = vpDebandParams;
@@ -812,7 +843,10 @@ namespace EntranceSegment
 		{
 			// The same debander per frame on an extra.
 			if (debander.Apply(gpu, dispatch, frame, p, debanded, 1))
+			{
 				frame = debanded;
+				run.debandRan = true;
+			}
 			else
 				logDebandFailure();
 			return;
@@ -822,7 +856,10 @@ namespace EntranceSegment
 		const double ratio = rebaseFactor() > 0.0 ? run.factorY / rebaseFactor() : 1.0;
 		p.radiusScale = vpDebandParams.radiusScale * ratio;
 		if (debander.Apply(gpu, dispatch, frame, p, debanded, VpDebander::Module::kSlotCrossfade))
+		{
 			frame = debanded;
+			run.debandRan = true;
+		}
 		else
 			logDebandFailure();
 	}
@@ -904,12 +941,16 @@ namespace EntranceSegment
 			// An extra shows its source frame's decision (a repeat of the sequence the history
 			// advanced on with A), so the detail level does not change from refresh to refresh.
 			// Never advances: skipped when A's own frame was not processed (another sequence).
+			bool pulseRanExtra = false;
 			if (detailPulseRuns() && detailPulseParams.sequence == run.sequence &&
 				detailPulse.HistorySequence() == run.sequence && run.sequence != 0)
 			{
 				pl_frame pulsed{};
-				if (detailPulse.Apply(gpu, dispatch, frame, detailPulseParams, pulsed))
+				if (detailPulse.Apply(gpu, dispatch, frame, detailPulseParams, pulsed, run.debandRan))
+				{
 					frame = pulsed;
+					pulseRanExtra = true;
+				}
 				else
 					syncPulseFail();   // W23-IR-L2: never swallow Extra failure
 			}
@@ -917,7 +958,7 @@ namespace EntranceSegment
 				textureRestore.HistorySequence() == run.sequence && run.sequence != 0)
 			{
 				pl_frame restored{};
-				if (textureRestore.Apply(gpu, dispatch, frame, textureRestoreParams, restored))
+				if (textureRestore.Apply(gpu, dispatch, frame, textureRestoreParams, restored, run.debandRan || pulseRanExtra))
 					frame = restored;
 				else
 					syncRestoreFail();   // W23-IR-L2: never swallow Extra failure
@@ -932,25 +973,31 @@ namespace EntranceSegment
 			 (textureRestoreRuns() && textureRestore.HistorySequence() != run.sequence)))
 		{
 			pl_frame aFrame = run.aFrame;
+			bool pulseRanA = false;
 			if (detailPulseRuns())
 			{
 				pl_frame pulsedA{};
-				if (detailPulse.Apply(gpu, dispatch, aFrame, detailPulseParams, pulsedA))
+				if (detailPulse.Apply(gpu, dispatch, aFrame, detailPulseParams, pulsedA, run.debandRanA))
+				{
 					aFrame = pulsedA;
+					pulseRanA = true;
+				}
 			}
 			if (textureRestoreRuns())
 			{
 				pl_frame restoredA{};
-				(void)textureRestore.Apply(gpu, dispatch, aFrame, textureRestoreParams, restoredA);
+				(void)textureRestore.Apply(gpu, dispatch, aFrame, textureRestoreParams, restoredA, run.debandRanA || pulseRanA);
 			}
 		}
+		bool pulseRanMain = false;
 		if (detailPulseRuns())
 		{
 			DetailLookAhead(run);
 			pl_frame pulsed{};
-			if (detailPulse.Apply(gpu, dispatch, frame, detailPulseParams, pulsed))
+			if (detailPulse.Apply(gpu, dispatch, frame, detailPulseParams, pulsed, run.debandRan))
 			{
 				frame = pulsed;
+				pulseRanMain = true;
 				b.detailPulseInactive->clear();
 				host.ReleaseFallback("detail pulse");
 				{
@@ -981,7 +1028,7 @@ namespace EntranceSegment
 		if (textureRestoreRuns())
 		{
 			pl_frame restored{};
-			if (textureRestore.Apply(gpu, dispatch, frame, textureRestoreParams, restored))
+			if (textureRestore.Apply(gpu, dispatch, frame, textureRestoreParams, restored, run.debandRan || pulseRanMain))
 			{
 				frame = restored;
 				b.textureRestoreInactive->clear();
@@ -1033,8 +1080,14 @@ namespace EntranceSegment
 			nextFrame.planes[0].texture = next.luma;
 			nextFrame.planes[1].texture = next.chroma;
 			VpDebander::Module* lookAheadDebander = debandThreshold() > 0.0 && slots().Runs(Id::RepairDeband) ? b.debander : nullptr;
-			if (!b.detailPulse->MeasureAhead(host.Gpu(), dispatch, nextFrame, next.sequence, *b.detailPulseParams,
-				lookAheadDebander, b.vpDebandParams) &&
+			const Vpv::Hub::CurrentFrame cf = Vpv::Hub::ThisThreadFrame();
+			VpSkeleton::SkeletonMemo* nextMemo = cf.Valid() ? Vpv::Skeleton::MemoForHost(cf.host, next.sequence).memo.get() : nullptr;
+			DetailPulse::Params aheadPulse = *b.detailPulseParams;
+			aheadPulse.memo = nextMemo;
+			VpDebander::Params aheadDeband = b.vpDebandParams ? *b.vpDebandParams : VpDebander::Params();
+			aheadDeband.memo = nextMemo;
+			if (!b.detailPulse->MeasureAhead(host.Gpu(), dispatch, nextFrame, next.sequence, aheadPulse,
+				lookAheadDebander, b.vpDebandParams ? &aheadDeband : nullptr) &&
 				lookAheadDebander && lookAheadDebander->Failures() > 0 && lookAheadDebander->LastFailureError() != debandFailLogged)
 			{
 				DebugLog::Log("VP deband failed (%s; %llu failures so far); the frame is rendered without it",

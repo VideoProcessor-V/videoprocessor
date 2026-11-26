@@ -1369,6 +1369,7 @@ namespace Vpv
 			ii.perVsyncAvailable = true;
 			ii.classFixes = settings.cadenceClassFixes;
 			ii.generalRates = settings.generalRateFixes;
+			ii.sourceClass = settings.sourceClass;
 			policy.interpolationDecision = InterpolationPolicy::Decide(ii);
 			return policy.interpolationDecision.Interpolates();
 		}
@@ -1382,6 +1383,11 @@ namespace Vpv
 			extras.dejudderCache.Release();
 			extras.dejudderRenderedWarp.reset();
 			extras.dejudderVectorField.reset();
+			extras.dejudderNextVectorField.reset();
+			extras.dejudderNextVectors = nullptr;
+			extras.dejudderNextVectorsSequence = 0;
+			extras.dejudderNextVectorsFrom = 0;
+			extras.ditherNextGate.Clear();
 			if (frameInterpolator)
 			{
 				frameInterpolator->Release();

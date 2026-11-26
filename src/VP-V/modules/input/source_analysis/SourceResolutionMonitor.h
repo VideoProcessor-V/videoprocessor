@@ -854,6 +854,7 @@ namespace SourceResolutionMonitor
 		int aheadTileSize = kTile;
 		int aheadCodeMaximum = static_cast<int>(Vpv::AnalysisDomain::kAxisMax);   // W21-2: the queued tiles' declared code range (their spectra's step law)
 		AheadState ahead;
+		uint64_t aheadSeenEpoch = 0;
 		uint64_t aheadLastSequence = 0;
 		double aheadLastMean = -1.0;
 		std::vector<double> aheadLastPattern;   // latch fixes: the last ahead frame with a shape

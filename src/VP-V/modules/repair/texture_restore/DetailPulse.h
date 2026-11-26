@@ -199,7 +199,7 @@ namespace DetailPulse
 		~Module();   // frees the CPU state only: call Release(gpu) first for the textures
 
 		// Restores luma of `source` into this module's texture; repeated seq reapplies stored decision on picture's own bands.
-		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
+		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out, bool upstreamModified = false);
 		// Applies held decision (HistorySequence()) on a picture of another geometry without advancing history.
 		bool ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
 		// Optional look-ahead: measure the next source frame's band energies (its luma plane,

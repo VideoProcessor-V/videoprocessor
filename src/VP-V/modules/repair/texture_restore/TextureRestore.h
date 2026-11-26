@@ -142,7 +142,7 @@ namespace TextureRestore
 
 		// Restores luma plane of `source` into this module's texture (other planes pass through); false on failure.
 		// cap 1.0 returns `source`; repeated sequence reuses gains with its own low bands (F7); non-consecutive restarts.
-		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
+		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out, bool upstreamModified = false);
 		// Applies current frame's gains (HistorySequence()) on a picture of another geometry without advancing references.
 		bool ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
 		// A discontinuity (MotionValidity invalidation, re-base change): references restart.

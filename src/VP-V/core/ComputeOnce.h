@@ -286,7 +286,7 @@ namespace ComputeOnce
 	// Kept out of line: inlined, its std::string temporaries give every caller a frame, a security cookie and spills even when off.
 	__declspec(noinline) inline void Note(const char* unit, int64_t seq, uint64_t variant, const char* privateSite, const void* returnAddress)
 	{
-		Caller c;
+		if (!Enabled()) return; Caller c;
 		c.address = returnAddress;
 		const ThreadFrame& t = Current();
 		c.context = t.context;

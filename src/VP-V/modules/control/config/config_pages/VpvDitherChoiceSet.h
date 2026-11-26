@@ -68,13 +68,12 @@ namespace Vpv
 		std::vector<std::function<void()>> refreshers_;
 	};
 
-	// The renderer's precedence for the pathway key: [vpv] first, then [vprenderer]. on = the
-	// Original pathway. `lookup(section, key)` reads a configured value.
+	// The renderer's precedence for the pathway key: [vpv] -> [vprenderer] -> [vpvr.display] -> [display].
 	template <class Lookup>
 	bool ConfigOriginalPathwayOn(Lookup&& lookup)
 	{
-		QString v = lookup(QStringLiteral("vpv"), QStringLiteral("pipeline_original_pathway")).trimmed();
-		if (v.isEmpty()) v = lookup(QStringLiteral("vprenderer"), QStringLiteral("pipeline_original_pathway")).trimmed();
+		QString v;
+		for (const char* s : { "vpv", "vprenderer", "vpvr.display", "display" }) { v = lookup(QString::fromLatin1(s), QStringLiteral("pipeline_original_pathway")).trimmed(); if (!v.isEmpty()) break; }
 		return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 	}
 

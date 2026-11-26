@@ -23647,8 +23647,8 @@ void LibplaceboVideoRenderer::Build()
 	m_impl->diagRendererGeneration = m_callbackGeneration;   // report-a-problem rows
 	DiagnosticHistory::Global().RecordDecision("renderer-build", "renderer constructed",
 		static_cast<int64_t>(m_callbackGeneration));
-	// The queue path as last applied (the snapshot may have been applied before this Build).
 	m_impl->lowLatencyQueueActive.store(lowLatencyQueue, std::memory_order_release);
+	m_implInitialized.store(false, std::memory_order_release);
 	m_dynamicDrive.Attach(DynamicDriveContext());
 	m_impl->displayRefreshRate.SetFallbackSink(
 		[this](const FallbackCatalog::Decision& decision) { if (m_impl) m_impl->SyncFallback(decision); });
@@ -23663,7 +23663,6 @@ void LibplaceboVideoRenderer::Build()
 	m_buildVideoState = state;
 	m_buildManualRule = manualRule;
 	m_buildManualUnifiedProfiles = manualUnifiedProfiles;
-	m_implInitialized.store(false, std::memory_order_release);
 	const double nominalRate = state->displayMode->RefreshRateHz();
 	const timingclocktime_t ticksPerSecond = m_timingClock ?
 		m_timingClock->TimingClockTicksPerSecond() : 0;
@@ -23981,10 +23980,7 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	std::unique_lock<std::mutex> guard(m_stateMutex);
 	const std::map<std::string, std::string> next =
 		RendererProfileConfig::FormatSelections(snapshot.effectiveSelections);
-	// cinema_only custom hooks stay out of the game queue. Kept on the renderer too, so the
-	// next Build (a new Impl) starts in the same path.
-	// Published only where the profile is applied (audit 2026-10-16: a failed load or a retained
-	// profile switched the low-latency path while the renderer settings stayed).
+	// Low-latency path (published only when accepted).
 	auto publishLowLatencyPath = [this, &snapshot]()
 	{
 		m_lowLatencyQueue = snapshot.queue.lowLatencyPath;   // the queue profile's low_latency_path (or its name)
@@ -24013,7 +24009,7 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	auto applyAcceptedSnapshot = [&](bool rebuilding, bool implReady) {
 		std::string sourceKind;
 		if (snapshot.configuration && !snapshot.LookupVariable("source", sourceKind)) sourceKind.clear();
-		m_dynamicDrive.ApplyAcceptedSnapshot(this, candidateConfiguration.get(), state != nullptr, candidateSettings.pipelineOriginalPathway, snapshot.configuration, sourceKind, DynamicDriveContext(), rebuilding, implReady);
+		m_dynamicDrive.ApplyAcceptedSnapshot(this, candidateConfiguration.get(), state != nullptr, candidateSettings.pipelineOriginalPathway, snapshot.configuration, sourceKind, DynamicDriveContext(), rebuilding, implReady, state == nullptr || OutputSegments::BuildPipelineSlotsPlan(candidateSettings).next.Runs(PipelineSlots::Id::DriveProjectorControl));
 	};
 	if (m_impl && !m_implInitialized.load(std::memory_order_acquire))
 	{
@@ -27334,6 +27330,7 @@ void LibplaceboVideoRenderer::RenderLoop()
     bool presentationPauseLogged=false;
 	try
 	{
+		bool justInitialized = false;
 		{
 			std::lock_guard<std::mutex> renderGuard(m_impl->renderMutex);
 			if (!m_implInitialized.load(std::memory_order_acquire))
@@ -27349,7 +27346,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					m_impl->configuredScreenTarget, std::memory_order_release);
 				m_impl->renderConfiguredScreenActive =
 					m_impl->configuredScreenTarget;
-				m_implInitialized.store(true, std::memory_order_release);
+				m_implInitialized.store(true, std::memory_order_release); justInitialized = true;
                 RefreshOsdCacheLocked();
 			}
 			// A graph stop/run may follow an HDMI re-sync while retaining this
@@ -27357,7 +27354,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			// thread initialization boundary.
 			m_impl->LogResolvedRenderOptions(
 				"renderer start/restart (including HDMI re-sync)");
-		}
+		} if (justInitialized) m_dynamicDrive.Attach(DynamicDriveContext());
 		{
 			std::lock_guard<std::mutex> queueGuard(m_queueMutex);
 			if (m_stopRequested)
@@ -28288,15 +28285,6 @@ void LibplaceboVideoRenderer::RenderLoop()
 					m_impl->activeSettings.generalRateFixes)) : 0, std::memory_order_relaxed);
 			UpdateQueueDelayHold(captureRateHz, measuredCaptureRateHz > 0.0 ? measuredCaptureRateHz :
 				(state && state->displayMode ? state->displayMode->RefreshRateHz() : 0.0));   // VP-V delay budget (ADR-0020)
-			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
-				m_impl->activeSettings.intentContentHoldSeconds);
-			m_impl->ConfigureIntentInterpreter();
-			m_impl->pulldownFilmHz = frameFilmHz;
-			m_impl->fileFrameSource = currentFileFrame;
-			m_impl->dejudderExtras.vpPlanInterlaced = state && state->displayMode && state->displayMode->IsInterlaced(); m_impl->dejudderExtras.vpPlanNativeRgb = state && ((!state->dolbyVisionTunnel && ((convertedPayload && Vpv::Capture::IsRaw(*convertedPayload) && GpuRgbUnpack::Supports(Vpv::Capture::RawEncodingOf(*convertedPayload))) || (m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE && AlphaCanUseNativeRgbUpload(state->videoFrameEncoding)))) || (state->dolbyVisionTunnel && convertedPayload && (DolbyVisionTunnelSdrPassthrough(state->videoFrameEncoding, convertedPayload->dolby) || (!m_impl->pipelineSlots.OriginalPathway() && m_impl->activeSettings.dvTunnelFixes && DolbyVisionTunnelR10SdrPassthrough(state->videoFrameEncoding, convertedPayload->dolby)))));
-			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
-			m_impl->pulldownAcquiring = m_pulldownAcquiring.load(std::memory_order_relaxed);
-			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
 		}
 		const SteadyClock::time_point renderCycleStart = SteadyClock::now();
         if (invalidDvAnalysisGap && m_impl)
@@ -28374,6 +28362,15 @@ void LibplaceboVideoRenderer::RenderLoop()
             m_impl->ApplyPendingDisplayLutReloadLocked();
             RefreshOsdCacheLocked();
 			ApplyPendingShaderSelectionLocked();
+			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
+				m_impl->activeSettings.intentContentHoldSeconds);
+			m_impl->ConfigureIntentInterpreter();
+			m_impl->pulldownFilmHz = frameFilmHz;
+			m_impl->fileFrameSource = currentFileFrame;
+			m_impl->dejudderExtras.vpPlanInterlaced = state && state->displayMode && state->displayMode->IsInterlaced(); m_impl->dejudderExtras.vpPlanNativeRgb = state && ((!state->dolbyVisionTunnel && ((m_impl->activeSettings.nativeRgbIngest && convertedPayload && Vpv::Capture::IsRaw(*convertedPayload) && GpuRgbUnpack::Supports(Vpv::Capture::RawEncodingOf(*convertedPayload))) || (m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE && AlphaCanUseNativeRgbUpload(state->videoFrameEncoding)))) || (state->dolbyVisionTunnel && convertedPayload && (DolbyVisionTunnelSdrPassthrough(state->videoFrameEncoding, convertedPayload->dolby) || (!m_impl->pipelineSlots.OriginalPathway() && m_impl->activeSettings.dvTunnelFixes && DolbyVisionTunnelR10SdrPassthrough(state->videoFrameEncoding, convertedPayload->dolby)))));
+			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
+			m_impl->pulldownAcquiring = m_pulldownAcquiring.load(std::memory_order_relaxed);
+			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
             // Query the same immutable queued analysis interpretation used by
             // subtitle priming. This is metadata preparation, never a pixel scan.
             const auto currentQueuedAnalysis=state && state->displayMode

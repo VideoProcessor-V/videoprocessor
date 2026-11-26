@@ -260,7 +260,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 			Vpv::Dejudder::ReleaseIdleConsumers(this, d3d11 ? d3d11->gpu : nullptr, dejudderExtras, frameInterpolator,
 				dejudderNextTextures, dejudderRgbScratch, dejudderAheadTextures, dejudderAhead);
 			SyncFallback(FallbackCatalog::Released("product.interpolator"));
-			dejudderNextUpload.Clear(); dejudderAheadUpload.Clear(); dejudderAheadPayload.reset(); dejudderAheadPayloadSequence = 0;
+			dejudderNextUploadedSequence = 0; dejudderNextUpload.Clear(); dejudderAheadUpload.Clear(); dejudderAheadPayload.reset(); dejudderAheadPayloadSequence = 0;
 		}
 		if (outcome != VpMotion::DecisionOutcome::PairCheck)
 			return;

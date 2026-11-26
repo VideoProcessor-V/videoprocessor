@@ -4817,7 +4817,7 @@ void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 		if (m_rendererResetAutoCheck.GetSafeHwnd())
 			m_rendererResetAutoCheck.SetCheck(m_queueAutoResetConfigured ? BST_CHECKED : BST_UNCHECKED);
 	}
-	// Restore switch 2026-10-17: [general] magewell_recover_faults (logged on change).
+	if (m_stagedConfiguration) { const auto hc = HdrInferenceChoice::FromConfig(*m_stagedConfiguration); SelectOriginalNewLldvHeuristic(hc.effective == HdrInferenceChoice::Mode::Original, hc); }
 	MagewellBackend::SetRecoverFaults(m_dvTunnelOriginalPathway ? false : m_stagedRuntimeSettings.magewellRecoverFaults);
 	// Restore switch (post-merge audit 2026-10-17): [general] capture_display_fixes.
 	if (CaptureDisplayFixes::Set(m_stagedRuntimeSettings.captureDisplayFixes))
@@ -5488,7 +5488,7 @@ void CVideoProcessorDlg::SelectOriginalNewLldvHeuristic(bool original, const Hdr
 	options.originalHeuristic = original;
 	m_hdrInference.SetOptions(options);
 	m_hdrInferenceProblem = fromConfig.problem;
-	m_dvTunnelOriginalPathway = fromConfig.originalPathway;
+	m_dvTunnelOriginalPathway = fromConfig.originalPathway; if (m_dvTunnelOriginalPathway) MagewellBackend::SetRecoverFaults(false);
 	if (m_dvTunnelOriginalPathway)
 		DebugLog::Log("dv_tunnel_handoff: not used (the Original pathway keeps Bill's tunnel gate)");
 	DebugLog::Log("hdr_inference: %s", HdrInferenceChoice::StartupLine(original, fromConfig).c_str());

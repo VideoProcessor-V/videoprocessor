@@ -211,14 +211,19 @@ namespace Vpv
 				h.renderAheadBudgetVeto = false;
 				h.renderAheadBudgetCredit = 0;
 				if (h.releaseFallback)
+				{
 					h.releaseFallback("render-ahead");
+					h.releaseFallback("queue analysis floor");
+				}
 				return;
 			}
 			double displayHz = h.renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
 			if (!(displayHz > 0.0))
 				displayHz = h.presentationTelemetry.Snapshot().measuredDisplayHz;
-			const RenderAhead::HostSteps::BudgetStep step = RenderAhead::HostSteps::StepDelayBudget(h.renderAheadBudgetVeto, captureRateHz, displayHz,
-				h.earlyUploadQueueTarget.load(std::memory_order_acquire), h.renderAheadQueueCredit);
+			const size_t activeTarget = h.renderAheadPresenter.activeQueueTarget.load(std::memory_order_acquire);
+			const size_t queueFrames = activeTarget > 0 ? activeTarget : h.earlyUploadQueueTarget.load(std::memory_order_acquire);
+			const RenderAhead::HostSteps::BudgetStep step = RenderAhead::HostSteps::StepDelayBudget(
+				h.renderAheadPresenter, h.renderAheadBudgetVeto, captureRateHz, displayHz, queueFrames, h.renderAheadQueueCredit);
 			if (!step.decided)
 				return;   // rates not known yet: the last decision stands
 			h.renderAheadBudgetCredit = step.credit;
@@ -241,6 +246,13 @@ namespace Vpv
 			}
 			else if (h.releaseFallback)
 				h.releaseFallback("render-ahead");
+			if (step.floorWhy[0] != '\0')
+			{
+				if (h.engageFallback)
+					h.engageFallback("queue analysis floor", step.floorWhy);
+			}
+			else if (h.releaseFallback)
+				h.releaseFallback("queue analysis floor");
 		}
 
 		double RenderAheadChainRatio(double dejudderSourceHz, double displayHz)

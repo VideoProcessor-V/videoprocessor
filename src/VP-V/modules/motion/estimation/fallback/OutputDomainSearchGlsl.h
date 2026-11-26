@@ -284,7 +284,7 @@ void hook()
     // as the search does on a repeat.
     bool searching = motion_compensation >= 0.5 && vector_source <= 0.5 && static_refresh <= 0.5;
     vec4 tag = imageLoad(LQPREV, ivec2(0));
-    prev_valid = abs(tag.g - VALID_TAG) < 1e-3 && !isnan(tag.r);
+    prev_valid = abs(tag.g - VALID_TAG) < 1e-3 && (floatBitsToUint(tag.r) & 0x7f800000u) != 0x7f800000u;
     last_in_a_ = tag.a > 0.5;
     bool run_search = inside && searching && prev_valid;
     if (lead && inside && !run_search) {
@@ -292,7 +292,7 @@ void hook()
             imageStore(out_image, block, vec4(0.0));
         } else if (vector_source > 0.5) {
             vec4 e = texelFetch(VPVEC, min(block, textureSize(VPVEC, 0) - ivec2(1)), 0);
-            bool usable = !any(isnan(e.xyz));
+            bool usable = !any(equal(floatBitsToUint(e.xyz) & uvec3(0x7f800000u), uvec3(0x7f800000u)));
             imageStore(out_image, block, usable ? vec4(round(e.xy), e.z > 0.5 ? 1.0 : 0.0, 0.0) : vec4(0.0));
         } else if (static_refresh > 0.5) {
             imageStore(out_image, block, vec4(0.0));
@@ -341,7 +341,7 @@ void hook()
     // real motion (kept through repeated film frames). The candidate list is
     // the serial search's order (zero first), one thread per candidate.
     vec4 mp = imageLoad(MVPREV, block);
-    bool have_prev = abs(mp.a - VALID_TAG) < 1e-3 && !any(isnan(mp.xy));
+    bool have_prev = abs(mp.a - VALID_TAG) < 1e-3 && !any(equal(floatBitsToUint(mp.xy) & uvec2(0x7f800000u), uvec2(0x7f800000u)));
     ivec2 pv = have_prev ? ivec2(round(mp.xy)) : ivec2(0);
     if (run_search && lead) {
         int n = 0;

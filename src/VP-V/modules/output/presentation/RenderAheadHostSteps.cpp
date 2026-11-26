@@ -47,13 +47,10 @@ namespace RenderAhead
 			return gate.level;
 		}
 
-		BudgetStep StepDelayBudget(bool vetoNow, double captureRateHz, double displayHz, size_t queueFrames, bool queueCredit)
+		static BudgetStep FinaliseDelayBudgetStep(bool vetoNow, size_t queueFrames, const BudgetDecision& d, FloorPolicy policy)
 		{
 			BudgetStep step;
-			if (!(captureRateHz > 0.0) || !(displayHz > 0.0))
-				return step;   // rates not known yet: the last decision stands
 			step.decided = true;
-			const BudgetDecision d = FitDelayBudget(1.0 / captureRateHz, 1.0 / displayHz, queueFrames, queueCredit);
 			step.credit = d.fits ? d.creditFrames : 0;
 			step.veto = !d.fits;
 			step.changed = step.veto != vetoNow;
@@ -64,7 +61,27 @@ namespace RenderAhead
 			if (step.veto)
 				snprintf(step.why, sizeof(step.why), "off: its %.0f ms lead does not fit the %.0f ms delay budget; %s",
 					d.leadMs, d.budgetMs, d.reason);
+			const std::string floorText = Presenter::FloorReport(d, policy);
+			if (!floorText.empty())
+				snprintf(step.floorWhy, sizeof(step.floorWhy), "%s", floorText.c_str());
 			return step;
+		}
+
+		BudgetStep StepDelayBudget(bool vetoNow, double captureRateHz, double displayHz, size_t queueFrames, bool queueCredit)
+		{
+			if (!(captureRateHz > 0.0) || !(displayHz > 0.0))
+				return BudgetStep();
+			return FinaliseDelayBudgetStep(vetoNow, queueFrames,
+				FitDelayBudget(1.0 / captureRateHz, 1.0 / displayHz, queueFrames, queueCredit), FloorPolicy::CreditWins);
+		}
+
+		BudgetStep StepDelayBudget(const Presenter& presenter, bool vetoNow, double captureRateHz, double displayHz,
+			size_t queueFrames, bool queueCredit)
+		{
+			if (!(captureRateHz > 0.0) || !(displayHz > 0.0))
+				return BudgetStep();
+			return FinaliseDelayBudgetStep(vetoNow, queueFrames,
+				presenter.FitBudget(1.0 / captureRateHz, 1.0 / displayHz, queueFrames, queueCredit), presenter.floorPolicy);
 		}
 
 		bool ChainDepthSettled(double& wantedSince, const ChainDepth& current, const ChainDepth& wanted, double now, double ratio,

@@ -26,38 +26,26 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 		EngageFallback("ingress switches", "not published (host table full): capture-thread fix switches keep their built values and the Original-pathway gate was not recorded");   // counted: ExtensionHub::PathwayRefusals
 	else
 		ReleaseFallback("ingress switches");
-	// PHASE 1 of the host seams plan (refs/107 s2.4 item 1; owner E3 2026-11-11): the ONE settings seam hands the VP-V
-	// state over when the Original pathway is selected, so the gated module calls (RenderAhead::Presenter reporting, the
-	// de-judder timeline plan: `// VPV-GATED`) can do nothing afterwards without a VP-V plan outliving the switch: the
-	// render-ahead chain is broken and its gate reset once (Presenter::SetOriginalPathway), the per-vsync timeline is
-	// released with its fallback line, the phase picture dropped. Idempotent; a VP-V apply only clears the fact.
+	// Settings seam (refs/107 s2.4): release VP-V state, GPU pools, demand, and fallbacks before NotifyLifecycle(SettingsApplied).
 	renderAheadPresenter.SetOriginalPathway(settings.pipelineOriginalPathway, RenderAheadNow());
+	if (settings.pipelineOriginalPathway || settings.ditherNeed != "auto") { outputFinish.ReleaseGpu(d3d11 ? d3d11->gpu : nullptr); SyncFallback(FallbackCatalog::Released("dither need")); }
+	if (outputMerger && (settings.pipelineOriginalPathway || !settings.outputSegmentsMerged)) outputMerger->Configure(pipelineSlots, false, 30, fallbacks);
+	if (!settings.frameAnalysisStore || settings.pipelineOriginalPathway) ReleaseFallback(FrameAnalysis::kFallbackId);
 	if (settings.pipelineOriginalPathway)
 	{
 		VpMotion::ReleaseVpTimeline(dejudderPolicy, [this](const char* what) { LogVpTimeline(what); });
-		ReleaseFallback("timeline");
-		ReleaseFallback("calibration LUT BTB/WTW");
+		motionAheadFailures = FallbackCatalog::MotionAheadWorker();
+		for (const char* id : { "timeline", "calibration LUT BTB/WTW", "delay budget", "look-ahead", "motion look-ahead worker", "occlusion mask", "calibration LUT stage", "calibration LUT slope", "temporal entrance", "libplacebo", "picture precision", "product.debander", "product.detail_pulse", "product.texture_restore", "queue analysis floor" }) ReleaseFallback(id);
 		vpPhasePlanesValid = false;
-		// PHASE 2 (refs/113 F2): the re-base shader warm-up is idled here too; its per-frame call in the render loop is
-		// gated in Original and would otherwise never clear a warm-up in flight (the "Preparing shaders..." status).
 		const VpRebaseWarmup::Controller::Outcome warm = rebaseWarmup.EnterOriginalPathway();
 		if (warm.fallbackChanged) SyncFallback(warm.fallback);
-		ResetEntrancePlan();   // P4 e-i: the planner stops before the VP-V stages in Original; its last outputs go back to native
+		ResetEntrancePlan();
 	}
 	VpFrameAnalysis::Host::SetLimitedDomain(settings.sourceCodingFixes);   // DIV-AN-01 either/or (Original: off = Bill's codes)
-	frameAnalysis.Owner(this).Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
-		VpFrameAnalysis::Host::FullLumaReaders(pipelineSlots, settings.opticalFlow, settings.motionAheadFrames,
-			settings.sourceResolution == "auto"));   // running full-luma readers; record readers: none yet
-	// SID r2 (audit MED-1, rule 32; refs/107 s1 S6 CONFIG/STATUS, this settings seam): source_geometry_detect reaches the
-	// source monitor on a settings apply, parsed only when it changed, with its unknown-entry line; with auto off nothing is
-	// held, so the held re-base notice is released here (OrderFrameSlotHooks syncs it per frame while auto runs).
-	if (vpv.sourceAnalysis.sourceMonitor.SetGeometryDetect(settings.sourceGeometryDetect))
-		SyncFallback(vpv.sourceAnalysis.sourceMonitor.GeometryDetectFallback());
-	if (settings.sourceResolution != "auto")
-	{
-		SyncFallback(FallbackCatalog::SourceResolutionHeld(std::string()));
-		vpv.sourceAnalysis.sourceMonitor.ForgetConventionHold();
-	}
+	frameAnalysis.Owner(this).Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,
+		VpFrameAnalysis::Host::FullLumaReaders(pipelineSlots, settings.opticalFlow, settings.motionAheadFrames, settings.sourceResolution == "auto"));
+	if (vpv.sourceAnalysis.sourceMonitor.SetGeometryDetect(settings.sourceGeometryDetect)) SyncFallback(vpv.sourceAnalysis.sourceMonitor.GeometryDetectFallback());
+	if (settings.sourceResolution != "auto") { SyncFallback(FallbackCatalog::SourceResolutionHeld(std::string())); vpv.sourceAnalysis.sourceMonitor.ForgetConventionHold(); sourceAheadFailures = FallbackCatalog::SourceResolutionWorker(); ReleaseFallback("source-resolution worker"); }
 	RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::SettingsApplied, this, nullptr, nullptr, settings.resyncEvent.c_str(), nullptr, settings.pipelineOriginalPathway ? 1 : 0, nullptr, static_cast<double>(settings.motionAheadFrames)); // VPV-HOOK
 	Vpv::Segments::CoreSegmentCaches::Instance().RefreshTraceFlag(this, &ReadHookListTraceEnv);
 	entrance.Invalidate();

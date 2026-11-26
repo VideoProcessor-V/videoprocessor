@@ -1127,12 +1127,8 @@ namespace OutputSegments
 			}
 			list += (i ? ", " : "") + tag;
 		}
-		static const void* lastRenderer = nullptr;
-		static std::string lastList;
-		if (renderer == lastRenderer && list == lastList)
+		if (!Vpv::Segments::CoreSegmentCaches::Instance().ShouldLogHookList(renderer, list))
 			return;
-		lastRenderer = renderer;
-		lastList = list;
 		DebugLog::Log("VP hook list: n=%d [%s]", frameParams.num_hooks, list.c_str());
 	}
 }

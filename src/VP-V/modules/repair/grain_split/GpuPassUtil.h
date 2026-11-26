@@ -58,13 +58,25 @@ namespace VpvGpu
 	}
 
 	// A storable texture like `like` (at least 16 bits: a restored value is finer than an 8-bit code).
+	// W23-C2-S3-M1: never demote float picture planes to UNORM (preserves BTB < 0 and WTW > 1).
 	inline pl_fmt StorableLike(pl_gpu gpu, pl_fmt like, int components = 0)
 	{
 		const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
 		const int n = components > 0 ? components : (like ? like->num_components : 1);
 		if (like && like->num_components == n && (like->caps & caps) == caps && like->component_depth[0] >= 16) return like;
+		if (like && like->type == PL_FMT_FLOAT)
+		{
+			const int minDepth = like->component_depth[0] >= 32 ? 32 : 16;
+			for (int c = n; c <= 4; ++c)
+				if (pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, c, minDepth, 32, caps))
+					return f;
+			for (int c = n; c <= 4; ++c)
+				if (pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, c, 16, 32, caps)) // PRECISION-OK: fallback only when 32-bit float storable format unavailable
+					return f;
+			return nullptr;
+		}
 		pl_fmt f = pl_find_fmt(gpu, PL_FMT_UNORM, n, 16, 16, caps);
-		return f ? f : pl_find_fmt(gpu, PL_FMT_FLOAT, n, 16, 16, caps);
+		return f ? f : pl_find_fmt(gpu, PL_FMT_FLOAT, n, 16, 32, caps); // PRECISION-OK: float fallback when UNORM16 unavailable
 	}
 
 	inline pl_shader_desc Sampled(const char* name, pl_tex tex)

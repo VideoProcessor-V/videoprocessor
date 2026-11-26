@@ -1710,7 +1710,11 @@ bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq, double* t
             const bool bwdOk = OpticalFlowTrust::GlobalUsable(rec.global[1]);
             if (bwdOk)
             {
-                const double w = static_cast<double>(rec.global[0][3]);
+                const auto shareOf = [](float sigma) {
+                    const double s = (1.05 - static_cast<double>(sigma)) / 1.5;
+                    return (std::max)(0.0, (std::min)(1.0, s));
+                };
+                const double w = (std::min)(shareOf(rec.global[0][2]), shareOf(rec.global[1][2]));
                 if (w >= kVectorVetoMinTrust)
                 {
                     if (trustOut)

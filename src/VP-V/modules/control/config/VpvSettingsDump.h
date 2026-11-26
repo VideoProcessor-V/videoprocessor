@@ -312,4 +312,12 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	o << "adaptive=" << s.adaptive.wBase << ',' << s.adaptive.edgeLo << ',' << s.adaptive.edgeHi << ',' << s.adaptive.grainLo << ',' << s.adaptive.grainHi << ',' << s.adaptive.grainFloor << ',' << s.adaptive.grainSmoothMs << ',' << s.adaptive.shadowBias << ',' << s.adaptive.chromaSsim << ',' << s.adaptive.antiring << ',' << s.adaptive.grainMap << ',' << s.adaptive.grainMapSmoothMs << ',' << s.adaptive.faithfulOrtho << ',' << s.adaptive.faithfulAuto << ',' << s.adaptive.cnnResidualStabilise << ',' << s.adaptive.ssimResidualStabilise << ',' << s.adaptive.residualGrainGuard << ',' << s.adaptive.residualCodingNoiseCodes << ',' << s.adaptive.float32Picture << ',' << s.adaptive.motionStrength << ',' << s.adaptive.motionSpeedLo << ',' << s.adaptive.motionSpeedHi << ',' << s.adaptive.motionFloor << ',' << s.adaptive.motionSmoothMs << "\n";
 	Put(o, "debandGrain", s.debandGrain);
 	o << "edgeBlanking=" << s.edgeBlanking.left << ',' << s.edgeBlanking.top << ',' << s.edgeBlanking.right << ',' << s.edgeBlanking.bottom << "\n";
+	Put(o, "dvDisplayMapping", s.dvDisplayMapping);
+	Put(o, "dvPostDecodeDeband", s.dvPostDecodeDeband);
+	Put(o, "upscaleRoute", s.upscaleRoute);
+	Put(o, "upscaleSharp", s.upscaleSharp);
+	Put(o, "upscaleSafe", s.upscaleSafe);
+	Put(o, "upscaleSharpAntiring", s.upscaleSharpAntiring);
+	Put(o, "vpvCameraSnapshot", s.vpvCameraSnapshot);
+	Put(o, "vpvSkeletonSnapshot", s.vpvSkeletonSnapshot);
 }

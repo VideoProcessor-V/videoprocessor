@@ -302,6 +302,7 @@ void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 	for (pl_tex& tex : dejudderAheadTextures)
 		if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 	if (dejudderRgbScratch && d3d11) pl_tex_destroy(d3d11->gpu, &dejudderRgbScratch);
+	dejudderRgbLuma = nullptr;
 	dejudderAhead.Reset();
 	dejudderAheadPayload.reset();
 	dejudderAheadPayloadSequence = 0;
@@ -463,7 +464,7 @@ bool LibplaceboVideoRenderer::Impl::PlanVpOutputs(RendererExtension::OutputPlan&
 	if (!vpGapFillStandalone)
 		interpolating = Vpv::Dejudder::RefreshPlanInterpolation(activeSettings, dejudderPolicy, plan.filmHz, plan.captureHz,
 			TimelineDisplayHz(), smoothMotionEngine, lowLatencyQueueActive.load(std::memory_order_acquire),
-			dejudderExtras.vpPlanInterlaced, dejudderExtras.vpPlanNativeRgb || dejudderRgbLuma != nullptr, plan.ptsB > 0.0);
+			dejudderExtras.vpPlanInterlaced, dejudderExtras.vpPlanNativeRgb, plan.ptsB > 0.0);
 	if(temporalRenderer.Mixing()!=dejudderPolicy.smoothMotionMixingLogged) {
 	    RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
 	    dejudderPolicy.smoothMotionMixingLogged=temporalRenderer.Mixing();

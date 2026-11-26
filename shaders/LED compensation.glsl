@@ -269,24 +269,30 @@ vec3 preserve_extended(vec3 result, vec3 original, float lift)
     if (!anyAbove && !anyBelow)
         return result;
     float y = dot(original, vec3(0.2126, 0.7152, 0.0722));
-    // W23-NEON-H2: true BTB and true WTW pass bit-identically for all gains (owner rule).
-    if ((wtw && (y > 1.0 || all(above))) || (btb && (!(y > 0.0) || all(below))))
+    // True BTB passes bit-identically; true WTW also passes bit-identically when gain == 1.0.
+    if ((btb && (!(y > 0.0) || all(below))) || (wtw && gain == 1.0 && (y > 1.0 || all(above))))
         return original;
-    vec3 d = original - vec3(y);
-    // Above white: d > 0 and 1 - y >= 0; below black: d < 0 and y > 0. Every quotient is finite.
-    vec3 tvAbove = vec3(1.0);
-    if (anyAbove)
-        tvAbove = mix(tvAbove, vec3(1.0 - y) / max(d, vec3(1e-6)), vec3(above));
-    vec3 tv = tvAbove;
-    if (anyBelow)
-        tv = mix(tv, vec3(y) / max(-d, vec3(1e-6)), vec3(below));
-    float t = clamp(min(tv.r, min(tv.g, tv.b)), 0.0, 1.0);
-    vec3 p = vec3(y) + t * d;
-    // GEM-LED-UP-SMOOTH + W23-NEON-H2: unique minimal C1 cubic Hermite spline h(u) = u^2 * (3 - 2u) over u = 1 - tAbove.
-    // Boundary constraints: h(0) = 0, h'(0) = 0 at max(o) = 1+ (in-range edge); h(1) = 1, h'(1) = 0 at y = 1- (true WTW).
-    // Blending eff_gain -> 1.0 for any gain != 1.0 joins partly-above-white continuously to true WTW (`return original`).
-    float tAbove = clamp(min(tvAbove.r, min(tvAbove.g, tvAbove.b)), 0.0, 1.0);
-    float u = 1.0 - tAbove;
+    // W23-C2-S3-H1: keep exact C0 continuity across white (1,1,1) and across y = 1.0 on both neutral and
+    // chromatic rays for any gain != 1.0. For y > 1.0, anchor p = vec3(1.0) (matching lim_{y->1-} y + t*d)
+    // and blend eff_gain from gain -> 1.0 via the minimal C1 cubic Hermite spline h(u) = u^2*(3 - 2u) over
+    // u = clamp((max(original) - 1.0) / max(extended_ceiling - 1.0, 1e-4), 0, 1) so eff_gain = gain at the
+    // white edge (zero cliff) and eff_gain = 1.0 at extended_ceiling (true WTW preserved monotonically).
+    vec3 p;
+    if (y > 1.0) {
+        p = vec3(1.0);
+    } else {
+        vec3 d = original - vec3(y);
+        // Above white: d > 0 and 1 - y >= 0; below black: d < 0 and y > 0. Every quotient is finite.
+        vec3 tv = vec3(1.0);
+        if (anyAbove)
+            tv = mix(tv, vec3(1.0 - y) / max(d, vec3(1e-6)), vec3(above));
+        if (anyBelow)
+            tv = mix(tv, vec3(y) / max(-d, vec3(1e-6)), vec3(below));
+        float t = clamp(min(tv.r, min(tv.g, tv.b)), 0.0, 1.0);
+        p = vec3(y) + t * d;
+    }
+    float over = max(max(original.r, max(original.g, original.b)) - 1.0, 0.0);
+    float u = clamp(over / max(extended_ceiling - 1.0, 1e-4), 0.0, 1.0);
     float s = u * u * (3.0 - 2.0 * u);
     float eff_gain = (anyAbove && gain != 1.0) ? mix(gain, 1.0, s) : gain;
     vec3 c = compensate_gain(p, lift, eff_gain);

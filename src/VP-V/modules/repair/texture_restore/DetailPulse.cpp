@@ -1354,12 +1354,17 @@ for (int q = 0; q < 4; q++) {
 
 		// Acquire shared kBandMemo GPU wide low band for uncropped single-component luma; false = visible fallback reason in `why`.
 		bool TryAcquireBandMemo(const Params& params, uint64_t seq, const Constants& c, pl_tex luma, bool skipReasonRepeat,
-			VpSkeleton::AcquireResult& pin, pl_tex& texOut, std::string& why)
+			bool upstreamModified, VpSkeleton::AcquireResult& pin, pl_tex& texOut, std::string& why)
 		{
 			texOut = nullptr;
 			if (skipReasonRepeat)
 			{
 				why = "repeat frame (picture may differ from source seq)";
+				return false;
+			}
+			if (upstreamModified)
+			{
+				why = "input plane modified by upstream entrance stage (pipelineStage > 0)";
 				return false;
 			}
 			if (c.rgb || luma->params.format->num_components != 1)
@@ -1421,7 +1426,7 @@ for (int q = 0; q < 4; q++) {
 			}
 			if (didDeband)
 			{
-				why = "look-ahead frame debanded (pipelineStage > 0)";
+				why = "input plane modified by upstream entrance stage (pipelineStage > 0)";
 				return false;
 			}
 			if (c.rgb || luma->params.format->num_components != 1)
@@ -1678,7 +1683,7 @@ for (int q = 0; q < 4; q++) {
 		impl = nullptr;
 	}
 
-	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result)
+	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result, bool upstreamModified)
 	{
 		error.clear();
 		if (!gpu || !dispatch || source.num_planes <= 0)
@@ -1713,8 +1718,11 @@ for (int q = 0; q < 4; q++) {
 		pl_tex memoLowTex = nullptr;
 		{
 			std::string why;
-			if (TryAcquireBandMemo(params, params.sequence, c, luma, repeat, memoBand, memoLowTex, why))
+			if (TryAcquireBandMemo(params, params.sequence, c, luma, repeat, upstreamModified, memoBand, memoLowTex, why))
+			{
 				++bandMemoHits;
+				lastBandMemoFallback.clear();
+			}
 			else
 			{
 				++bandMemoFallbacks;
@@ -1820,7 +1828,7 @@ for (int q = 0; q < 4; q++) {
 			int p11Block = 0;
 			{
 				std::string p11Why;
-				if (TryAcquireP11BandEnergies(params, params.sequence, c, luma, false, false, memoP11, p11Tex, p11Block, p11Why))
+				if (TryAcquireP11BandEnergies(params, params.sequence, c, luma, false, upstreamModified, memoP11, p11Tex, p11Block, p11Why))
 				{
 					++p11EnergyHits;
 					lastP11EnergyFallback.clear();
@@ -1936,12 +1944,15 @@ for (int q = 0; q < 4; q++) {
 		pl_tex memoLowTex = nullptr;
 		{
 			std::string why;
-			if (!didDeband && TryAcquireBandMemo(params, sequence, c, luma, false, memoBand, memoLowTex, why))
+			if (TryAcquireBandMemo(params, sequence, c, luma, false, didDeband, memoBand, memoLowTex, why))
+			{
 				++bandMemoHits;
+				lastBandMemoFallback.clear();
+			}
 			else
 			{
 				++bandMemoFallbacks;
-				lastBandMemoFallback = didDeband ? "look-ahead frame debanded (pipelineStage > 0)" : why;
+				lastBandMemoFallback = why;
 			}
 		}
 		const bool lowFromMemo = memoLowTex != nullptr;

@@ -1238,6 +1238,7 @@ namespace RenderAhead
 		// set together with VpFixedBudgetPolicy::SetRaiseQueueForAnalysis (the queue target); the coupling test
 		// TheTwoRaiseQueueSwitchesAgreeOnTheRaisedQueue pins that both give the same raised queue.
 		std::atomic<size_t> queueCapacity{ 0 };
+		std::atomic<size_t> activeQueueTarget{ 0 };   // W23-C2-S4-H2: active uncredited queue target (delay-budget or film-scaled)
 		// The spare-slot GPU ms per source frame a look-ahead user declares (S1 amendment; any
 		// thread; 0 = none): GateCosts::spareSlotMs, added to the gate's average check.
 		std::atomic<double> spareSlotMs{ 0.0 };

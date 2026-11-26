@@ -52,28 +52,13 @@ void LibplaceboVideoRenderer::Impl::WarmIdleMotionEngine(const VideoFrameFormatt
 	vectorEstimate.motionEngineWarming = false;
 	dejudderLiveFieldFrom = 0;
 	motionSegment.Retract(VpMotion::Direction::Forward);
-	bool pictured = false;
-	if (estimated && dejudder)
-	{
-		Interpolator::Motion motion;
-		// P5c: the ONE allowed direct read of the matcher's outputs outside the P3 field view (the producer side, inside
-		// motion\estimation: the keeper's own warm-up estimate, the segment just retracted, so the members are the answer).
-		motion.field = dejudder->Field();
-		motion.frameTrust = dejudder->FrameTrust();
-		motion.subField = dejudder->SubField();
-		motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
-		if (!frameInterpolator)
-			frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
-		frameInterpolator->SetGrain(activeSettings.interpolationGrain);
-		Dejudder::Planes scratch;
-		pictured = frameInterpolator->Run(a, a, motion, 0.5f, activeSettings.interpolationFallback, scratch);
-		vpPhasePlanesValid = false;
-	}
+	vpPhasePlanesValid = false;
 	if (dejudder)
 		dejudder->ForgetHistory();
-	DebugLog::Log("Motion engine: loaded idle for hiccup repair at the source's start (%.1f ms; estimate %s, interpolator %s)",
+	// W23-C2-S4-M2: ReleaseIdleConsumers sheds kUserInterpolator (~160 MB at 4K) while idle, so warm only the matcher here.
+	DebugLog::Log("Motion engine: loaded idle for hiccup repair at the source's start (%.1f ms; estimate %s)",
 		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
-		estimated ? "ok" : "failed", pictured ? "ok" : "not run");
+		estimated ? "ok" : "failed");
 }
 
 // Bug hunt 3 F4: one DXGI video memory reading a second for the idle motion engine's

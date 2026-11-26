@@ -128,6 +128,8 @@ namespace Vpv
 				bool used = false;
 				bool pinned = false;       // W23-SK-H2: true while chunked P10 job is mid-flight (never evict)
 				uint32_t bands = 0;        // bands uploaded (rows [0, bands * rowsPerBand))
+				const uint16_t* tapLuma = nullptr;
+				uint8_t tapShift = 0;
 				bool extendedDone = false;
 				RegionEvidence::Rect picture;
 			};

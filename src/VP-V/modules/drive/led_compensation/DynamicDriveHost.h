@@ -103,6 +103,8 @@ namespace LedDrive
 		// Slot drive.projector_control runs (off in the Original pathway, ADR-0019, or in
 		// pipeline_slots_off): the RS-232 LED/CNTR drive may be started. True without an Impl.
 		bool projectorAllowed = true;
+		// True once Impl::Initialize has resolved pipelineSlots; false during Build() before Initialize().
+		bool implInitialized = true;
 		// GetTickCount64() of the last libplacebo render start (0 = none): the connection
 		// test's "video is playing" check when no module runs.
 		uint64_t lastRenderStartedTick = 0;
@@ -124,7 +126,7 @@ namespace LedDrive
 		void ApplyAcceptedSnapshot(const void* rendererHost, const ConfigFile* candidateConfig,
 			bool hasExplicitPathway, bool explicitOriginalPathway,
 			const std::shared_ptr<const ConfigFile>& snapshotConfig, const std::string& sourceKind,
-			const HostContext& context, bool rebuilding, bool implInitialized);
+			const HostContext& context, bool rebuilding, bool implInitialized, bool candidateProjectorAllowedIn = true);
 
 		// A new Impl was built: publish the module, its look-ahead observer and the hook's
 		// parameters to the render side.
@@ -181,6 +183,9 @@ namespace LedDrive
 		bool suspended = false;
 		// W23-REG-H3: a snapshot deferred while an outgoing Original/uninitialized Impl awaits rebuild.
 		bool deferredSnapshot = false;
+		// W23-C2-S2-H3: authoritative pathway & drive.projector_control allowance from ApplyAcceptedSnapshot (under stateMutex).
+		bool explicitOriginal = false;
+		bool candidateProjectorAllowed = true;
 		// file_led_holdover_ms while the applied snapshot says source=file; 0 for the capture
 		// app, whose drive is never parked (LedDriveHoldover.h).
 		uint32_t holdoverMs = 0;

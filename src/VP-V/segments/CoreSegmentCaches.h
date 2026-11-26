@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace Vpv
@@ -25,6 +26,7 @@ namespace Vpv
 			bool GpuSupportsFloat32Fbo(const void* host, const void* gpu, Float32FboProbeFn probe);
 			bool RefreshTraceFlag(const void* host, EnvProbeFn probe);
 			bool TraceHookListEnabled(const void* host, EnvProbeFn probe);
+			bool ShouldLogHookList(const void* host, const std::string& list);
 			void ResetForTesting();
 			size_t HostCountForTesting() const;
 			uint64_t GpuEpochForTesting(const void* host) const;
@@ -36,10 +38,8 @@ namespace Vpv
 				const void* host = nullptr;
 				const void* gpu = nullptr;
 				uint64_t gpuEpoch = 0;
-				bool float32Known = false;
-				bool float32Supported = false;
-				bool traceKnown = false;
-				bool traceEnabled = false;
+				bool float32Known = false, float32Supported = false, traceKnown = false, traceEnabled = false;
+				std::string lastHookList;
 			};
 			Entry* FindLocked(const void* host);
 			const Entry* FindLocked(const void* host) const;

@@ -860,14 +860,14 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
 	AppendConfigBoolOption(arguments, config, "scene_correction_basic");
 	AppendConfigBoolOption(arguments, config, "newlldv");
 	AppendConfigBoolOption(arguments, config, "newlldv_sdr_veto");
-	// F-8 ([vpv] hdr_inference; the Original pathway selects Bill's heuristic): HdrInferenceChoice.h.
-	arguments.emplace_back(L"/hdr_inference");
-	arguments.emplace_back(HdrInferenceChoice::FromConfig(config).effective == HdrInferenceChoice::Mode::Original ? L"original" : L"vp");
 	AppendConfigBoolOption(arguments, config, "dv_tunnel_handoff");
 	AppendConfigBoolOption(arguments, config, "dolby_vision_tunnel");
 	AppendConfigBoolOption(arguments, config, "noui");
 	AppendConfigBoolOption(arguments, config, "startminimized");
 	}
+	// F-8 ([vpv] hdr_inference; the Original pathway selects Bill's heuristic): HdrInferenceChoice.h.
+	arguments.emplace_back(L"/hdr_inference");
+	arguments.emplace_back(HdrInferenceChoice::FromConfig(config).effective == HdrInferenceChoice::Mode::Original ? L"original" : L"vp");
 
 	// DirectShow timing/conversion controls are intentionally separated from
 	// general application startup choices in the VP-0079 layout.

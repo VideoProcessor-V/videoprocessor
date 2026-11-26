@@ -597,10 +597,11 @@ vec4 hook()
     outLin = vec3(ap_flare(outLin.r, veil_rel), ap_flare(outLin.g, veil_rel), ap_flare(outLin.b, veil_rel));
 
     // Blend out below the toe knee, and by strength.
-    // FIX1 SHOULD 3: the luma weights are the output primaries' own (the Y row of apm), the knee the configured
-    // gamma_boost_knee (an encoded level, taken to relative light).
+    // FIX1 SHOULD 3 + W23-C2-S3-L2: apx_knee is an SDR gamma fraction of diffuse white (0..0.5);
+    // on PQ outputs convert via apx_gamma rather than ST.2084 ap_nits_from_pq so toe thresholds match.
     float luma = dot(lin, vec3(apm_10, apm_11, apm_12));
-    float toe = apx_knee > 0.0 ? smoothstep(0.0, max(ap_to_rel(apx_knee), 1e-12), luma) : 1.0;
+    float knee_rel = apx_pq > 0.5 ? pow(max(apx_knee, 0.0), apx_gamma) : ap_to_rel(apx_knee);
+    float toe = apx_knee > 0.0 ? smoothstep(0.0, max(knee_rel, 1e-12), luma) : 1.0;
     float w = clamp(apx_strength, 0.0, 1.0) * toe;
 
     // The identity side on the nominal scale: both PQ and gamma preserve their nominal white at w = 0.

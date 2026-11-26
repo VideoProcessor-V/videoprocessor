@@ -391,11 +391,22 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 		{
 			const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
 			// At least 16 bits: an 8-bit output would round the debanded gradient back onto its
-			// band steps (audit 2026-10-16).
+			// band steps (audit 2026-10-16). Never demote float planes to UNORM (preserves BTB/WTW).
 			if (like && (like->caps & caps) == caps && like->component_depth[0] >= 16) return like;
 			const int n = like ? like->num_components : 1;
+			if (like && like->type == PL_FMT_FLOAT)
+			{
+				const int minDepth = like->component_depth[0] >= 32 ? 32 : 16;
+				for (int c = n; c <= 4; ++c)
+					if (pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, c, minDepth, 32, caps))
+						return f;
+				for (int c = n; c <= 4; ++c)
+					if (pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, c, 16, 32, caps)) // PRECISION-OK: fallback only when 32-bit float storable format unavailable
+						return f;
+				return nullptr;
+			}
 			pl_fmt f = pl_find_fmt(gpu, PL_FMT_UNORM, n, 16, 16, caps);
-			return f ? f : pl_find_fmt(gpu, PL_FMT_FLOAT, n, 16, 16, caps);
+			return f ? f : pl_find_fmt(gpu, PL_FMT_FLOAT, n, 16, 32, caps); // PRECISION-OK: float fallback when UNORM16 unavailable
 		}
 	}
 
@@ -790,11 +801,12 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 							&& s1->params.format != nullptr && s1->params.format->num_components >= 3)
 						{
 							p11TensorTex = s1;
-							const int p11Block = RegionEvidence::BlockSizeFor(luma->params.h);
+							const int nativeH = (std::max)(1, static_cast<int>(std::lround(params.fieldScale * luma->params.h)));
+							const int p11Block = RegionEvidence::BlockSizeFor(nativeH);
 							const double spanX = static_cast<double>(p11Block) * static_cast<double>(s1->params.w);
 							const double spanY = static_cast<double>(p11Block) * static_cast<double>(s1->params.h);
-							p11Scale[0] = static_cast<float>(static_cast<double>(luma->params.w) / (spanX * static_cast<double>((std::max)(1, w))));
-							p11Scale[1] = static_cast<float>(static_cast<double>(luma->params.h) / (spanY * static_cast<double>((std::max)(1, h))));
+							p11Scale[0] = static_cast<float>(static_cast<double>(toField[0]) / spanX);
+							p11Scale[1] = static_cast<float>(static_cast<double>(toField[1]) / spanY);
 						}
 						else
 						{
@@ -823,6 +835,8 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 				if (p10Frame != nullptr && p11TensorTex != nullptr)
 				{
 					++grainGuardHits;
+					lastGrainGuardFallback.clear();
+					lastBandMemoFallback.clear();
 				}
 				else
 				{
@@ -856,6 +870,7 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 							{
 								acquiredLow = t;
 								++bandMemoHits;
+								lastBandMemoFallback.clear();
 							}
 							else
 							{

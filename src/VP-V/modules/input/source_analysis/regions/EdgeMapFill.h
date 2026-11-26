@@ -30,6 +30,7 @@
 #include <VP-V/modules/input/source_analysis/regions/EdgeMapDispatch.h>
 #include <VP-V/modules/input/source_analysis/regions/MeasureDomain.h>
 #include <VP-V/modules/input/source_analysis/regions/MeasureDomainGlsl.h>
+#include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 
 #include <libplacebo/dispatch.h>
 #include <libplacebo/shaders/custom.h>
@@ -106,6 +107,19 @@ namespace Vpv
 				return false;
 			}
 			const pl_tex in = static_cast<pl_tex>(src.gpu.resource);
+			const Vpv::Capture::SourcePlaneSet* facts = Vpv::Capture::SourcePlanes::FactsOf(src);
+			if (facts == nullptr)
+			{
+				out.declineReason = "edge_map: missing P13 source plane facts";
+				return false;
+			}
+			const int bits = facts->repr.bits.color_depth > 0 ? facts->repr.bits.color_depth : 10;
+			const double cu = VpvGpu::CodeUnit(in, facts->repr.bits, bits);
+			if (!(cu > 0.0))
+			{
+				out.declineReason = "edge_map: invalid source plane code unit";
+				return false;
+			}
 			VpSkeleton::TexShape shape;
 			shape.w = uint32_t(in->params.w);
 			shape.h = uint32_t(in->params.h);
@@ -126,7 +140,7 @@ namespace Vpv
 			desc[1].desc.type = PL_DESC_STORAGE_IMG;
 			desc[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
 			desc[1].binding.object = static_cast<pl_tex>(out.gpu.resource);
-			const float scale = RegionEvidence::kSourceTapCodesPerUnit;   // normalised sample -> 10-bit codes (the one tap form)
+			const float scale = static_cast<float>(std::ldexp(1.0, 10 - bits) / cu);   // W23-C2-S3-H3: exact 10-bit code scale from P13 bit encoding
 			const pl_shader_var vars[1] = { { pl_var_float("em_scale"), &scale, true } };
 			return DispatchEdgeMap(static_cast<pl_dispatch>(req.gpu->Dispatch()), RegionEvidence::EdgeMapHeaderGlsl(), desc, 2, vars,
 				1, in->params.w, in->params.h, out.declineReason);

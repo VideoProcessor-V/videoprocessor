@@ -47,6 +47,8 @@ namespace OutputSegments
 		if (s2.Segment().Rechecked() || s3.Segment().Rechecked())
 			runner.ClearFailed();
 		active = a || b;
+		if (!active)
+			runner.Release();
 		return active;
 	}
 

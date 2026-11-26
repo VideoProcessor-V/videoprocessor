@@ -35,9 +35,9 @@ size_t LibplaceboVideoRenderer::QueueTargetVp() const
 	// No analysis product declares a lead yet, so the floor is the look-ahead floor above.
 	if (m_impl)
 	{
-		m_impl->renderAheadPresenter.analysisFloor.store(VpQueueRules::AnalysisFloorFrames(context.lookaheadFloor, 0),
-			std::memory_order_release);
+		m_impl->renderAheadPresenter.analysisFloor.store(VpQueueRules::AnalysisFloorFrames(context.lookaheadFloor, 0), std::memory_order_release);
 		m_impl->renderAheadPresenter.queueCapacity.store(m_frameQueueMaxSize, std::memory_order_release);
+		m_impl->renderAheadPresenter.activeQueueTarget.store(context.hold.active ? AlphaQueuePolicy::ClampDesiredDepthToCapacity(context.hold.targetFrames, context.capacity) : (context.cadenceScaledDepth > 0 ? context.cadenceScaledDepth : AlphaQueuePolicy::ClampDesiredDepthToCapacity(context.configuredDepth, context.capacity)), std::memory_order_release);
 	}
 	return QueuePolicy().QueueTarget(context);
 }

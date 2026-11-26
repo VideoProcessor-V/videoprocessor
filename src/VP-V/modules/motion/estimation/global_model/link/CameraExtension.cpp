@@ -787,6 +787,7 @@ namespace Vpv
 				CameraLink::CameraLinkSettings settings;
 				settings.p7Wanted = fitWanted;
 				settings.aheadFit = aheadWanted;
+				settings.fit.cpuLabels = !cam.LabelsGpu();
 				st->core->OnSettings(settings);
 				if (st->adapter)
 				{
