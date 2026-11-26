@@ -739,6 +739,7 @@ namespace TdV2GpuWarpNs
 
 			Config cfg = MakePreset(Preset::Reference, Mode::On);
 			cfg.enableLongAnchor = false;
+			cfg.enableCarryForward = true;
 			cfg.residualMode = ResidualMode::Cell;
 			cfg.cellProjIterations = 2;
 
@@ -893,6 +894,11 @@ namespace TdV2GpuWarpNs
 				cfgCell.enableLongAnchor = false;
 				cfgCell.residualMode = ResidualMode::Cell;
 				cfgCell.cellProjIterations = 2;
+				cfgCell.pixelBoundKappa = 3.0;
+				cfgCell.enableJointCrossBandBound = false;
+				cfgCell.enableA2eEmpiricalPrior = false;
+				cfgCell.enableEmpiricalBayesShrinkage = false;
+				cfgCell.enableBandDependentPool = false;
 
 				Config cfgStrict = cfgCell;
 				cfgStrict.residualMode = ResidualMode::Strict;
@@ -900,6 +906,7 @@ namespace TdV2GpuWarpNs
 				GpuEngineGuard gCell(ctx.gpu, cfgCell);
 				GpuEngineGuard gStrict(ctx.gpu, cfgStrict);
 				FrameProcessInput inSame = MakeFrameInput(f2, 20, /*withPeaks=*/true, /*transformIdentified8x8=*/true);
+				inSame.codecModelPb = &f2.prevClean; // Explicit Field-B P_B required under Owner H-1 / TD-U3 for 8x8 DCT POCS!
 
 				const GpuProcessResult rCell = gCell.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inSame, nullptr, nullptr);
 				const GpuProcessResult rStrict = gStrict.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inSame, nullptr, nullptr);
@@ -2233,6 +2240,7 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 					z8In.deadZonePhi = kDeadZonePhiInter;
 					z8In.zeroCoeffFraction = 0.35;
 					z8In.transformIdentified8x8 = true;
+					z8In.codecModelPbTex = eRef.tex; // Explicit Field-B P_B required under Owner H-1 / TD-U3 for 8x8 DCT POCS!
 
 					GpuFrameOutput z8Out;
 					z8Out.outputYTex = eOutY.tex;
@@ -2274,6 +2282,10 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 			// ---- NEGATIVE CONTROL: Mode::On actually modifies pixels (> 2.0 codes) on the exact same input ----
 			Config cfgOn = MakePreset(Preset::Reference, Mode::On);
 			cfgOn.enableLongAnchor = false;
+			cfgOn.enableCarryForward = true;
+			cfgOn.pixelBoundKappa = 3.0;
+			cfgOn.enableA2eEmpiricalPrior = false;
+			cfgOn.enableEmpiricalBayesShrinkage = false;
 			GpuEngineGuard onGuard(ctx.gpu, cfgOn);
 			const GpuProcessResult onRes = onGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, nullptr);
 			Assert::IsTrue(onRes.succeeded, L"Mode::On negative control failed");
@@ -3324,6 +3336,11 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				Config cfgRt = MakePreset(Preset::RealTime, Mode::On);
 				cfgRt.enableLongAnchor = false;
 				cfgRt.enableCarryForward = true;
+				cfgRt.pixelBoundKappa = 3.0;
+				cfgRt.enableJointCrossBandBound = false;
+				cfgRt.enableA2eEmpiricalPrior = false;
+				cfgRt.enableEmpiricalBayesShrinkage = false;
+				cfgRt.enableBandDependentPool = false;
 
 				auto makeGrainFrame = [&](uint64_t seq, const TdV2Plane& rec, const TdV2Plane& cln, bool withLayer2, bool withCarry)
 				{
@@ -3343,7 +3360,7 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 						gIn.carryMotion = stillMf;
 					}
 					gIn.hasStepPrior = true;
-					gIn.estimatedStepDelta = 12.0;
+					gIn.estimatedStepDelta = 28.0;
 					gIn.deadZonePhi = kDeadZonePhiInter;
 					gIn.zeroCoeffFraction = 0.35;
 					return gIn;
@@ -3641,6 +3658,7 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
 				cfg.enableLongAnchor = false;
+				cfg.enableCarryForward = true;
 				GpuEngineGuard wrapGuard(ctx.gpu, cfg);
 				GpuEngineGuard zcGuard(ctx.gpu, cfg);
 
@@ -4268,7 +4286,7 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				hIn.prevPeak = { &fPrevPeak, &stillMf, false };
 				hIn.nextPeak = { &fNextPeak, &stillMf, false };
 				hIn.hasStepPrior = true;
-				hIn.estimatedStepDelta = 14.0;
+				hIn.estimatedStepDelta = 20.0;
 				hIn.deadZonePhi = kDeadZonePhiInter;
 				hIn.zeroCoeffFraction = 0.20;
 				hIn.faceMask = nullptr; // Explicitly UNMASKED non-face subtle micro-motion!
@@ -4277,6 +4295,15 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				Config cfgRefOn = MakePreset(Preset::Reference, Mode::On);
 				cfgRefOn.enableLongAnchor = false;
 				cfgRefOn.enablePerCornerHuber = true;
+				cfgRefOn.pixelBoundKappa = 3.0;
+				cfgRefOn.enableJointCrossBandBound = false;
+				cfgRefOn.enableA2eEmpiricalPrior = false;
+				cfgRefOn.enableEmpiricalBayesShrinkage = false;
+				cfgRefOn.enableBandDependentPool = false;
+				cfgRefOn.solverMode = SolverMode::LegacyClipRescale;
+				cfgRefOn.enableSmoothWarpVectors = false;
+				cfgRefOn.enableHardFbOcclusionGate = false;
+				cfgRefOn.enableSmoothLayer4Guard = false;
 				Config cfgRefOff = cfgRefOn;
 				cfgRefOff.enablePerCornerHuber = false;
 
@@ -4305,6 +4332,15 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				Config cfgRtOn = MakePreset(Preset::RealTime, Mode::On);
 				cfgRtOn.enableLongAnchor = false;
 				cfgRtOn.enablePerCornerHuber = true;
+				cfgRtOn.pixelBoundKappa = 3.0;
+				cfgRtOn.enableJointCrossBandBound = false;
+				cfgRtOn.enableA2eEmpiricalPrior = false;
+				cfgRtOn.enableEmpiricalBayesShrinkage = false;
+				cfgRtOn.enableBandDependentPool = false;
+				cfgRtOn.solverMode = SolverMode::LegacyClipRescale;
+				cfgRtOn.enableSmoothWarpVectors = false;
+				cfgRtOn.enableHardFbOcclusionGate = false;
+				cfgRtOn.enableSmoothLayer4Guard = false;
 				Config cfgRtOff = cfgRtOn;
 				cfgRtOff.enablePerCornerHuber = false;
 
@@ -5050,6 +5086,7 @@ imageStore(dst_alias, p, vec4(v + 1.0, 0.0, 0.0, 0.0));
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
 				cfg.enableLongAnchor = false;
+				cfg.enableCarryForward = true;
 				GpuEngineGuard guard(ctx.gpu, cfg);
 
 				for (bool isCut : { false, true })
@@ -5738,6 +5775,7 @@ imageStore(dst_alias, p, vec4(v + 1.0, 0.0, 0.0, 0.0));
 					GpuFrameInput inAligned = inNon8;
 					inAligned.seq = 1611;
 					inAligned.activeRect = ActiveRect{ 8, 8, 56, 56 };
+					inAligned.codecModelPbTex = inPrevTex.tex;
 					GpuEngineGuard alGuard(ctx.gpu, cfg);
 					GpuFrameOutput alOut = makeBaseOut(/*readbackDiag=*/false);
 					StandInRegistry siAligned;
@@ -5907,7 +5945,8 @@ imageStore(dst_alias, p, vec4(v + 1.0, 0.0, 0.0, 0.0));
 			in.transformIdentified8x8 = true;
 
 			// ---- Part A: Preset::Reference live pl_tex byte introspection (luma + full-res YUV/RGB chroma + Release) ----
-			const Config cfgRef = MakePreset(Preset::Reference, Mode::On);
+			Config cfgRef = MakePreset(Preset::Reference, Mode::On);
+			cfgRef.enableCarryForward = true;
 			GpuEngineGuard guard(ctx.gpu, cfgRef);
 			StandInRegistry reg;
 			Assert::AreEqual(static_cast<uint64_t>(0u), guard.engine.AllocatedPersistentVramBytes(),
@@ -6162,7 +6201,10 @@ imageStore(dst_alias, p, vec4(v + 1.0, 0.0, 0.0, 0.0));
 			const TdV2Plane prevClean = AddCodingDamage(master, 0.5, 17201u, 0.0, full);
 			const TdV2Plane nextClean = AddCodingDamage(master, 0.5, 17202u, 0.0, full);
 
-			const Config cfg = MakePreset(Preset::Reference, Mode::On);
+			Config cfg = MakePreset(Preset::Reference, Mode::On);
+			cfg.estimator = VarianceEstimator::A1_ThreeCorneredHat;
+			cfg.pixelBoundKappa = 3.0;
+			cfg.enableEmpiricalBayesShrinkage = false;
 			FrameProcessInput baseIn;
 			baseIn.seq = 1720;
 			baseIn.receivedY = curY;

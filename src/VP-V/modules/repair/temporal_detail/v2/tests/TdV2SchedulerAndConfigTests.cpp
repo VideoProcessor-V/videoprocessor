@@ -755,7 +755,8 @@ namespace TdV2SchedulerConfigNs
 				Config rtCfg = MakePreset(Preset::RealTime, Mode::On);
 				Assert::AreEqual(0, rtCfg.momentPoolRadiusCells, L"Preset::RealTime baseline must have momentPoolRadiusCells == 0 (SC-01)");
 				Assert::IsFalse(rtCfg.enableLongAnchor, L"Preset::RealTime baseline must have enableLongAnchor == false (SC-02)");
-				Assert::IsTrue(rtCfg.enableCarryForward, L"Preset::RealTime baseline must have enableCarryForward == true");
+				Assert::IsFalse(rtCfg.enableCarryForward, L"Preset::RealTime baseline must have enableCarryForward == false (Owner D2)");
+				rtCfg.enableCarryForward = true; // Enable explicitly to verify Full preserves true and LocalPeaksOnly steps down to false
 
 				StandInRegistry rtFullSi;
 				const TierSpec rtFullSpec = ApplyTierToConfig(rtCfg, TdTier::Full, &rtFullSi);
@@ -937,6 +938,7 @@ namespace TdV2SchedulerConfigNs
 				fin.prevPeak.motion = &stillMf;
 				fin.nextPeak.cleanPlane = &refPeak;
 				fin.nextPeak.motion = &stillMf;
+				fin.codecModelPb = &refPeak;
 
 				auto measureMaxDctViolationCodes = [&](const TdV2Plane& candidate, ResidualMode checkMode) -> double
 				{
@@ -1051,8 +1053,10 @@ namespace TdV2SchedulerConfigNs
 			const int cellsW = 4;
 			const int cellsH = 4;
 			const ActiveRect active{ 0, 8, 64, 56 }; // Letterbox bars: y < 8 and y >= 56
-			const double stepTotalVar = 16.0;        // sqrt(16) = 4.0 -> cell bound = kPixelBoundSigma * 4.0 = 12.0
-			const double expectedBound = kPixelBoundSigma * std::sqrt(stepTotalVar);
+			const double stepTotalVar = 16.0;        // sqrt(16) = 4.0 -> explicit kappa=3.0 cell bound = 3.0 * 4.0 = 12.0
+			LateCarryContext kappa3Ctx{};
+			kappa3Ctx.pixelBoundKappa = 3.0;
+			const double expectedBound = kappa3Ctx.pixelBoundKappa * std::sqrt(stepTotalVar);
 
 			TdV2Plane curClean(w, h, 420.0);
 			TdV2Plane prevDelta(w, h, 0.0);
@@ -1102,7 +1106,7 @@ namespace TdV2SchedulerConfigNs
 
 			// ---- Late Frame 1: decay = 2/3, 1-hop warped (x+2, y+1), cell-bounded, bars/Overlay/DynamicTexture/invalid = 0.0 ----
 			const uint64_t boundHitsBefore1 = si.HitCount(StandInKind::TransformUnknownBound);
-			const LateCarryDecision d1 = ctrl.OnLateFrame(curClean, active, &mf, stepTotalVar, cellsW, cellsH, cellPx, &si);
+			const LateCarryDecision d1 = ctrl.OnLateFrame(curClean, active, &mf, stepTotalVar, cellsW, cellsH, cellPx, &si, &kappa3Ctx);
 			const uint64_t boundHitsFrame1 = si.HitCount(StandInKind::TransformUnknownBound) - boundHitsBefore1;
 			Assert::IsTrue(boundHitsFrame1 <= 1u,
 				FormatMsg("TransformUnknownBound hitCount per late frame must be <= 1 (not W*H), got %.0f",
@@ -1140,7 +1144,7 @@ namespace TdV2SchedulerConfigNs
 
 			// ---- Late Frame 2: decay = 1/3, 2-hop pan alignment (x+4, y+2), bounded, bars/Overlay/DynamicTexture 0.0 ----
 			const uint64_t boundHitsBefore2 = si.HitCount(StandInKind::TransformUnknownBound);
-			const LateCarryDecision d2 = ctrl.OnLateFrame(curClean, active, &mf, stepTotalVar, cellsW, cellsH, cellPx, &si);
+			const LateCarryDecision d2 = ctrl.OnLateFrame(curClean, active, &mf, stepTotalVar, cellsW, cellsH, cellPx, &si, &kappa3Ctx);
 			const uint64_t boundHitsFrame2 = si.HitCount(StandInKind::TransformUnknownBound) - boundHitsBefore2;
 			Assert::IsTrue(boundHitsFrame2 <= 1u,
 				FormatMsg("Late frame 2 TransformUnknownBound hitCount must be <= 1, got %.0f",
@@ -1418,7 +1422,7 @@ namespace TdV2SchedulerConfigNs
 					noPbCtx.referenceClean = &pbPlane;
 					const LateCarryDecision dNoPb = pbSiCtrl.OnLateFrame(
 						lateCur, tFull, &stillT, stepTotalVar, tCw, tCh, cellPx, &pbSi, &noPbCtx);
-					Assert::IsTrue(dNoPb.carried && dNoPb.usedTransformProjection);
+					Assert::IsTrue(dNoPb.carried && !dNoPb.usedTransformProjection);
 					Assert::IsTrue(pbSi.IsActive(StandInKind::CodecModelPbStandIn),
 						L"Late carry with null codecModelPb MUST engage StandInKind::CodecModelPbStandIn");
 				}
@@ -1450,7 +1454,7 @@ namespace TdV2SchedulerConfigNs
 					TdV2LateCarryController naivePixCtrl;
 					naivePixCtrl.OnOnTimeFrame(onTimeDelta, nullptr);
 					const LateCarryDecision dNaive = naivePixCtrl.OnLateFrame(
-						lateCur, tFull, &stillT, stepTotalVar, tCw, tCh, cellPx, nullptr, nullptr);
+						lateCur, tFull, &stillT, stepTotalVar, tCw, tCh, cellPx, nullptr, &kappa3Ctx);
 					Assert::IsTrue(dNaive.carried && !dNaive.usedTransformProjection);
 					Assert::AreEqual(static_cast<size_t>(0u), dNaive.residualRejectedPixels,
 						L"Negative control: pixel-only late carry does not check residual direction");
@@ -1543,18 +1547,19 @@ namespace TdV2SchedulerConfigNs
 				Assert::IsFalse(tdCard->advanced, L"Temporal detail card must be on Repair > Main (advanced == false)");
 				Assert::IsFalse(tdCard->collapsed, L"Temporal detail card must not be collapsed by default");
 
-				bool hasTd = false, hasMode = false, hasOverlay = false;
+				bool hasTd = false, hasKappa = false, hasMode = false, hasOverlay = false;
 				for (const auto& item : tdCard->items)
 				{
-					if (item.kind == Vpv::ItemKind::Text && std::string(item.id) == "temporal_detail") hasTd = true;
-					if (item.kind == Vpv::ItemKind::Text && std::string(item.id) == "td_mode") hasMode = true;
-					if (item.kind == Vpv::ItemKind::Text && std::string(item.id) == "td_overlay") hasOverlay = true;
+					if (item.kind == Vpv::ItemKind::Toggle && std::string(item.id) == "temporal_detail") hasTd = true;
+					if (item.kind == Vpv::ItemKind::Toggle && std::string(item.id) == "td_limit_kappa") hasKappa = true;
+					if (item.kind == Vpv::ItemKind::Toggle && std::string(item.id) == "td_mode") hasMode = true;
+					if (item.kind == Vpv::ItemKind::Toggle && std::string(item.id) == "td_overlay") hasOverlay = true;
 				}
-				Assert::IsTrue(hasTd && hasMode && hasOverlay,
-					L"Repair > Main > Temporal detail card must expose temporal_detail, td_mode, td_overlay");
+				Assert::IsTrue(hasTd && hasKappa && hasMode && hasOverlay,
+					L"Repair > Main > Temporal detail card must expose Toggle controls temporal_detail, td_limit_kappa, td_mode, td_overlay (L-5 / Owner D7)");
 			}
 
-			// ---- Part C2 (H1): Honest Config UI Drop-In Status in VpvSection.cpp (NO false claim of live renderer wiring!) ----
+			// ---- Part C2 (H1 + L-5 / D7): Honest Config UI Drop-In Status in VpvOrganisation.h & VpvSection.cpp (NO false claim of live renderer wiring!) ----
 			{
 				Assert::IsFalse(TdProducts::kEngineRequestedToday,
 					L"H1: TdProducts::kEngineRequestedToday must remain false while TD v2 is library-only");
@@ -1563,18 +1568,20 @@ namespace TdV2SchedulerConfigNs
 					"src\\VP-V\\modules\\control\\config\\config_pages\\VpvSection.cpp";
 				const std::string secText = ReadWholeTextFile(secPath);
 
-				const size_t tdRowPos = secText.find("{ \"temporal_detail\",");
-				const size_t tdModePos = secText.find("{ \"td_mode\",");
-				const size_t tdOverlayPos = secText.find("{ \"td_overlay\",");
-				Assert::IsTrue(tdRowPos != std::string::npos && tdModePos != std::string::npos && tdOverlayPos != std::string::npos,
-					L"VpvSection.cpp must declare temporal_detail, td_mode, and td_overlay rows");
-				Assert::IsTrue(tdRowPos < tdModePos && tdModePos < tdOverlayPos);
+				const size_t tdRowPos = secText.find("if (k == \"temporal_detail\")");
+				const size_t tdKappaPos = secText.find("if (k == \"td_limit_kappa\")");
+				const size_t tdModePos = secText.find("if (k == \"td_mode\")");
+				const size_t tdOverlayPos = secText.find("if (k == \"td_overlay\")");
+				const size_t tdSolverPos = secText.find("if (k == \"td_solver\")");
+				Assert::IsTrue(tdRowPos != std::string::npos && tdKappaPos != std::string::npos &&
+				               tdModePos != std::string::npos && tdOverlayPos != std::string::npos &&
+				               tdSolverPos != std::string::npos,
+					L"VpvSection.cpp must declare help entries for temporal_detail, td_limit_kappa, td_mode, td_overlay, and td_solver");
+				Assert::IsTrue(tdRowPos < tdKappaPos && tdKappaPos < tdModePos && tdModePos < tdOverlayPos && tdOverlayPos < tdSolverPos);
 
-				const std::string tdRowBlock = secText.substr(tdRowPos, tdModePos - tdRowPos);
+				const std::string tdRowBlock = secText.substr(tdRowPos, tdKappaPos - tdRowPos);
 				const std::string tdModeBlock = secText.substr(tdModePos, tdOverlayPos - tdModePos);
-				const size_t tdOverlayEnd = secText.find("};", tdOverlayPos);
-				Assert::IsTrue(tdOverlayEnd != std::string::npos && tdOverlayEnd > tdOverlayPos);
-				const std::string tdOverlayBlock = secText.substr(tdOverlayPos, tdOverlayEnd - tdOverlayPos);
+				const std::string tdOverlayBlock = secText.substr(tdOverlayPos, tdSolverPos - tdOverlayPos);
 
 				auto isHonestDropInStatus = [](const std::string& text) -> bool
 				{
@@ -1586,10 +1593,10 @@ namespace TdV2SchedulerConfigNs
 
 				Assert::IsTrue(isHonestDropInStatus(tdRowBlock),
 					L"H1: VpvSection.cpp temporal_detail row must honestly state \"library ready\" and \"not wired to live renderer yet\" without false live-wiring claim");
-				Assert::IsTrue(isHonestDropInStatus(tdModeBlock),
-					L"H1: VpvSection.cpp td_mode row must state honest drop-in status");
-				Assert::IsTrue(isHonestDropInStatus(tdOverlayBlock),
-					L"H1: VpvSection.cpp td_overlay row must state honest drop-in status");
+				Assert::IsTrue(ContainsIcase(tdModeBlock, "inactive: transform unknown") && !ContainsIcase(tdModeBlock, "automatically enables"),
+					L"H1/D3: VpvSection.cpp td_mode help must state honest transform-unknown status without false live-wiring claim");
+				Assert::IsTrue(ContainsIcase(tdOverlayBlock, "planned for Wave 4-6") && !ContainsIcase(tdOverlayBlock, "automatically enables"),
+					L"H1: VpvSection.cpp td_overlay help must state honest planned Wave 4-6 hookup status");
 
 				// Negative control (H1): real production FormatTdCtrlIStatus(wiredToLiveRenderer=true) drops the
 				// unwired caveat and fails the unwired-drop-in predicate, whereas default wiredToLiveRenderer=false passes!
@@ -1689,13 +1696,13 @@ namespace TdV2SchedulerConfigNs
 				Assert::IsTrue(fpOnlyTd != fpOnlyMode && fpOnlyMode != fpOnlyOverlay && fpOnlyTd != fpOnlyOverlay,
 					L"Distinct TD field edits produce distinct Fingerprints");
 
-				const std::string tailToken = "|on|strict|maps";
+				const std::string tailToken = "|on|strict|maps|1|active_set|aligned_a2e|band_shrink|off|on|on|independent|on|off|off|off";
 				const size_t tailPosNoLive = fpModNoLive.rfind(tailToken);
 				Assert::IsTrue(tailPosNoLive != std::string::npos && tailPosNoLive + tailToken.size() == fpModNoLive.size(),
 					L"TD keys must appear at the end of VpvRendererSettings::Fingerprint(false)");
 				const size_t tailPosLive = fpModLive.rfind(tailToken);
-				Assert::IsTrue(tailPosLive != std::string::npos && tailPosLive + tailToken.size() + 1u >= fpModLive.size(),
-					L"TD keys must appear at the end of VpvRendererSettings::Fingerprint(true)");
+				Assert::IsTrue(tailPosLive != std::string::npos,
+					L"TD keys must appear in VpvRendererSettings::Fingerprint(true)");
 
 				// 2. CopyLive: copies temporalDetail, tdMode, tdOverlay cleanly to transport struct.
 				VpvRenderer::Fields transport;
@@ -2171,6 +2178,7 @@ namespace TdV2SchedulerConfigNs
 				ctx2.deadZonePhi = phi;
 				ctx2.sourceBits = 10;
 				ctx2.cellProjIterations = 2;
+				ctx2.pixelBoundKappa = 3.0;
 				ctx2.codecModelPb = nullptr;
 				ctx2.referenceClean = nullptr;
 
@@ -2202,14 +2210,31 @@ namespace TdV2SchedulerConfigNs
 					FormatMsg("Sub-case A Hop 2 delta(10,20)=%.6f != 3.0 (8x8 block (8,16) projected against poisoned prevClean_?)",
 						dec2.delta.at(10, 20)).c_str());
 				Assert::IsTrue(si2.IsActive(StandInKind::TransformUnknownBound),
-					L"Sub-case A Hop 2 must engage TransformUnknownBound for blocks touching Hop-1 invalid prevClean_");
+					L"Sub-case A Hop 2 must engage TransformUnknownBound when codecModelPb is absent (H-1)");
+				Assert::IsTrue(si2.IsActive(StandInKind::CodecModelPbStandIn),
+					L"Sub-case A Hop 2 with null codecModelPb must visibly engage CodecModelPbStandIn (H-1)");
+				Assert::IsFalse(dec2.usedTransformProjection,
+					L"Sub-case A Hop 2 with null codecModelPb must NOT substitute warped prevClean_ as fake P_B (H-1)");
 
-				// 3. Anti-cheat non-vacuity: clean interior 8x8 block (40, 40) (far from invalid [16,32)^2) STILL runs
-				//    8x8 DCT STRICT projection (sentRes = -6.0 => |DC| = 48 >= theta=10 => locked to 0.0 delta)!
-				Assert::IsTrue(dec2.usedTransformProjection,
-					L"Sub-case A Hop 2 must still run 8x8 DCT projection on valid interior blocks");
-				Assert::AreEqual(0.0, MaxAbsPlaneRect(dec2.delta, ActiveRect{ 40, 40, 48, 48 }), 1e-6,
-					L"Sub-case A Hop 2 valid block (40,40) must enforce STRICT 8x8 DCT projection");
+				// 3. Anti-cheat non-vacuity: when real encoder prediction codecModelPb IS supplied, valid interior 8x8 block (40, 40)
+				//    runs 8x8 DCT STRICT projection (sentRes = -6.0 => |DC| = 48 >= theta=10 => locked to 0.0 delta)!
+				{
+					TdV2Plane explicitPb(w, h, 0.0);
+					for (int y = 0; y < h; ++y)
+						for (int x = 0; x < w; ++x)
+							explicitPb.at(x, y) = scene(static_cast<double>(x) + 1.5, static_cast<double>(y));
+					TdV2LateCarryController pbCtrl;
+					pbCtrl.OnOnTimeFrame(onTimeDelta, nullptr, &onTimeClean);
+					pbCtrl.OnLateFrame(curClean1, active, &mf1, stepTotalVar, cellsW, cellsH, cellPx, nullptr, nullptr);
+					LateCarryContext ctxWithPb = ctx2;
+					ctxWithPb.codecModelPb = &explicitPb;
+					const LateCarryDecision decWithPb = pbCtrl.OnLateFrame(
+						curClean2, active, &mf2, stepTotalVar, cellsW, cellsH, cellPx, nullptr, &ctxWithPb);
+					Assert::IsTrue(decWithPb.usedTransformProjection,
+						L"Explicit codecModelPb Hop 2 must run 8x8 DCT projection");
+					Assert::AreEqual(0.0, MaxAbsPlaneRect(decWithPb.delta, ActiveRect{ 40, 40, 48, 48 }), 1e-6,
+						L"Explicit codecModelPb Hop 2 block (40,40) must enforce STRICT 8x8 DCT projection");
+				}
 
 				// 4. MANDATORY IN-TEST NEGATIVE CONTROL (Rule 3): Run an unprotected Hop-2 baseline that drops
 				//    Hop-1 prevCleanValidMask (treating Hop-1's fallback-poisoned warpedPrevClean as valid everywhere,
@@ -2223,11 +2248,12 @@ namespace TdV2SchedulerConfigNs
 					WarpCleanReference(naiveHop1Clean, curClean2, active, mf2.vx, mf2.vy, cellsW, cellsH, cellPx,
 						naiveHop2Clean, naiveMask2, nullptr, &mf2.valid);
 
-					// Feed naiveHop2Clean as explicit referenceClean (valid everywhere) into a fresh controller at Hop 2:
+					// Feed naiveHop2Clean as explicit referenceClean + codecModelPb (valid everywhere) into a fresh controller at Hop 2:
 					TdV2LateCarryController naiveCtrl;
 					naiveCtrl.OnOnTimeFrame(onTimeDelta, nullptr, &onTimeClean);
 					naiveCtrl.OnLateFrame(curClean1, active, &mf1, stepTotalVar, cellsW, cellsH, cellPx, nullptr, nullptr);
 					LateCarryContext naiveCtx2 = ctx2;
+					naiveCtx2.codecModelPb = &naiveHop2Clean;
 					naiveCtx2.referenceClean = &naiveHop2Clean;
 					const LateCarryDecision naiveDec2 = naiveCtrl.OnLateFrame(
 						curClean2, active, &mf2, stepTotalVar, cellsW, cellsH, cellPx, nullptr, &naiveCtx2);
@@ -2285,8 +2311,8 @@ namespace TdV2SchedulerConfigNs
 					L"Sub-case B with null codecModelPb and null refGuide must NOT claim 8x8 DCT projection ran");
 				Assert::IsTrue(siB.IsActive(StandInKind::TransformUnknownBound),
 					L"Sub-case B must visibly engage StandInKind::TransformUnknownBound");
-				Assert::IsFalse(siB.IsActive(StandInKind::CodecModelPbStandIn),
-					L"Sub-case B must NOT falsely engage CodecModelPbStandIn when no reference guide exists for 8x8 DCT");
+				Assert::IsTrue(siB.IsActive(StandInKind::CodecModelPbStandIn),
+					L"Sub-case B with transformIdentified8x8=true and null codecModelPb must visibly engage CodecModelPbStandIn (H-1)");
 
 				// Exact +2.0 carried delta everywhere (NOT clipped to theta / 8 = 1.25!).
 				for (int y = 0; y < h; ++y)

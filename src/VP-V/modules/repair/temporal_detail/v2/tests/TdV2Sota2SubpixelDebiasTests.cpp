@@ -287,6 +287,14 @@ namespace TdV2Sota2SubpixelDebiasNs
 			cfgOff.enableLongAnchor = false;
 			cfgOff.enableCarryForward = false;
 			cfgOff.estimator = VarianceEstimator::A3_ConservativeMin;
+			cfgOff.pixelBoundKappa = 3.0;
+			cfgOff.enableJointCrossBandBound = false;
+			cfgOff.enableA2eEmpiricalPrior = false;
+			cfgOff.enableEmpiricalBayesShrinkage = false;
+			cfgOff.enableBandDependentPool = false;
+			cfgOff.solverMode = SolverMode::LegacyClipRescale;
+			cfgOff.enableSmoothWarpVectors = false;
+			cfgOff.enableSmoothLayer4Guard = false;
 			cfgOff.enableSubpixelHAttenuationDebias = false;
 
 			Config cfgOn = cfgOff;

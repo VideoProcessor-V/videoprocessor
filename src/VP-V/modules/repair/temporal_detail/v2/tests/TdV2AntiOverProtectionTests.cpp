@@ -334,7 +334,7 @@ namespace TdV2AntiOverProtectionNs
 				for (int cx = 0; cx < cw; ++cx)
 				{
 					const size_t idx = static_cast<size_t>(cy * cw + cx);
-					cellStepScales[idx] = (cx < 4) ? ComputeCellStepScale(6.0, 520.0, false, 10.0) : 1.0;
+					cellStepScales[idx] = (cx < 4) ? ComputeCellStepScale(6.0, 520.0, false, 10.0, true) : 1.0;
 				}
 			}
 
@@ -356,6 +356,12 @@ namespace TdV2AntiOverProtectionNs
 				c.enableSubpixelHAttenuationDebias = true;
 				c.enableEdgeAwareWeightUpsample = true;
 				c.enableNeighborhoodSoftClamp = true;
+				c.pixelBoundKappa = 3.0;
+				c.enableAqStepScaling = true;
+				c.enableA2eEmpiricalPrior = false;
+				c.enableEmpiricalBayesShrinkage = false;
+				c.enableJointCrossBandBound = false;
+				c.enableBandDependentPool = false;
 				return c;
 			};
 
@@ -392,7 +398,7 @@ namespace TdV2AntiOverProtectionNs
 			bIn.cellStepScale = cellStepScales;
 			bIn.psdShape = filmPsd;
 			bIn.hasStepPrior = true;
-			bIn.estimatedStepDelta = 18.0; // Nominal step; cellStepScale=2.0 unlocks 36.0 in AQ cells!
+			bIn.estimatedStepDelta = 42.0; // Nominal step; cellStepScale=2.0 unlocks 84.0 in AQ cells under H-1 bandTransfer!
 			bIn.deadZonePhi = kDeadZonePhiInter;
 			bIn.zeroCoeffFraction = 0.35;
 
@@ -584,6 +590,16 @@ namespace TdV2AntiOverProtectionNs
 				Config cfgRef = MakePreset(Preset::Reference, Mode::On);
 				cfgRef.enableLongAnchor = false;
 				cfgRef.enableCarryForward = false;
+				cfgRef.solverMode = SolverMode::LegacyClipRescale;
+				cfgRef.pixelBoundKappa = 3.0;
+				cfgRef.enableAqStepScaling = true;
+				cfgRef.enableA2eEmpiricalPrior = false;
+				cfgRef.enableEmpiricalBayesShrinkage = false;
+				cfgRef.enableJointCrossBandBound = false;
+				cfgRef.enableBandDependentPool = false;
+				cfgRef.enableSmoothWarpVectors = false;
+				cfgRef.enableHardFbOcclusionGate = false;
+				cfgRef.enableSmoothLayer4Guard = false;
 
 				FrameProcessInput baseIn;
 				baseIn.seq = 400;
@@ -601,10 +617,10 @@ namespace TdV2AntiOverProtectionNs
 				const double inMidRms = RmsDiffRect(curBands.M, masterBands.M, interior);
 				Assert::IsTrue(inCleanRms > 9.0 && inMidRms > 6.0);
 
-				// Check A1: stepDelta = 20.0, unit cellStepScale (1.0) -> 0 false focus vetoes despite curF <= fDefocus!
+				// Check A1: stepDelta = 48.0 (under H-1 bandTransfer), unit cellStepScale (1.0) -> 0 false focus vetoes despite curF <= fDefocus!
 				{
 					FrameProcessInput in14 = baseIn;
-					in14.estimatedStepDelta = 20.0;
+					in14.estimatedStepDelta = 48.0;
 					TdV2ReferenceEngine cpu14(cfgRef);
 					EngineGuard gpu14(ctx.gpu, cfgRef);
 					const FrameProcessResult cRes14 = cpu14.ProcessFrame(in14, nullptr);
@@ -620,11 +636,11 @@ namespace TdV2AntiOverProtectionNs
 						L"Focused B-frame with coarse D3 ramp must strongly recover wiped M/H texture");
 				}
 
-				// Check A2: Per-cell cellStepScale scaling in FocusGuard (nominal stepDelta = 5.0, +12 QP AQ cellStepScale = 4.0)
+				// Check A2: Per-cell cellStepScale scaling in FocusGuard (nominal stepDelta = 5.0, +18 QP AQ cellStepScale = 8.0)
 				// + Mandatory Same-Input Negative Control (cellStepScale = 1.0 on exact same stepDelta = 5.0 inputs)!
 				{
-					const double aqScale = ComputeCellStepScale(12.0, 500.0, false, 10.0); // 4.0
-					Assert::AreEqual(4.0, aqScale, 1e-12);
+					const double aqScale = ComputeCellStepScale(18.0, 500.0, false, 10.0, true); // 8.0
+					Assert::AreEqual(8.0, aqScale, 1e-12);
 
 					FrameProcessInput inUnscaled = baseIn;
 					inUnscaled.seq = 401;
@@ -664,6 +680,12 @@ namespace TdV2AntiOverProtectionNs
 					// Also verify Preset::RealTime on WARP GPU respects cellStepScale in FocusGuard!
 					Config cfgRt = MakePreset(Preset::RealTime, Mode::On);
 					cfgRt.enableCarryForward = false;
+					cfgRt.enableAqStepScaling = true;
+					cfgRt.pixelBoundKappa = 3.0;
+					cfgRt.enableA2eEmpiricalPrior = false;
+					cfgRt.enableEmpiricalBayesShrinkage = false;
+					cfgRt.enableJointCrossBandBound = false;
+					cfgRt.enableBandDependentPool = false;
 					EngineGuard gpuRt(ctx.gpu, cfgRt);
 					const GpuProcessResult gScRt = gpuRt.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inScaled, nullptr, nullptr);
 					Assert::IsTrue(gScRt.succeeded);

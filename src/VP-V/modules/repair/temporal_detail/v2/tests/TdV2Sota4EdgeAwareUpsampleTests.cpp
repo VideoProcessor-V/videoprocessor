@@ -280,6 +280,14 @@ namespace TdV2Sota4EdgeAwareUpsampleNs
 				cfgBilin.enableLongAnchor = false;
 				cfgBilin.enableCarryForward = false;
 				cfgBilin.momentPoolRadiusCells = 0; // Unpooled per-cell solve isolates cx=1 cleanly
+				cfgBilin.enableBandDependentPool = false;
+				cfgBilin.pixelBoundKappa = 3.0;
+				cfgBilin.enableJointCrossBandBound = false;
+				cfgBilin.enableA2eEmpiricalPrior = false;
+				cfgBilin.enableEmpiricalBayesShrinkage = false;
+				cfgBilin.solverMode = SolverMode::LegacyClipRescale;
+				cfgBilin.enableSmoothWarpVectors = false;
+				cfgBilin.enableSmoothLayer4Guard = false;
 				cfgBilin.enablePerCornerHuber = true;
 				cfgBilin.enableEdgeAwareWeightUpsample = false;
 

@@ -459,7 +459,10 @@ namespace TdV2MinorsTestsNs
 
 			// 1. Mandatory Same-Input Negative Control (no focus/bokeh masks): BOTH cells recover strong L+M+H chroma!
 			Config cfgUntouched = MakePreset(Preset::Reference, Mode::On);
+			cfgUntouched.estimator = VarianceEstimator::A1_ThreeCorneredHat;
 			cfgUntouched.bokehMode = BokehMode::Untouched;
+			cfgUntouched.pixelBoundKappa = 3.0;
+			cfgUntouched.enableEmpiricalBayesShrinkage = false;
 			TdV2ChromaEngine engCtrl(cfgUntouched);
 			const ChromaProcessResult resCtrl = engCtrl.ProcessFrame(baseIn, nullptr);
 			const ThreeBandPlanes ctrlCodedBands = DecomposeActiveBands(resCtrl.codedDeltaCb, ActiveRect::Full(cW, cH));

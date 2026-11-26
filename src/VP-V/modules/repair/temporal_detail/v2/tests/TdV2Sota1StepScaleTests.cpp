@@ -215,18 +215,19 @@ namespace TdV2Sota1StepScaleNs
 	public:
 		TEST_METHOD(ComputeCellStepScaleExactCodec6QpLawAndSt2084PqPhysics)
 		{
-			// 1. Exact HEVC / AVC / AV1 6-QP doubling law (isPqHdr == false): 2^(dQP / 6)
-			Assert::AreEqual(1.0, ComputeCellStepScale(0.0, 0.0, false, 10.0), 1e-15, L"dQP=0 SDR must be exact 1.0");
-			Assert::AreEqual(2.0, ComputeCellStepScale(6.0, 500.0, false, 10.0), 1e-14, L"dQP=+6 must double step scale");
-			Assert::AreEqual(4.0, ComputeCellStepScale(12.0, 500.0, false, 10.0), 1e-14, L"dQP=+12 must quadruple step scale");
-			Assert::AreEqual(16.0, ComputeCellStepScale(24.0, 500.0, false, 10.0), 1e-13, L"dQP=+24 must hit 16x");
-			Assert::AreEqual(0.5, ComputeCellStepScale(-6.0, 500.0, false, 10.0), 1e-15, L"dQP=-6 must halve step scale");
-			Assert::AreEqual(0.25, ComputeCellStepScale(-12.0, 500.0, false, 10.0), 1e-15, L"dQP=-12 must quarter step scale");
-			Assert::AreEqual(0.0625, ComputeCellStepScale(-24.0, 500.0, false, 10.0), 1e-15, L"dQP=-24 must hit 1/16");
+			// 1. Exact HEVC / AVC / AV1 6-QP doubling law (isPqHdr == false): 2^(dQP / 6) when enableAqStepScaling == true; 1.0 default OFF (M-6)
+			Assert::AreEqual(1.0, ComputeCellStepScale(6.0, 500.0, false, 10.0), 1e-15, L"Default enableAqStepScaling==false must leave AQ inert (1.0)");
+			Assert::AreEqual(1.0, ComputeCellStepScale(0.0, 0.0, false, 10.0, true), 1e-15, L"dQP=0 SDR must be exact 1.0");
+			Assert::AreEqual(2.0, ComputeCellStepScale(6.0, 500.0, false, 10.0, true), 1e-14, L"dQP=+6 must double step scale");
+			Assert::AreEqual(4.0, ComputeCellStepScale(12.0, 500.0, false, 10.0, true), 1e-14, L"dQP=+12 must quadruple step scale");
+			Assert::AreEqual(16.0, ComputeCellStepScale(24.0, 500.0, false, 10.0, true), 1e-13, L"dQP=+24 must hit 16x");
+			Assert::AreEqual(0.5, ComputeCellStepScale(-6.0, 500.0, false, 10.0, true), 1e-15, L"dQP=-6 must halve step scale");
+			Assert::AreEqual(0.25, ComputeCellStepScale(-12.0, 500.0, false, 10.0, true), 1e-15, L"dQP=-12 must quarter step scale");
+			Assert::AreEqual(0.0625, ComputeCellStepScale(-24.0, 500.0, false, 10.0, true), 1e-15, L"dQP=-24 must hit 1/16");
 
 			// Derived +/-24 QP [1/16, 16] saturation bounds
-			Assert::AreEqual(kCellStepScaleMax, ComputeCellStepScale(36.0, 500.0, false, 10.0), 1e-14, L"dQP=+36 must clamp to kCellStepScaleMax=16");
-			Assert::AreEqual(kCellStepScaleMin, ComputeCellStepScale(-42.0, 500.0, false, 10.0), 1e-15, L"dQP=-42 must clamp to kCellStepScaleMin=1/16");
+			Assert::AreEqual(kCellStepScaleMax, ComputeCellStepScale(36.0, 500.0, false, 10.0, true), 1e-14, L"dQP=+36 must clamp to kCellStepScaleMax=16");
+			Assert::AreEqual(kCellStepScaleMin, ComputeCellStepScale(-42.0, 500.0, false, 10.0, true), 1e-15, L"dQP=-42 must clamp to kCellStepScaleMin=1/16");
 
 			// Non-finite / malformed inputs fall back safely to 1.0
 			const double kNaN = std::numeric_limits<double>::quiet_NaN();
@@ -253,8 +254,8 @@ namespace TdV2Sota1StepScaleNs
 			Assert::AreEqual(1.0, ComputeCellStepScale(0.0, e203 * 4095.0, true, 12.0), 1e-12,
 				L"ITU-R BT.2408 diffuse white (203 nits) at 12-bit must give exact 1.0 PQ step weight");
 
-			// Check interior un-clamped nits levels against independent central-difference Weber slope ratio
-			const double testNits[] = { 8.0, 35.0, 100.0, 500.0, 1000.0 };
+			// Check interior nits levels against independent central-difference Weber slope ratio capped at kPqStepWeightMax = 1.0 (M-1)
+			const double testNits[] = { 8.0, 35.0, 100.0, 200.0 };
 			double prevScale = 0.0;
 			for (size_t i = 0; i < sizeof(testNits) / sizeof(testNits[0]); ++i)
 			{
@@ -263,24 +264,25 @@ namespace TdV2Sota1StepScaleNs
 				const double got = ComputeCellStepScale(0.0, e * 1023.0, true, 10.0);
 				Assert::AreEqual(expectedRatio, got, 1e-5,
 					FmtMsg("PQ Weber slope mismatch at %.1f nits: expected=%.6f got=%.6f", testNits[i], expectedRatio, got).c_str());
-				Assert::IsTrue(got > prevScale, L"PQ step weight must increase monotonically from shadow toe to highlights");
+				Assert::IsTrue(got > prevScale, L"PQ step weight must increase monotonically from shadow toe up to 203-nit diffuse white");
 				prevScale = got;
 			}
+			Assert::AreEqual(1.0, ComputeCellStepScale(0.0, IndependentPqNitsToSignal(1000.0) * 1023.0, true, 10.0), 1e-12,
+				L"M-1: PQ highlight above 203 nits must cap strictly at kPqStepWeightMax == 1.0 (never loosen above 1.0)");
 
-			// Deep PQ toe / pure black clamps to kPqStepWeightMin = 0.25; 10000-nit peak matches exact ST.2084 Weber flatness (~1.00138)
+			// Deep PQ toe / pure black clamps to kPqStepWeightMin = 0.25; 10000-nit peak clamps strictly to kPqStepWeightMax = 1.0 (M-1)
 			Assert::AreEqual(kPqStepWeightMin, ComputeCellStepScale(0.0, 0.0, true, 10.0), 1e-15,
 				L"Pure black PQ code 0 must clamp to shadow floor 0.25");
 			const double eDeepToe = IndependentPqNitsToSignal(0.01);
 			Assert::AreEqual(kPqStepWeightMin, ComputeCellStepScale(0.0, eDeepToe * 1023.0, true, 10.0), 1e-12,
 				L"0.01-nit PQ deep toe must clamp to shadow floor 0.25");
-			const double expectedPeakWeber = s203 / numericLogSlope(1.0 - 2e-6);
-			Assert::AreEqual(expectedPeakWeber, ComputeCellStepScale(0.0, 1023.0, true, 10.0), 1e-4,
-				L"10000-nit PQ peak code 1023 must match exact SMPTE ST.2084 Weber slope ratio (~1.00138)");
+			Assert::AreEqual(kPqStepWeightMax, ComputeCellStepScale(0.0, 1023.0, true, 10.0), 1e-12,
+				L"M-1: 10000-nit PQ peak code 1023 must clamp strictly to kPqStepWeightMax == 1.0");
 
 			// High-AQ dark cell (+15 QP in 5-nit PQ shadow): AQ doubling (+15 QP -> 5.657x) overcomes PQ shadow
 			// tightening (~0.35x) to yield scale > 1.8 (> 1.0), whereas naive AQ-ignorant scale stays 1.0!
 			const double e5Nits = IndependentPqNitsToSignal(5.0);
-			const double darkHighAqScale = ComputeCellStepScale(15.0, e5Nits * 1023.0, true, 10.0);
+			const double darkHighAqScale = ComputeCellStepScale(15.0, e5Nits * 1023.0, true, 10.0, true);
 			Assert::IsTrue(darkHighAqScale > 1.8 && darkHighAqScale < 4.0,
 				FmtMsg("High-AQ (+15 QP) 5-nit PQ dark cell scale=%.4f expected in (1.8, 4.0)", darkHighAqScale).c_str());
 		}
@@ -355,8 +357,8 @@ namespace TdV2Sota1StepScaleNs
 
 			const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
-			const double darkScale = ComputeCellStepScale(18.0, 230.0, true, 10.0);  // > 2.5
-			const double tightScale = ComputeCellStepScale(-9.0, 580.0, true, 10.0); // < 0.40
+			const double darkScale = ComputeCellStepScale(18.0, 230.0, true, 10.0, true);  // > 2.5
+			const double tightScale = ComputeCellStepScale(-9.0, 580.0, true, 10.0, true); // < 0.40
 			Assert::IsTrue(darkScale > 2.5, FmtMsg("Expected darkScale > 2.5, got %.4f", darkScale).c_str());
 			Assert::IsTrue(tightScale < 0.40, FmtMsg("Expected tightScale < 0.40, got %.4f", tightScale).c_str());
 
@@ -384,6 +386,16 @@ namespace TdV2Sota1StepScaleNs
 				cfg.estimator = VarianceEstimator::A3_ConservativeMin;
 				cfg.residualMode = ResidualMode::Cell;
 				cfg.cellProjIterations = 2;
+				cfg.solverMode = SolverMode::LegacyClipRescale;
+				cfg.enableAqStepScaling = true;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.enableJointCrossBandBound = false;
+				cfg.enableBandDependentPool = false;
+				cfg.enableSmoothWarpVectors = false;
+				cfg.enableHardFbOcclusionGate = false;
+				cfg.enableSmoothLayer4Guard = false;
 
 				FrameProcessInput baseIn;
 				baseIn.seq = static_cast<uint64_t>(100 + passMode);
@@ -394,10 +406,12 @@ namespace TdV2Sota1StepScaleNs
 				baseIn.prevPeak = { &prevClean, &stillMf, false };
 				baseIn.nextPeak = { &nextClean, &stillMf, false };
 				baseIn.hasStepPrior = true;
-				baseIn.estimatedStepDelta = 9.0; // Nominal frame step: scale==1.0 clears >1.5 RMS in tightRect while darkScale>2.5 unlocks dark AQ!
+				baseIn.estimatedStepDelta = 12.0; // Nominal frame step (under H-1 bandTransfer): scale==1.0 clears >1.5 RMS in tightRect while darkScale>2.5 unlocks dark AQ!
 				baseIn.deadZonePhi = kDeadZonePhiInter;
 				baseIn.zeroCoeffFraction = 0.35;
 				baseIn.transformIdentified8x8 = xform8x8;
+				if (xform8x8)
+					baseIn.codecModelPb = &prevClean;
 
 				FrameProcessInput unitIn = baseIn;
 				unitIn.cellStepScale = unitScales;

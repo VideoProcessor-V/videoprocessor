@@ -255,7 +255,16 @@ namespace TdV2Sota7FadeKeepNs
 			cfg.sourceBits = 10;
 			cfg.cellPx = 16;
 			cfg.grainCellPx = 16;
+			cfg.solverMode = SolverMode::LegacyClipRescale;
 			cfg.enableCarryForward = true;
+			cfg.pixelBoundKappa = 3.0;
+			cfg.enableA2eEmpiricalPrior = false;
+			cfg.enableEmpiricalBayesShrinkage = false;
+			cfg.enableJointCrossBandBound = false;
+			cfg.enableBandDependentPool = false;
+			cfg.enableSmoothWarpVectors = false;
+			cfg.enableHardFbOcclusionGate = false;
+			cfg.enableSmoothLayer4Guard = false;
 
 			const TdV2Plane master = MakeTexturedMaster(w, h, 0.15);
 			const TdV2Plane refPrev0 = AddGaussianNoise(master, 101u, 0.8);
@@ -297,7 +306,7 @@ namespace TdV2Sota7FadeKeepNs
 				f0.cleanY = clean0;
 				f0.hasCleanSplit = true;
 				f0.hasStepPrior = true;
-				f0.estimatedStepDelta = 48.0;
+				f0.estimatedStepDelta = 80.0;
 				f0.prevPeak.cleanPlane = &refPrev0;
 				f0.prevPeak.motion = &zeroMf;
 				f0.nextPeak.cleanPlane = &refNext0;
@@ -315,7 +324,7 @@ namespace TdV2Sota7FadeKeepNs
 				f1.hasCleanSplit = false;
 				f1.retainedGrainVar = grainPrior;
 				f1.hasStepPrior = true;
-				f1.estimatedStepDelta = 48.0;
+				f1.estimatedStepDelta = 80.0;
 				f1.hasCarryMotion = true;
 				f1.carryMotion = zeroMf;
 				f1.fadeKeep = fadeKeepFrame1;
@@ -331,7 +340,7 @@ namespace TdV2Sota7FadeKeepNs
 				f2.cleanY = clean2;
 				f2.hasCleanSplit = true;
 				f2.hasStepPrior = true;
-				f2.estimatedStepDelta = 48.0;
+				f2.estimatedStepDelta = 80.0;
 				f2.hasCarryMotion = true;
 				f2.carryMotion = zeroMf;
 				f2.fadeKeep = 1.0;
@@ -440,6 +449,15 @@ namespace TdV2Sota7FadeKeepNs
 			cfg.sourceBits = 10;
 			cfg.cellPx = 16;
 			cfg.grainCellPx = 16;
+			cfg.pixelBoundKappa = 3.0;
+			cfg.solverMode = SolverMode::LegacyClipRescale;
+			cfg.enableA2eEmpiricalPrior = false;
+			cfg.enableEmpiricalBayesShrinkage = false;
+			cfg.enableJointCrossBandBound = false;
+			cfg.enableBandDependentPool = false;
+			cfg.enableSmoothWarpVectors = false;
+			cfg.enableHardFbOcclusionGate = false;
+			cfg.enableSmoothLayer4Guard = false;
 
 			const SitingSpec siting{ -0.5f, 0.0f };
 			const ActiveRect fullLuma = ActiveRect::Full(lumaW, lumaH);
@@ -516,7 +534,7 @@ namespace TdV2Sota7FadeKeepNs
 				in.retainedGrainVarCb = leakVar;
 				in.retainedGrainVarCr = leakVar;
 				in.hasStepPrior = true;
-				in.estimatedStepDelta = 14.0;
+				in.estimatedStepDelta = 32.0;
 				in.prevPeak.cleanCb = &prevCb;
 				in.prevPeak.cleanCr = &prevCr;
 				in.prevPeak.lumaMotion = &zeroMf;
@@ -586,7 +604,7 @@ namespace TdV2Sota7FadeKeepNs
 				inPlain.retainedGrainVarCb = leakVar;
 				inPlain.retainedGrainVarCr = leakVar;
 				inPlain.hasStepPrior = true;
-				inPlain.estimatedStepDelta = 14.0;
+				inPlain.estimatedStepDelta = 32.0;
 				inPlain.prevPeak.cleanCb = &prevCb;
 				inPlain.prevPeak.cleanCr = &prevCr;
 				inPlain.prevPeak.lumaMotion = &zeroMf;

@@ -708,8 +708,9 @@ namespace Tests
 
 				// Transform-unknown pixel-domain bound MUST set visible "transform unknown" stand-in token!
 				StandInRegistry reg;
-				const double bounded = ApplyTransformUnknownBound(50.0, 16.0, &reg); // sigma = 4 -> bound = 12
-				Assert::AreEqual(12.0, bounded, 1e-12);
+				const double bounded = ApplyTransformUnknownBound(50.0, 16.0, &reg); // Owner D3 default kappa=1.0, sigma=4 -> bound=4
+				Assert::AreEqual(4.0, bounded, 1e-12);
+				Assert::AreEqual(12.0, ApplyTransformUnknownBound(50.0, 16.0, &reg, 3.0), 1e-12);
 				Assert::IsTrue(reg.IsActive(StandInKind::TransformUnknownBound), L"Transform-unknown bound must be visible");
 				Assert::IsTrue(reg.FormatStatusSummary().find("transform unknown") != std::string::npos);
 			}

@@ -317,6 +317,9 @@ namespace TdV2Sota9MotionConfidenceNs
 			cfg.mode = Mode::On;
 			cfg.sourceBits = 10;
 			cfg.cellPx = 16;
+			cfg.pixelBoundKappa = 3.0;
+			cfg.enableA2eEmpiricalPrior = false;
+			cfg.enableEmpiricalBayesShrinkage = false;
 
 			const double confSteps[5] = { 1.0, 0.75, 0.50, 0.25, 0.0 };
 			double lumaRmsCpu[5] = {};
@@ -496,6 +499,9 @@ namespace TdV2Sota9MotionConfidenceNs
 			cfg.mode = Mode::On;
 			cfg.sourceBits = 10;
 			cfg.cellPx = 16;
+			cfg.pixelBoundKappa = 3.0;
+			cfg.enableA2eEmpiricalPrior = false;
+			cfg.enableEmpiricalBayesShrinkage = false;
 
 			// Upload 32-bit float luma textures for zero-copy ProcessFrameGpu.
 			auto toFloatVec = [](const TdV2Plane& p) -> std::vector<float>

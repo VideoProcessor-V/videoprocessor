@@ -290,6 +290,10 @@ namespace Tests
 
 					Config cfgPartner = MakePreset(Preset::Reference, Mode::On);
 					cfgPartner.estimator = VarianceEstimator::A1_ThreeCorneredHat;
+					cfgPartner.enableCarryForward = true;
+					cfgPartner.pixelBoundKappa = 3.0;
+					cfgPartner.enableA2eEmpiricalPrior = false;
+					cfgPartner.enableEmpiricalBayesShrinkage = false;
 					TdV2ReferenceEngine engP(cfgPartner);
 					StandInRegistry regP;
 
@@ -324,6 +328,9 @@ namespace Tests
 					// Verify kTrailConfidence1 sums carry (k == 2) even when BOTH prevPeak & nextPeak are exact copies!
 					Config cfgCarryOnly = MakePreset(Preset::Reference, Mode::On);
 					cfgCarryOnly.estimator = VarianceEstimator::A2_RoundingCells;
+					cfgCarryOnly.enableCarryForward = true;
+					cfgCarryOnly.pixelBoundKappa = 3.0;
+					cfgCarryOnly.enableA2eEmpiricalPrior = false;
 					TdV2ReferenceEngine engCO(cfgCarryOnly);
 					engCO.ProcessFrame(s1, &regP);
 					FrameProcessInput s3 = s2;
@@ -391,6 +398,12 @@ namespace Tests
 				}
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableCarryForward = true;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.enableBandDependentPool = false;
+				cfg.enableJointCrossBandBound = false;
 				TdV2ReferenceEngine eng(cfg);
 				StandInRegistry reg;
 
@@ -647,6 +660,12 @@ namespace Tests
 				}
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableCarryForward = true;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.enableBandDependentPool = false;
+				cfg.enableJointCrossBandBound = false;
 				TdV2ReferenceEngine eng(cfg);
 				StandInRegistry reg;
 
@@ -809,25 +828,35 @@ namespace Tests
 					f2NoL2.nextPeak = { &peakNextCleanImp, &stillMf, false };
 					f2NoL2.hasCarryMotion = true;
 					f2NoL2.carryMotion = stillMf;
-					f2NoL2.hasStepPrior = true;
-					f2NoL2.estimatedStepDelta = 12.0;
-					const auto r2NoL2 = engNoL2.ProcessFrame(f2NoL2, &regNoL2);
+				f2NoL2.hasStepPrior = true;
+				f2NoL2.estimatedStepDelta = 12.0;
+				const auto r2NoL2 = engNoL2.ProcessFrame(f2NoL2, &regNoL2);
 
-					std::vector<double> prevResNoL2(n);
-					for (size_t i = 0; i < n; ++i)
-						prevResNoL2[i] = r1NoL2.outputY.v[i] - masterClean.v[i];
+				std::vector<double> prevResNoL2(n);
+				for (size_t i = 0; i < n; ++i)
+					prevResNoL2[i] = r1NoL2.outputY.v[i] - masterClean.v[i];
 
-					const auto noL2Rep = EvaluateGrainTransfer(
-						masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), r2NoL2.outputY.v.data(), n,
-						prevResNoL2.data(), prevOwnGrain.data());
-					Assert::IsTrue(noL2Rep.valid && noL2Rep.lag1Evaluated);
-					Assert::IsFalse(noL2Rep.passesAuthoritativeBar,
-						L"H12 Negative control: disabling Layer-2 grain subtraction on 15%-leaked inputs MUST fail authoritative bar!");
-					Assert::IsTrue(std::fabs(noL2Rep.betaForeign) > kGrainBarMaxBetaForeign || noL2Rep.betaOwn < kGrainBarMinBetaOwn,
-						L"H12 Negative control: unprotected 15%-leaked inputs MUST violate betaForeign <= 0.02 or betaOwn >= 0.98");
+				const auto noL2Rep = EvaluateGrainTransfer(
+					masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), r2NoL2.outputY.v.data(), n,
+					prevResNoL2.data(), prevOwnGrain.data());
+				Assert::IsTrue(noL2Rep.valid && noL2Rep.lag1Evaluated);
+				Assert::IsFalse(noL2Rep.passesAuthoritativeBar,
+					L"H12 Negative control: disabling Layer-2 grain subtraction on 15%-leaked inputs MUST fail authoritative bar!");
+				Assert::IsTrue(std::fabs(noL2Rep.betaForeign) > kGrainBarMaxBetaForeign || noL2Rep.betaOwn < kGrainBarMinBetaOwn,
+					L"H12 Negative control: unprotected 15%-leaked inputs MUST violate betaForeign <= 0.02 or betaOwn >= 0.98");
 				}
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.solverMode = SolverMode::LegacyClipRescale;
+				cfg.enableCarryForward = true;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.enableBandDependentPool = false;
+				cfg.enableJointCrossBandBound = false;
+				cfg.enableSmoothWarpVectors = false;
+				cfg.enableHardFbOcclusionGate = false;
+				cfg.enableSmoothLayer4Guard = false;
 				TdV2ReferenceEngine eng(cfg);
 				StandInRegistry reg;
 
@@ -901,6 +930,10 @@ namespace Tests
 					std::vector<double> fullGrainVar(static_cast<size_t>(cw) * ch, grainSigma * grainSigma);
 
 					Config cfgRaw = MakePreset(Preset::Reference, Mode::On);
+					cfgRaw.enableCarryForward = true;
+					cfgRaw.pixelBoundKappa = 3.0;
+					cfgRaw.enableA2eEmpiricalPrior = false;
+					cfgRaw.enableEmpiricalBayesShrinkage = false;
 					TdV2ReferenceEngine engRaw(cfgRaw);
 					StandInRegistry regRaw;
 
@@ -964,6 +997,9 @@ namespace Tests
 
 					Config cfgG = MakePreset(Preset::Reference, Mode::On);
 					cfgG.estimator = VarianceEstimator::A2_RoundingCells; // force blend so Layer-4 guard genuinely fires!
+					cfgG.enableCarryForward = true;
+					cfgG.pixelBoundKappa = 3.0;
+					cfgG.enableA2eEmpiricalPrior = false;
 					TdV2ReferenceEngine engGuard(cfgG);
 					StandInRegistry regGuard;
 
@@ -1166,11 +1202,17 @@ namespace Tests
 
 				Config cfgUntouched = MakePreset(Preset::Reference, Mode::On);
 				cfgUntouched.bokehMode = BokehMode::Untouched;
+				cfgUntouched.pixelBoundKappa = 3.0;
+				cfgUntouched.enableA2eEmpiricalPrior = false;
+				cfgUntouched.enableEmpiricalBayesShrinkage = false;
 				TdV2ReferenceEngine engU(cfgUntouched);
 				const auto resU = engU.ProcessFrame(bkIn, &regRack);
 
 				Config cfgLowOnly = MakePreset(Preset::Reference, Mode::On);
+				cfgLowOnly.estimator = VarianceEstimator::A1_ThreeCorneredHat;
 				cfgLowOnly.bokehMode = BokehMode::LowBandCellOnly;
+				cfgLowOnly.pixelBoundKappa = 3.0;
+				cfgLowOnly.enableEmpiricalBayesShrinkage = false;
 				TdV2ReferenceEngine engL(cfgLowOnly);
 				const auto resL = engL.ProcessFrame(bkIn, &regRack);
 
@@ -1455,6 +1497,12 @@ namespace Tests
 				CellMotionField mfNext = CellMotionField::Uniform(cw, ch, -2.0, -2.0, -2.0, -2.0, RegionMotionClass::Camera);
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableCarryForward = true;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.enableBandDependentPool = false;
+				cfg.enableJointCrossBandBound = false;
 				TdV2ReferenceEngine eng(cfg);
 				StandInRegistry reg;
 
@@ -1696,6 +1744,8 @@ namespace Tests
 					cfg.estimator = VarianceEstimator::A2_RoundingCells;
 					cfg.residualMode = rm;
 					cfg.momentPoolRadiusCells = 0; // 1x1 cell pooling so +200 remainder-strip spikes stay isolated to strip cells
+					cfg.enableBandDependentPool = false;
+					cfg.enableA2eEmpiricalPrior = false;
 					cfg.cellProjIterations = 1;
 					TdV2ReferenceEngine eng(cfg);
 
@@ -1705,6 +1755,7 @@ namespace Tests
 					in.hasCleanSplit = true;
 					in.cleanY = cur;
 					in.activeRect = active;
+					in.codecModelPb = &pred;
 					in.prevPeak = { &pred, &stillMf, true }; // P_B prediction; weight driven by independent nextPeak
 					in.nextPeak = { &nextPeak, &stillMf, false };
 					in.hasStepPrior = true;
@@ -1799,6 +1850,9 @@ namespace Tests
 						cfg.estimator = VarianceEstimator::A2_RoundingCells;
 						cfg.residualMode = ResidualMode::Strict;
 						cfg.cellProjIterations = iters;
+						cfg.pixelBoundKappa = 3.0;
+						cfg.enableA2eEmpiricalPrior = false;
+						cfg.enableEmpiricalBayesShrinkage = false;
 						TdV2ReferenceEngine eng(cfg);
 						StandInRegistry reg;
 
@@ -1809,6 +1863,7 @@ namespace Tests
 						in.cleanY = pCur;
 						in.prevPeak = { &pPred, &mfP, true }; // P_B prediction; weight driven by nextPeak
 						in.nextPeak = { &pNext, &mfP, false };
+						in.codecModelPb = &pPred;
 						in.hasStepPrior = true;
 						in.estimatedStepDelta = 20.0;
 						in.deadZonePhi = kDeadZonePhiInter;
@@ -2147,6 +2202,12 @@ namespace Tests
 				const TdV2Plane sceneB(w, h, 800.0); // Completely different bright scene after cut!
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableCarryForward = true;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.enableBandDependentPool = false;
+				cfg.enableJointCrossBandBound = false;
 				TdV2ReferenceEngine eng(cfg);
 				StandInRegistry reg;
 
@@ -2173,6 +2234,9 @@ namespace Tests
 					const CellMotionField stillMf = CellMotionField::Uniform(w / 16, h / 16, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 					Config noCutCfg = MakePreset(Preset::Reference, Mode::On);
 					noCutCfg.estimator = VarianceEstimator::A2_RoundingCells;
+					noCutCfg.enableCarryForward = true;
+					noCutCfg.pixelBoundKappa = 3.0;
+					noCutCfg.enableA2eEmpiricalPrior = false;
 					TdV2ReferenceEngine noCutEng(noCutCfg);
 					StandInRegistry noCutReg;
 					noCutEng.ProcessFrame(fA, &noCutReg);
@@ -2446,6 +2510,9 @@ namespace Tests
 				{
 					Config cfg = MakePreset(preset, Mode::On);
 					cfg.enablePerCornerHuber = enablePerCornerHuber;
+					cfg.pixelBoundKappa = 3.0;
+					cfg.enableA2eEmpiricalPrior = false;
+					cfg.enableEmpiricalBayesShrinkage = false;
 					TdV2ReferenceEngine eng(cfg);
 					StandInRegistry reg;
 
@@ -2777,8 +2844,9 @@ namespace Tests
 
 				// ---- Part A: Consecutive seq uses carry (positive control), whereas Off->On and seek/gap reset carry! ----
 				{
-					// Positive control: consecutive seq 10 -> 11 DOES use carry.
+					// Positive control: consecutive seq 10 -> 11 DOES use carry when enableCarryForward == true.
 					Config onCfg = MakePreset(Preset::Reference, Mode::On);
+					onCfg.enableCarryForward = true;
 					TdV2ReferenceEngine engConsec(onCfg);
 					StandInRegistry reg;
 
@@ -2922,13 +2990,21 @@ namespace Tests
 					occMf.valid[holeCell] = 0u;
 					occMf.vx[holeCell] = 8.0;
 					occMf.vy[holeCell] = 8.0;
+					occMf.camVx[holeCell] = 8.0;
+					occMf.camVy[holeCell] = 8.0;
+					occMf.cls[holeCell] = RegionMotionClass::Camera;
 
 					CellMotionField bogusValidMf = occMf;
 					bogusValidMf.valid[holeCell] = 1u; // Negative control: same bogus (8, 8) vector if valid==0 were ignored!
 
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.estimator = VarianceEstimator::A2_RoundingCells;
 					cfg.residualMode = ResidualMode::Strict;
 					cfg.enableCarryForward = false;
+					cfg.enablePerCornerHuber = false;
+					cfg.pixelBoundKappa = 3.0;
+					cfg.enableA2eEmpiricalPrior = false;
+					cfg.enableEmpiricalBayesShrinkage = false;
 
 					FrameProcessInput inOcc;
 					inOcc.seq = 40;
@@ -2938,7 +3014,7 @@ namespace Tests
 					inOcc.prevPeak = { &corruptPrev, &occMf, false };   // refs[0]: valid==0 in cell (1, 1)
 					inOcc.nextPeak = { &nextClean, &stillMf, false };   // refs[1]: valid==1 everywhere
 					inOcc.hasStepPrior = true;
-					inOcc.estimatedStepDelta = 12.0;
+					inOcc.estimatedStepDelta = 40.0;
 					inOcc.transformIdentified8x8 = true;
 
 					TdV2ReferenceEngine engOcc(cfg);
@@ -2964,17 +3040,17 @@ namespace Tests
 					const double occHoleMse = PlaneMse(master, resOcc.outputY, holeRect);
 					const double bogusHoleMse = PlaneMse(master, resBogus.outputY, holeRect);
 
-					Assert::IsTrue(resOcc.codecModelPbStandInCells > 0,
-						L"M2: valid cells outside [16,32)^2 must still run 8x8 DCT POCS cleanly");
-					Assert::IsTrue(resOcc.codecModelPbStandInCells < resValid.codecModelPbStandInCells,
-						L"M2: 8x8 DCT POCS must skip occluded cell (1,1) where refs[0].validPx == 0");
+					Assert::AreEqual(static_cast<uint64_t>(cw * ch), resOcc.codecModelPbStandInCells,
+						L"H-1: null codecModelPb engages CodecModelPbStandIn visibly across all cells (no warped-peak fake P_B substitute)");
+					Assert::IsTrue(regOcc.IsActive(StandInKind::CodecModelPbStandIn),
+						L"H-1: null codecModelPb must visibly engage StandInKind::CodecModelPbStandIn");
 					Assert::IsTrue(occHoleMse < baseHoleMse * 0.65,
 						L"M2: cell (1,1) must cleanly improve toward master via valid nextPeak with zero garbage warp from prevPeak");
 					Assert::IsTrue(bogusHoleMse > occHoleMse * 2.0,
 						L"M2 Negative control: ignoring mf.valid==0 on bogus (8,8) prevPeak must severely corrupt [16,32)^2");
 				}
 
-				// ---- Part B (M3): Transform-unknown pixel bound uses Parseval a2BandPeakSq (NOT white-noise over-clip!) ----
+				// ---- Part B (M3 / H-1): Transform-unknown statistical bound uses empirical A2e block own-error (NOT white-noise over-clip!) ----
 				{
 					const int w = 128, h = 128;
 					const int cw = w / 16, ch = h / 16;
@@ -2996,6 +3072,8 @@ namespace Tests
 					const TdV2Plane peakNextSky = AddCodingError(masterSky, 0.5, 1612u);
 
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.estimator = VarianceEstimator::A1_ThreeCorneredHat;
+					cfg.pixelBoundKappa = 3.0;
 					TdV2ReferenceEngine eng(cfg);
 					StandInRegistry reg;
 
@@ -3122,6 +3200,12 @@ namespace Tests
 
 				// Protected engine under fixed symmetric focus guard: ZERO false focus vetoes + strong M-band recovery!
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableCarryForward = true;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.enableBandDependentPool = false;
+				cfg.enableJointCrossBandBound = false;
 				TdV2ReferenceEngine eng(cfg);
 				StandInRegistry reg;
 
@@ -3188,7 +3272,10 @@ namespace Tests
 				const TdV2Plane peakPrev = AddCodingError(master, 0.5, 5101u);
 				const TdV2Plane peakNext = AddCodingError(master, 0.5, 5102u);
 
-				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.estimator = VarianceEstimator::A1_ThreeCorneredHat;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableEmpiricalBayesShrinkage = false;
 				FrameProcessInput baseIn;
 				baseIn.seq = 301;
 				baseIn.receivedY = curY;

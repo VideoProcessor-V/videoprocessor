@@ -271,6 +271,14 @@ namespace TdV2Sota6PsdShapeNs
 			cfg.enableLongAnchor = false;
 			cfg.enableCarryForward = false;
 			cfg.estimator = VarianceEstimator::A3_ConservativeMin;
+			cfg.pixelBoundKappa = 3.0;
+			cfg.enableJointCrossBandBound = false;
+			cfg.enableA2eEmpiricalPrior = false;
+			cfg.enableEmpiricalBayesShrinkage = false;
+			cfg.enableBandDependentPool = false;
+			cfg.solverMode = SolverMode::LegacyClipRescale;
+			cfg.enableSmoothWarpVectors = false;
+			cfg.enableSmoothLayer4Guard = false;
 
 			// =========================================================================
 			// Part 1: Luma CPU (TdV2ReferenceEngine) + Real D3D11 WARP GPU (TdV2GpuEngine)

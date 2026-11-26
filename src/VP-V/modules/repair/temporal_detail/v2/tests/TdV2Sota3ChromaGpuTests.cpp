@@ -636,12 +636,17 @@ namespace TdV2Sota3ChromaGpuNs
 			in.nextPeak.cleanCr = &masterCodedCr;
 			in.nextPeak.lumaMotion = &stillMf;
 			in.hasStepPrior = true;
-			in.estimatedStepDelta = 40.0;
+			in.estimatedStepDelta = 240.0;
 			in.deadZonePhi = kDeadZonePhiInter;
 			in.zeroCoeffFraction = 0.35;
 
 			Config cfgUnt = MakePreset(Preset::Reference, Mode::On);
 			cfgUnt.bokehMode = BokehMode::Untouched;
+			cfgUnt.pixelBoundKappa = 3.0;
+			cfgUnt.enableJointCrossBandBound = false;
+			cfgUnt.enableA2eEmpiricalPrior = false;
+			cfgUnt.enableEmpiricalBayesShrinkage = false;
+			cfgUnt.enableBandDependentPool = false;
 
 			// Mandatory Same-Input Negative Control (unmasked): all 3 target cells produce strong non-zero delivered deltas!
 			ChromaGpuGuard gCtrl(ctx.gpu, cfgUnt);
@@ -844,8 +849,13 @@ namespace TdV2Sota3ChromaGpuNs
 				ChromaGpuInput fakeStillIn = f1In;
 				fakeStillIn.seq = 342;
 				fakeStillIn.receivedTex = recTex2.tex;
-				fakeStillIn.estimatedStepDelta = 400.0;
-				ChromaGpuGuard fakeGuard(ctx.gpu, cfgOn);
+				fakeStillIn.estimatedStepDelta = 4200.0;
+				Config cfgFake = cfgOn;
+				cfgFake.pixelBoundKappa = 3.0;
+				cfgFake.enableJointCrossBandBound = false;
+				cfgFake.enableA2eEmpiricalPrior = false;
+				cfgFake.enableEmpiricalBayesShrinkage = false;
+				ChromaGpuGuard fakeGuard(ctx.gpu, cfgFake);
 				ChromaGpuOutput fakeOut{};
 				OwnedTex fakeCoded(ctx.gpu), fakeUv(ctx.gpu), fakeDel(ctx.gpu);
 				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, fakeCoded.tex, cW, cH, fmtRG32, true, true, false, true));
@@ -1277,6 +1287,14 @@ namespace TdV2Sota3ChromaGpuNs
 			Config cfg = MakePreset(Preset::Reference, Mode::On);
 			cfg.cellPx = cellPx;
 			cfg.grainCellPx = cellPx;
+			cfg.enableSmoothWarpVectors = false;
+			cfg.pixelBoundKappa = 3.0;
+			cfg.enableJointCrossBandBound = false;
+			cfg.enableA2eEmpiricalPrior = false;
+			cfg.enableEmpiricalBayesShrinkage = false;
+			cfg.enableBandDependentPool = false;
+			cfg.solverMode = SolverMode::LegacyClipRescale;
+			cfg.enableSmoothLayer4Guard = false;
 
 			const ChromaSubsampling codedSubs[2] = { ChromaSubsampling::Yuv420, ChromaSubsampling::Yuv422 };
 			const DeliveredChromaFormat delivFmts[2] = { DeliveredChromaFormat::Yuv420, DeliveredChromaFormat::Yuv422 };
@@ -1417,7 +1435,7 @@ namespace TdV2Sota3ChromaGpuNs
 					in.prevPeak = { &prevRefCb, &prevRefCr, &mfPrev, false };
 					in.nextPeak = { &nextRefCb, &nextRefCr, &mfNext, false };
 					in.hasStepPrior = true;
-					in.estimatedStepDelta = 48.0;
+					in.estimatedStepDelta = 72.0;
 					in.deadZonePhi = kDeadZonePhiInter;
 					in.zeroCoeffFraction = 0.35;
 

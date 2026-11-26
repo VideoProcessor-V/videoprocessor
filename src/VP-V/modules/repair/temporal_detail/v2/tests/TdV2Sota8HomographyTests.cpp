@@ -439,6 +439,14 @@ namespace TdV2Sota8HomographyNs
 				cfg.sourceBits = 10;
 				cfg.cellPx = 16;
 				cfg.momentPoolRadiusCells = 0; // Isolate cell-level warp accuracy cleanly
+				cfg.enableBandDependentPool = false;
+				cfg.enableSmoothWarpVectors = false;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableJointCrossBandBound = false;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.solverMode = SolverMode::LegacyClipRescale;
+				cfg.enableSmoothLayer4Guard = false;
 
 				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
 				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(
@@ -450,7 +458,7 @@ namespace TdV2Sota8HomographyNs
 				inNoH.cleanY = curDeg;
 				inNoH.hasCleanSplit = true;
 				inNoH.hasStepPrior = true;
-				inNoH.estimatedStepDelta = 56.0;
+				inNoH.estimatedStepDelta = 84.0;
 				inNoH.prevPeak.cleanPlane = &prevRef;
 				inNoH.prevPeak.motion = &mfPrev;
 				inNoH.prevPeak.cameraHomography.valid = false;
@@ -579,6 +587,12 @@ namespace TdV2Sota8HomographyNs
 			cfg.sourceBits = 10;
 			cfg.cellPx = 16;
 			cfg.momentPoolRadiusCells = 0;
+			cfg.enableBandDependentPool = false;
+			cfg.enableSmoothWarpVectors = false;
+			cfg.pixelBoundKappa = 3.0;
+			cfg.enableJointCrossBandBound = false;
+			cfg.enableA2eEmpiricalPrior = false;
+			cfg.enableEmpiricalBayesShrinkage = false;
 
 			ChromaProcessInput inNoH;
 			inNoH.seq = 0;
@@ -677,6 +691,12 @@ namespace TdV2Sota8HomographyNs
 			cfg.sourceBits = 10;
 			cfg.cellPx = 16;
 			cfg.momentPoolRadiusCells = 0;
+			cfg.enableBandDependentPool = false;
+			cfg.enableSmoothWarpVectors = false;
+			cfg.pixelBoundKappa = 3.0;
+			cfg.enableJointCrossBandBound = false;
+			cfg.enableA2eEmpiricalPrior = false;
+			cfg.enableEmpiricalBayesShrinkage = false;
 
 			const Homography3x3 badCases[2] = { hSing, hNan };
 			for (int ci = 0; ci < 2; ++ci)

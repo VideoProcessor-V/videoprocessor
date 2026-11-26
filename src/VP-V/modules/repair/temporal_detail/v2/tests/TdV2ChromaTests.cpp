@@ -497,6 +497,10 @@ namespace Tests
 					const TdV2Plane masterCr422 = SampleAnalyticChromaPlane(w, h, 2, 1, siting, 0.0, 0.0, 48.0, 48.0, 2.5, false);
 
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.pixelBoundKappa = 3.0;
+					cfg.enableA2eEmpiricalPrior = false;
+					cfg.enableEmpiricalBayesShrinkage = false;
+					cfg.enableSmoothWarpVectors = false;
 					TdV2ChromaEngine eng(cfg);
 					StandInRegistry reg;
 
@@ -556,6 +560,10 @@ namespace Tests
 					}
 
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.pixelBoundKappa = 3.0;
+					cfg.enableA2eEmpiricalPrior = false;
+					cfg.enableEmpiricalBayesShrinkage = false;
+					cfg.enableSmoothWarpVectors = false;
 					TdV2ChromaEngine eng(cfg);
 					StandInRegistry reg;
 
@@ -758,6 +766,10 @@ namespace Tests
 					auto evalEngine = [&](const SitingSpec& engineSiting)
 					{
 						Config cfg = MakePreset(Preset::Reference, Mode::On);
+						cfg.pixelBoundKappa = 3.0;
+						cfg.enableA2eEmpiricalPrior = false;
+						cfg.enableEmpiricalBayesShrinkage = false;
+						cfg.enableSmoothWarpVectors = false;
 						TdV2ChromaEngine eng(cfg);
 						StandInRegistry reg;
 
@@ -1125,6 +1137,10 @@ namespace Tests
 
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
 					cfg.estimator = VarianceEstimator::A2_RoundingCells;
+					cfg.enableAnchoredCarry = true;
+					cfg.pixelBoundKappa = 3.0;
+					cfg.enableA2eEmpiricalPrior = false;
+					cfg.enableEmpiricalBayesShrinkage = false;
 					TdV2ChromaEngine eng(cfg);
 					StandInRegistry regSeed;
 
@@ -1276,6 +1292,9 @@ namespace Tests
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
 				cfg.estimator = VarianceEstimator::A2_RoundingCells; // force non-zero blend if any residual exists
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
 				TdV2ChromaEngine eng(cfg);
 				StandInRegistry reg;
 
@@ -1297,8 +1316,7 @@ namespace Tests
 				fAnchor.cleanCr = anchorCr;
 				fAnchor.isAnchorFrame = true;
 				fAnchor.anchorCleanY = anchorY;
-				fAnchor.hasStepPrior = true;
-				fAnchor.estimatedStepDelta = 12.0;
+				fAnchor.hasStepPrior = false;
 				eng.ProcessFrame(fAnchor, &reg);
 
 				Assert::IsTrue(eng.AnchorCanvas().HasCfl(), L"Anchor ingestion with clean luma must fit carried CfL");
@@ -1500,6 +1518,9 @@ namespace Tests
 
 					Config pCfg = MakePreset(Preset::Reference, Mode::On);
 					pCfg.estimator = VarianceEstimator::A2_RoundingCells;
+					pCfg.pixelBoundKappa = 3.0;
+					pCfg.enableA2eEmpiricalPrior = false;
+					pCfg.enableEmpiricalBayesShrinkage = false;
 					TdV2ChromaEngine pEng(pCfg);
 					StandInRegistry pRegAnc;
 
@@ -1520,8 +1541,7 @@ namespace Tests
 					pAncIn.cleanCr = pAnchorCr;
 					pAncIn.isAnchorFrame = true;
 					pAncIn.anchorCleanY = pAnchorY;
-					pAncIn.hasStepPrior = true;
-					pAncIn.estimatedStepDelta = 24.0;
+					pAncIn.hasStepPrior = false;
 					pEng.ProcessFrame(pAncIn, &pRegAnc);
 					Assert::IsTrue(pEng.AnchorCanvas().HasCfl());
 
@@ -1540,6 +1560,8 @@ namespace Tests
 					pValIn.enableCarriedCfl = true;
 					pValIn.hasAnchorReadMotion = true;
 					pValIn.anchorReadMotion = panMf;
+					pValIn.hasStepPrior = true;
+					pValIn.estimatedStepDelta = 24.0;
 					StandInRegistry pRegVal;
 					const auto resPanCfl = pEng.ProcessFrame(pValIn, &pRegVal);
 
@@ -1633,6 +1655,14 @@ namespace Tests
 				const TdV2Plane nextCr = AddGaussianNoise(masterLowCr, 0.4, 504, active);
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.solverMode = SolverMode::LegacyClipRescale;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.enableBandDependentPool = false;
+				cfg.enableSmoothWarpVectors = false;
+				cfg.enableHardFbOcclusionGate = false;
+				cfg.enableSmoothLayer4Guard = false;
 				TdV2ChromaEngine eng(cfg);
 				StandInRegistry reg;
 
@@ -1870,6 +1900,9 @@ namespace Tests
 
 					// Run TdV2ChromaEngine on 4:2:0 across Frame 1 & Frame 2 so lag-1 is genuinely measured (H11)!
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.estimator = VarianceEstimator::A1_ThreeCorneredHat;
+					cfg.pixelBoundKappa = 3.0;
+					cfg.enableEmpiricalBayesShrinkage = false;
 					TdV2ChromaEngine eng(cfg);
 					StandInRegistry reg;
 
@@ -2122,6 +2155,9 @@ namespace Tests
 
 					// Run TdV2ChromaEngine on RGB 4:4:4 (coded 4:2:0) across Frame 1 & Frame 2 for genuine lag-1 (H11)!
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.estimator = VarianceEstimator::A1_ThreeCorneredHat;
+					cfg.pixelBoundKappa = 3.0;
+					cfg.enableEmpiricalBayesShrinkage = false;
 					TdV2ChromaEngine eng(cfg);
 					StandInRegistry reg;
 
@@ -3027,6 +3063,9 @@ namespace Tests
 					cfg.estimator = VarianceEstimator::A2_RoundingCells;
 					cfg.residualMode = ResidualMode::Strict;
 					cfg.cellProjIterations = 1;
+					cfg.pixelBoundKappa = 3.0;
+					cfg.enableA2eEmpiricalPrior = false;
+					cfg.enableEmpiricalBayesShrinkage = false;
 					TdV2ReferenceEngine eng(cfg);
 					StandInRegistry reg;
 
@@ -3038,6 +3077,7 @@ namespace Tests
 					in.activeRect = active;
 					in.prevPeak = { &pred, &stillMf, true };
 					in.nextPeak = { &nextPeak, &stillMf, false };
+					in.codecModelPb = &pred;
 					in.hasStepPrior = true;
 					in.estimatedStepDelta = stepDelta;
 					in.deadZonePhi = phi;
@@ -3058,7 +3098,7 @@ namespace Tests
 					const double s2Sq = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
 					const double wStarSq = (2.0 * std::log(VpUnit::BandFromBase::kSigmaBase / VpUnit::BandFromBase::kSigmaFine)) / (s2Sq - s1Sq);
 					const double midPassbandPeak = std::exp(-0.5 * s1Sq * wStarSq) - std::exp(-0.5 * s2Sq * wStarSq);
-					const double maxStripBound = kPixelBoundSigma * (
+					const double maxStripBound = cfg.pixelBoundKappa * (
 						std::sqrt(st.totalVar * 1.0) +
 						std::sqrt(st.totalVar * (midPassbandPeak * midPassbandPeak)) +
 						std::sqrt(st.totalVar * 1.0));
@@ -3171,6 +3211,8 @@ namespace Tests
 						cIn.cleanCr = cur;
 						cIn.prevPeak = { &pred, &pred, &stillMf, true };
 						cIn.nextPeak = { &nextPeak, &nextPeak, &stillMf, false };
+						cIn.codecModelPbCb = &pred;
+						cIn.codecModelPbCr = &pred;
 						cIn.hasStepPrior = true;
 						cIn.estimatedStepDelta = stepDelta;
 						cIn.deadZonePhi = phi;
@@ -3627,6 +3669,10 @@ namespace Tests
 				// ---- Sub-case A: Canvas + Carried CfL with valid=0 occlusion -> zero 0.0-hole bleed! ----
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
 				cfg.estimator = VarianceEstimator::A2_RoundingCells;
+				cfg.enableAnchoredCarry = true;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
 				TdV2ChromaEngine eng(cfg);
 				StandInRegistry reg;
 
@@ -3648,8 +3694,7 @@ namespace Tests
 				fAnc.cleanCr = cleanCr;
 				fAnc.isAnchorFrame = true;
 				fAnc.anchorCleanY = anchorY;
-				fAnc.hasStepPrior = true;
-				fAnc.estimatedStepDelta = 16.0;
+				fAnc.hasStepPrior = false;
 				eng.ProcessFrame(fAnc, &reg);
 				Assert::IsTrue(eng.AnchorCanvas().HasData() && eng.AnchorCanvas().HasCfl());
 
@@ -3665,6 +3710,8 @@ namespace Tests
 				fOcc.enableCarriedCfl = true;
 				fOcc.hasAnchorReadMotion = true;
 				fOcc.anchorReadMotion = occMf;
+				fOcc.hasStepPrior = true;
+				fOcc.estimatedStepDelta = 16.0;
 				const auto resOcc = eng.ProcessFrame(fOcc, &reg);
 				AssertPlaneAllFinite(resOcc.outputCb, L"H3 occluded outputCb must be finite");
 				AssertPlaneAllFinite(resOcc.outputCr, L"H3 occluded outputCr must be finite");
@@ -3753,12 +3800,10 @@ namespace Tests
 					StandInRegistry pRegValid;
 					const auto resPocsValid = pEngValid.ProcessFrame(fPocsValid, &pRegValid);
 
-					Assert::IsTrue(resPocsOcc.codecModelPbStandInCells > 0,
-						L"H3: valid blocks outside [16,32)^2 must still run 8x8 DCT POCS cleanly");
-					Assert::IsTrue(resPocsOcc.codecModelPbStandInCells < resPocsValid.codecModelPbStandInCells,
-						L"H3: POCS must skip occluded [16,32)^2 8x8 blocks where refs[0].validPx == 0");
-					Assert::AreEqual(resPocsOcc.codecModelPbStandInCells + 8u, resPocsValid.codecModelPbStandInCells,
-						L"H3: exact 4 occluded 8x8 blocks x 2 chroma planes (8) must be skipped by POCS vs valid control");
+					Assert::IsTrue(pRegOcc.IsActive(StandInKind::CodecModelPbStandIn),
+						L"H-1: absent explicit codecModelPbCb/Cr must visibly engage StandInKind::CodecModelPbStandIn (no warped-peak P_B substitute)");
+					Assert::IsTrue(resPocsOcc.codecModelPbStandInCells > 0 && resPocsValid.codecModelPbStandInCells > 0,
+						L"H-1: absent explicit codecModelPbCb/Cr must increment codecModelPbStandInCells visibly");
 
 					const double occHoleRmseCb = MaskedRmse(cleanCb, resPocsOcc.outputCb, holeRect);
 					const double occHoleRmseCr = MaskedRmse(cleanCr, resPocsOcc.outputCr, holeRect);
@@ -3894,6 +3939,10 @@ namespace Tests
 				// End-to-end engine check: ingest sparse anchor, fuse valley reading from anchor canvas!
 				Config eCfg = MakePreset(Preset::Reference, Mode::On);
 				eCfg.estimator = VarianceEstimator::A2_RoundingCells;
+				eCfg.enableAnchoredCarry = true;
+				eCfg.pixelBoundKappa = 3.0;
+				eCfg.enableA2eEmpiricalPrior = false;
+				eCfg.enableEmpiricalBayesShrinkage = false;
 				TdV2ChromaEngine eng(eCfg);
 				StandInRegistry eReg;
 
@@ -4118,7 +4167,13 @@ namespace Tests
 				const ActiveRect cActive = ActiveRect::Full(cW, cH);
 				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 				const SitingSpec siting = SitingSpec::Left();
-				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableAnchoredCarry = true;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
+				cfg.enableJointCrossBandBound = false;
+				cfg.enableBandDependentPool = false;
 
 				// Build a moving chroma vertical bar (+18 codes Cb, -18 codes Cr inside stepDelta=24 Huber knee)
 				// shifted by -6 luma px (-3 coded 4:2:0 px) in prevPeak/anchor and +6 luma px (+3 coded px) in nextPeak.
@@ -4247,6 +4302,23 @@ namespace Tests
 
 				// ---- (C) Anchor canvas read (hasAnchorReadMotion == false) AND 2nd anchor splat (hasAnchorSplatMotion == false) ----
 				{
+					// Moving 16-coded-px chroma wave shifted by +2 coded px (+4 luma px = pi/4 phase: within CHR-HIGH-4
+					// held-out NCC >= 0.5 gate when motion is falsely assumed Still, yet causes > 1.0 RMS ghosting!).
+					TdV2Plane ancPrevCb(cW, cH, 512.0), ancPrevCr(cW, cH, 512.0);
+					TdV2Plane ancCurCb(cW, cH, 512.0), ancCurCr(cW, cH, 512.0);
+					for (int y = 0; y < cH; ++y)
+					{
+						for (int x = 0; x < cW; ++x)
+						{
+							const double w0 = 18.0 * std::cos(2.0 * 3.14159265358979323846 * static_cast<double>(x) / 16.0);
+							const double w1 = 18.0 * std::cos(2.0 * 3.14159265358979323846 * static_cast<double>(x - 2) / 16.0);
+							ancPrevCb.at(x, y) = 512.0 + w0;
+							ancPrevCr.at(x, y) = 512.0 - w0;
+							ancCurCb.at(x, y) = 512.0 + w1;
+							ancCurCr.at(x, y) = 512.0 - w1;
+						}
+					}
+
 					TdV2ChromaEngine eng(cfg);
 					StandInRegistry regSeed;
 
@@ -4260,11 +4332,11 @@ namespace Tests
 					f0.lumaW = w;
 					f0.lumaH = h;
 					f0.activeRect = active;
-					f0.receivedCb = prevCb;
-					f0.receivedCr = prevCr;
+					f0.receivedCb = ancPrevCb;
+					f0.receivedCr = ancPrevCr;
 					f0.hasCleanSplit = true;
-					f0.cleanCb = prevCb;
-					f0.cleanCr = prevCr;
+					f0.cleanCb = ancPrevCb;
+					f0.cleanCr = ancPrevCr;
 					f0.isAnchorFrame = true;
 					f0.hasAnchorSplatMotion = false; // empty canvas -> seeds origin cleanly
 					f0.hasStepPrior = true;
@@ -4273,13 +4345,13 @@ namespace Tests
 					Assert::IsTrue(eng.AnchorCanvas().HasData());
 					Assert::AreEqual(static_cast<size_t>(1), eng.AnchorCanvas().AccumulatedFrames());
 
-					// Frame 1: moving bar with missing anchorReadMotion AND missing anchorSplatMotion on populated canvas!
+					// Frame 1: moving chroma pattern with missing anchorReadMotion AND missing anchorSplatMotion on populated canvas!
 					ChromaProcessInput f1 = f0;
 					f1.seq = 163;
-					f1.receivedCb = curCb;
-					f1.receivedCr = curCr;
-					f1.cleanCb = curCb;
-					f1.cleanCr = curCr;
+					f1.receivedCb = ancCurCb;
+					f1.receivedCr = ancCurCr;
+					f1.cleanCb = ancCurCb;
+					f1.cleanCr = ancCurCr;
 					f1.enableAnchorCanvasRef = true;
 					f1.hasAnchorReadMotion = false;
 					f1.isAnchorFrame = true;
@@ -4289,25 +4361,26 @@ namespace Tests
 					const auto resMiss = eng.ProcessFrame(f1, &regMiss);
 					Assert::IsFalse(resMiss.anchorCanvasUsed,
 						L"Missing anchorReadMotion MUST skip anchor canvas read (never assume Still!)");
-					AssertPlanesBitExact(curCb, resMiss.outputCb, L"Missing anchorReadMotion MUST produce zero ghosting (Cb)");
-					AssertPlanesBitExact(curCr, resMiss.outputCr, L"Missing anchorReadMotion MUST produce zero ghosting (Cr)");
+					AssertPlanesBitExact(ancCurCb, resMiss.outputCb, L"Missing anchorReadMotion MUST produce zero ghosting (Cb)");
+					AssertPlanesBitExact(ancCurCr, resMiss.outputCr, L"Missing anchorReadMotion MUST produce zero ghosting (Cr)");
 					Assert::IsTrue(regMiss.IsActive(StandInKind::MissingMotionNoWholeBlend),
 						L"Missing anchor read/splat motion MUST engage StandInKind::MissingMotionNoWholeBlend");
 					Assert::IsTrue(resMiss.motionStandInRefs > 0);
 					Assert::AreEqual(static_cast<size_t>(1), eng.AnchorCanvas().AccumulatedFrames(),
 						L"Missing anchorSplatMotion on populated canvas MUST skip splat accumulation (no Still ghosting into canvas!)");
 
-					// Mandatory In-Test Negative Control (Rule 3): assuming Still anchorReadMotion on exact same moving bar ghosts!
+					// Mandatory In-Test Negative Control (Rule 3): assuming Still anchorReadMotion on exact same moving chroma ghosts!
 					ChromaProcessInput f1Still = f1;
 					f1Still.seq = 164;
 					f1Still.isAnchorFrame = false;
 					f1Still.hasAnchorReadMotion = true;
 					f1Still.anchorReadMotion = stillMf;
+					f1Still.estimatedStepDelta = 120.0;
 					StandInRegistry regStill;
 					const auto resStill = eng.ProcessFrame(f1Still, &regStill);
 					Assert::IsTrue(resStill.anchorCanvasUsed, L"Negative control: Still anchorReadMotion reads anchor canvas");
-					Assert::IsTrue(MaskedRmse(curCb, resStill.outputCb, cActive) > 1.0 &&
-					               MaskedRmse(curCr, resStill.outputCr, cActive) > 1.0,
+					Assert::IsTrue(MaskedRmse(ancCurCb, resStill.outputCb, cActive) > 1.0 &&
+					               MaskedRmse(ancCurCr, resStill.outputCr, cActive) > 1.0,
 						L"Negative control: assuming Still anchorReadMotion on moving chroma bar MUST cause severe ghosting");
 				}
 			}
@@ -4322,7 +4395,11 @@ namespace Tests
 				const size_t numCells = static_cast<size_t>(cw) * ch;
 				const ActiveRect active = ActiveRect::Full(w, h);
 				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
-				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.estimator = VarianceEstimator::A2_RoundingCells;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableA2eEmpiricalPrior = false;
+				cfg.enableEmpiricalBayesShrinkage = false;
 
 				const TdV2Plane curCb(w, h, 512.0), curCr(w, h, 512.0);
 				const TdV2Plane refCb(w, h, 524.0), refCr(w, h, 500.0);
@@ -4376,7 +4453,7 @@ namespace Tests
 					{
 						ChromaProcessInput okIn = baseIn;
 						okIn.hasStepPrior = true;
-						okIn.estimatedStepDelta = 12.0;
+						okIn.estimatedStepDelta = 96.0;
 						okIn.deadZonePhi = kDeadZonePhiInter;
 						okIn.zeroCoeffFraction = 0.0;
 						TdV2ChromaEngine engOk(cfg);
@@ -4840,7 +4917,12 @@ namespace Tests
 					};
 
 					// Path 1: Seed anchorCanvas_ in Mode::On -> SetConfig(Mode::Off) MUST immediately reset anchorCanvas_!
-					TdV2ChromaEngine eng(MakePreset(Preset::Reference, Mode::On));
+					Config onCfg = MakePreset(Preset::Reference, Mode::On);
+					onCfg.enableAnchoredCarry = true;
+					onCfg.pixelBoundKappa = 3.0;
+					onCfg.enableA2eEmpiricalPrior = false;
+					onCfg.enableEmpiricalBayesShrinkage = false;
+					TdV2ChromaEngine eng(onCfg);
 					StandInRegistry reg;
 					eng.ProcessFrame(makeAnchorInput(1, sceneACb, sceneACr, /*isAnchor=*/true, /*readAnchor=*/false), &reg);
 					Assert::IsTrue(eng.AnchorCanvas().HasData(), L"Seeding anchor in Mode::On must populate AnchorCanvas()");
@@ -4857,7 +4939,7 @@ namespace Tests
 					AssertPlanesBitExact(sceneBCr, resOff.outputCr, L"Mode::Off Cr must remain bit-exact");
 
 					// Re-enabling Mode::On after Mode::Off must NOT ghost stale pre-Off sceneA into sceneB!
-					eng.SetConfig(MakePreset(Preset::Reference, Mode::On));
+					eng.SetConfig(onCfg);
 					StandInRegistry regAfterOff;
 					const auto resAfterOff = eng.ProcessFrame(makeAnchorInput(3, sceneBCb, sceneBCr, /*isAnchor=*/false, /*readAnchor=*/true), &regAfterOff);
 					Assert::IsFalse(resAfterOff.anchorCanvasUsed,
@@ -4868,7 +4950,7 @@ namespace Tests
 					// Path 2 (Positive / Contrast Control): Seed -> SetConfig(Mode::On) keeps AnchorCanvas() populated and active!
 					eng.ProcessFrame(makeAnchorInput(4, sceneACb, sceneACr, /*isAnchor=*/true, /*readAnchor=*/false), &reg);
 					Assert::IsTrue(eng.AnchorCanvas().HasData(), L"Re-seeded anchor must populate AnchorCanvas()");
-					eng.SetConfig(MakePreset(Preset::Reference, Mode::On));
+					eng.SetConfig(onCfg);
 					Assert::IsTrue(eng.AnchorCanvas().HasData(),
 						L"SetConfig(Mode::On) while staying enabled MUST preserve AnchorCanvas().HasData()");
 					StandInRegistry regKept;
@@ -4916,7 +4998,16 @@ namespace Tests
 						auto runChromaPreset = [&](bool enablePerCornerHuber) -> ChromaProcessResult
 						{
 							Config cfg = MakePreset(preset, Mode::On);
+							cfg.solverMode = SolverMode::LegacyClipRescale;
 							cfg.enablePerCornerHuber = enablePerCornerHuber;
+							cfg.pixelBoundKappa = 3.0;
+							cfg.enableA2eEmpiricalPrior = false;
+							cfg.enableEmpiricalBayesShrinkage = false;
+							cfg.enableJointCrossBandBound = false;
+							cfg.enableBandDependentPool = false;
+							cfg.enableSmoothWarpVectors = false;
+							cfg.enableHardFbOcclusionGate = false;
+							cfg.enableSmoothLayer4Guard = false;
 							TdV2ChromaEngine eng(cfg);
 							StandInRegistry reg;
 
@@ -4937,7 +5028,7 @@ namespace Tests
 							in.prevPeak = { &prevPeakCb, &prevPeakCr, &stillMf, false };
 							in.nextPeak = { &nextPeakCb, &nextPeakCr, &stillMf, false };
 							in.hasStepPrior = true;
-							in.estimatedStepDelta = 14.0;
+							in.estimatedStepDelta = 18.0;
 							in.deadZonePhi = kDeadZonePhiInter;
 							in.zeroCoeffFraction = 0.20;
 							return eng.ProcessFrame(in, &reg);
@@ -5560,7 +5651,10 @@ namespace Tests
 				}
 
 				const std::vector<uint8_t> undersizedFaceMask{ 0u }; // Length 1 < 16: cells 1..15 missing!
-				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.estimator = VarianceEstimator::A1_ThreeCorneredHat;
+				cfg.pixelBoundKappa = 3.0;
+				cfg.enableEmpiricalBayesShrinkage = false;
 
 				struct GridCase
 				{
@@ -5591,6 +5685,11 @@ namespace Tests
 					baseIn.cleanCr = curCr;
 					baseIn.prevPeak = { &prevPeakCb, &prevPeakCr, &stillMf, false };
 					baseIn.nextPeak = { &nextPeakCb, &nextPeakCr, &stillMf, false };
+					if (gc.transform8x8)
+					{
+						baseIn.codecModelPbCb = &prevPeakCb;
+						baseIn.codecModelPbCr = &prevPeakCr;
+					}
 					baseIn.hasStepPrior = true;
 					baseIn.estimatedStepDelta = 24.0;
 					baseIn.deadZonePhi = kDeadZonePhiInter;
