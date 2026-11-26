@@ -123,8 +123,16 @@ namespace Vpv
 				out.declineReason = "edge_map: missing P13 source plane facts";
 				return false;
 			}
-			const int bits = facts->repr.bits.color_depth > 0 ? facts->repr.bits.color_depth : 10;
-			const double cu = VpvGpu::CodeUnit(in, facts->repr.bits, bits);
+			pl_bit_encoding enc = facts->repr.bits;
+			if (enc.color_depth == 0 && enc.sample_depth == 0 && enc.bit_shift == 0 &&
+				in->params.format && in->params.format->type != PL_FMT_FLOAT && in->params.format->component_depth[0] == 16)
+			{
+				enc.sample_depth = 16;
+				enc.color_depth = 10;
+				enc.bit_shift = 6;
+			}
+			const int bits = enc.color_depth > 0 ? enc.color_depth : 10;
+			const double cu = VpvGpu::CodeUnit(in, enc, bits);
 			if (!(cu > 0.0))
 			{
 				out.declineReason = "edge_map: invalid source plane code unit";

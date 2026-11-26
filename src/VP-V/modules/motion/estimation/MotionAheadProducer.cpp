@@ -1959,7 +1959,7 @@ namespace MotionAhead
 				havePrevious = true;
 				previousSequence = rq.to;
 				previousGeneration = rq.generation;
-				previousLuma = CameraConsumes() ? std::make_shared<const std::vector<uint8_t>>(lumaBuffer) : nullptr;
+				previousLuma = CameraConsumes() ? std::make_shared<const std::vector<uint8_t>>(lumaBuffer) : nullptr; // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 			}
 			else
 			{

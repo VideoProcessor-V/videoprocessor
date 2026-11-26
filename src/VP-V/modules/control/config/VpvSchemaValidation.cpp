@@ -166,7 +166,7 @@ namespace Vpv
 				return false;
 			std::string globalHotkeys;
 			if (config.TryGetString("shortcuts", "global_hotkeys", globalHotkeys) &&
-				!ConfigSchema::Boolean("global_hotkeys").validator(globalHotkeys))
+				!ConfigSchema::Boolean("shortcuts.global_hotkeys").validator(globalHotkeys))
 			{
 				error = "[shortcuts] key 'global_hotkeys' must be a Boolean";
 				return false;

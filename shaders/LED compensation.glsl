@@ -277,8 +277,9 @@ vec3 preserve_extended(vec3 result, vec3 original, float lift)
     // and blend eff_gain from gain -> 1.0 via the minimal C1 cubic Hermite spline h(u) = u^2*(3 - 2u) over
     // u = clamp((max(original) - 1.0) / max(extended_ceiling - 1.0, 1e-4), 0, 1) so eff_gain = gain at the
     // white edge (zero cliff) and eff_gain = 1.0 at extended_ceiling (true WTW preserved monotonically).
+    bool trueWtw = anyAbove && (y > 1.0 || all(above));
     vec3 p;
-    if (anyAbove && y > 1.0) {
+    if (trueWtw) {
         p = vec3(1.0);
     } else {
         vec3 d = original - vec3(y);
@@ -293,10 +294,14 @@ vec3 preserve_extended(vec3 result, vec3 original, float lift)
     }
     float over = max(max(original.r, max(original.g, original.b)) - 1.0, 0.0);
     float u = clamp(over / max(extended_ceiling - 1.0, 1e-4), 0.0, 1.0);
-    float s = u * u * (3.0 - 2.0 * u);
-    float eff_gain = (anyAbove && gain != 1.0 && extended_ceiling > 1.0 + 1e-4) ? mix(gain, 1.0, s) : gain;
-    vec3 c = compensate_gain(p, lift, eff_gain);
-    float f = (anyAbove && eff_gain < 1.0) ? compensate_gain(vec3(1.0), lift, eff_gain).x : 1.0;
+    float s = (extended_ceiling > 1.0 + 1e-4 && over >= (extended_ceiling - 1.0) - (1.0 / 1024.0)) ? 1.0 : (u * u * (3.0 - 2.0 * u));
+    float eff_gain = (!trueWtw && anyAbove && gain < 1.0 && extended_ceiling > 1.0 + 1e-4) ? mix(gain, 1.0, s) : gain;
+    vec3 c = trueWtw
+        ? ((gain != 1.0 && extended_ceiling > 1.0 + 1e-4) ? mix(compensate_gain(p, lift, gain), p, s) : compensate_gain(p, lift, gain))
+        : compensate_gain(p, lift, eff_gain);
+    float f = trueWtw
+        ? (gain < 1.0 ? c.x : 1.0)
+        : ((anyAbove && eff_gain < 1.0) ? compensate_gain(vec3(1.0), lift, eff_gain).x : 1.0);
     vec3 e = (original - p) * f;
     vec3 up = (vec3(extended_ceiling) - c) / max(e, vec3(1e-6));
     vec3 dn = (c - vec3(extended_floor)) / max(-e, vec3(1e-6));
