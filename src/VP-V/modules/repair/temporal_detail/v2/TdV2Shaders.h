@@ -3525,6 +3525,82 @@ if (p.x >= TD_W || p.y >= TD_H)
 imageStore(dst_plane, p, vec4(texelFetch(src_plane, p, 0).x, 0.0, 0.0, 0.0));
 )GLSL";
 
+	// Pass 3C: Initialize per-cell DPB bank precision map (cw x ch R32F: 1 / max(baseQuantVar, cellTotalU)).
+	constexpr const char* kPassDpbInitPrecision = R"GLSL(
+ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+if (cell.x >= TD_CW || cell.y >= TD_CH)
+    return;
+float u0 = (u_has_cell_u > 0.5) ? max(0.0, texelFetch(cell_weights, ivec2(TD_CW + cell.x, cell.y), 0).w) : 0.0;
+float u1 = (u_has_cell_u > 0.5) ? max(0.0, texelFetch(cell_weights, ivec2(2 * TD_CW + cell.x, cell.y), 0).w) : 0.0;
+float u2 = (u_has_cell_u > 0.5) ? max(0.0, texelFetch(cell_diag_c, ivec2(2 * TD_CW + cell.x, cell.y), 0).w) : 0.0;
+float totU = max(TD_BASE_QUANT_VAR, u0 + u1 + u2);
+float pNew = (totU > TD_NUM_FLOOR) ? (1.0 / totU) : 1.0;
+imageStore(anchor_prec_out, cell, vec4(pNew, 0.0, 0.0, 0.0));
+)GLSL";
+
+	// Pass 3C: Progressive multi-keyframe precision-weighted (1/sigma^2) grain-free Kalman bank update.
+	// Dispatch: ceil(TD_W / 16) x ceil(TD_H / 16), group 16x16 (<= 10 SRVs, 2 UAVs, 0 LDS).
+	// Reads warped previous bank from ref_bands[ancIdx] (exact L+M+H partition of unity -> ZERO extra warp & ZERO aliasing!)
+	// and cur_clean (dstOutClean, strictly grain-free!), writing updated anchor_clean_out + anchor_prec_out.
+	constexpr const char* kPassDpbKalmanUpdate = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x >= TD_W || p.y >= TD_H)
+    return;
+int cx = min(TD_CW - 1, p.x / TD_CELL_PX);
+int cy = min(TD_CH - 1, p.y / TD_CELL_PX);
+ivec2 cell = ivec2(cx, cy);
+int ancIdx = int(round(u_anchor_ref_idx));
+float curVal = texelFetch(cur_clean, p, 0).x;
+
+float u0 = max(0.0, texelFetch(cell_weights, ivec2(TD_CW + cx, cy), 0).w);
+float u1 = max(0.0, texelFetch(cell_weights, ivec2(2 * TD_CW + cx, cy), 0).w);
+float u2 = max(0.0, texelFetch(cell_diag_c, ivec2(2 * TD_CW + cx, cy), 0).w);
+float totU = max(TD_BASE_QUANT_VAR, u0 + u1 + u2);
+float pNew = (totU > TD_NUM_FLOOR) ? (1.0 / totU) : 1.0;
+float pOld = max(0.0, texelFetch(anchor_prec_in, cell, 0).x);
+
+vec2 driftInfo = texelFetch(cell_drift, cell, 0).xy;
+vec4 df = texelFetch(cell_diag_flags, cell, 0);
+float mGateL = texelFetch(motion_gate, ivec2(ancIdx * TD_CW + cx, cy), 0).x;
+bool barred = (driftInfo.y > 0.5) || (driftInfo.x > TD_ANCHOR_DRIFT_BAR_PX);
+bool voterVetoed = ((int(round(df.w)) & 2) != 0);
+bool focusVeto = (df.x > 0.5);
+bool agreed = !barred && !voterVetoed && !focusVeto && (mGateL > 0.5) && (pOld > 0.0);
+
+float outVal = curVal;
+float outPrec = pNew;
+int ax0 = int(round(u_ax0)), ay0 = int(round(u_ay0));
+int ax1 = int(round(u_ax1)), ay1 = int(round(u_ay1));
+bool inActive = (p.x >= ax0 && p.x < ax1 && p.y >= ay0 && p.y < ay1);
+
+if (agreed && inActive)
+{
+    uint pf = uint(round(texelFetch(ref_flags, p, 0).x * 65535.0));
+    if ((td_unpack_ref_flags(pf, ancIdx) & 1) != 0)
+    {
+        ivec4 halfActive = ivec4(int(round(u_hax0)), int(round(u_hay0)), int(round(u_hax1)), int(round(u_hay1)));
+#if TD_COMPACT_BANDS
+        vec2 rMh = td_unpack_band_mh(texelFetch(ref_bands_mh_anc, p, 0).xy);
+        float ancVal = rMh.x + rMh.y;
+#else
+        vec4 rB = texelFetch(ref_bands_anc, p, 0);
+        float ancVal = rB.x + rB.y + rB.z;
+#endif
+        if (!td_is_bad(ancVal))
+        {
+            float alpha = pNew / (pOld + pNew);
+            outVal = (1.0 - alpha) * ancVal + alpha * curVal;
+            outPrec = min(u_max_bank_prec, pOld + pNew);
+        }
+    }
+}
+imageStore(anchor_clean_out, p, vec4(outVal, 0.0, 0.0, 0.0));
+if (p.x == cx * TD_CELL_PX && p.y == cy * TD_CELL_PX)
+{
+    imageStore(anchor_prec_out, cell, vec4(outPrec, agreed ? 1.0 : 0.0, 0.0, 0.0));
+}
+)GLSL";
+
 	// Split kPass2MergeAndSolve into Part1 + Part2 (UPG-MED-1: stay well below MSVC C2026 16,380 B limit!).
 	constexpr const char* kPass2MergeAndSolvePart1 = R"GLSL(
 ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
@@ -3677,6 +3753,8 @@ bandU[2] = 0.0;
 
 int p2bAncIdx = int(round(u_anchor_ref_idx));
 bool p2bAncBarred = (u_has_cell_drift > 0.5) && (p2bAncIdx >= 0) && (texelFetch(cell_drift, cell, 0).y > 0.5);
+float cellDpbVoterGate = 1.0;
+bool cellDpbVoterVetoed = false;
 
 for (int b = 0; b < 3; ++b)
 {
@@ -3872,10 +3950,52 @@ for (int b = 0; b < 3; ++b)
         bool useA2ePrior = (u_use_a2e_prior > 0.5) && ebValid;
         float nEff = td_effective_samples_for_band(b, nPool);
 
-        // RED-BUG-7b + Stage A4-1: Compute per-ref effective gate (motion + anchor bar + matched-focus bokeh) BEFORE A1/QP
-        // so barred, occluded, or rack-focus-mismatched refs NEVER instrument, cross-cap, or steal simplex weight!
+        // Pass 3C Layer 1: Coarse-band (L) 2-vs-1 Agreement Voter BEFORE solving QP (1:1 CPU/GPU parity).
         int ancRefIdx = int(round(u_anchor_ref_idx));
-        bool ancBarred = (ancRefIdx >= 0) && (texelFetch(cell_drift, cell, 0).y > 0.5);
+        vec2 driftCell = (u_has_cell_drift > 0.5) ? texelFetch(cell_drift, cell, 0).xy : vec2(0.0);
+        bool ancBarred = (ancRefIdx >= 0) && (driftCell.y > 0.5);
+        if (b == 0 && u_enable_dpb_bank_v2 > 0.5 && u_enable_dpb_voter > 0.5 && ancRefIdx >= 0)
+        {
+            float ancGateL = ancBarred ? 0.0 : texelFetch(motion_gate, ivec2(ancRefIdx * TD_CW + cell.x, cell.y), 0).x;
+            if (ancGateL > 0.0)
+            {
+                if (focusChange || expFocusChange || driftCell.x > TD_ANCHOR_DRIFT_BAR_PX)
+                {
+                    cellDpbVoterGate = 0.0;
+                }
+                else
+                {
+                    float rmsLocalL = 0.0;
+                    int localPeakCnt = 0;
+                    for (int lk = 0; lk < K; ++lk)
+                    {
+                        if (lk == ancRefIdx || td_ref_role(lk) == 3)
+                            continue;
+                        if (texelFetch(motion_gate, ivec2(lk * TD_CW + cell.x, cell.y), 0).x > 0.0)
+                        {
+                            float dLoc = sqrt(max(0.0, C[lk][lk]));
+                            if (localPeakCnt == 0 || dLoc > rmsLocalL)
+                                rmsLocalL = dLoc;
+                            localPeakCnt += 1;
+                        }
+                    }
+                    if (localPeakCnt > 0)
+                    {
+                        float priorL = ebValid ? max(0.0, ebInfo.x)
+                            : ((u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq * TD_GAIN_LOW) : 0.0);
+                        float sigmaL = sqrt(max(TD_BASE_QUANT_VAR * TD_GAIN_LOW, priorL));
+                        float rmsCarryL = sqrt(max(0.0, C[ancRefIdx][ancRefIdx]));
+                        float excess = rmsCarryL - 2.0 * rmsLocalL;
+                        cellDpbVoterGate = 1.0 - td_smoothstep_c1(2.0 * sigmaL, 3.0 * sigmaL, excess);
+                    }
+                }
+                if (cellDpbVoterGate < 1.0 - 1e-6)
+                    cellDpbVoterVetoed = true;
+            }
+        }
+
+        // RED-BUG-7b + Stage A4-1 + Pass 3C voter: Compute per-ref effective gate BEFORE A1/QP
+        // so barred, occluded, voter-vetoed, or rack-focus-mismatched refs NEVER distort C^-1 or steal simplex weight!
         float cellMGate[3];
         cellMGate[0] = 0.0; cellMGate[1] = 0.0; cellMGate[2] = 0.0;
         int cellActMask = 0;
@@ -3885,6 +4005,12 @@ for (int b = 0; b < 3; ++b)
             float mGate = (b == 0) ? mg.x : mg.y;
             if (k == ancRefIdx && ancBarred)
                 mGate = 0.0;
+            if (u_enable_dpb_bank_v2 > 0.5 && k == ancRefIdx)
+            {
+                mGate *= cellDpbVoterGate;
+                if (u_fade_keep < 1.0)
+                    mGate *= u_fade_keep;
+            }
             if (bokehMatchDelta > 0.0)
             {
                 if (expFocusChange || (regCurOutOfFocus && b >= 1))
@@ -4238,7 +4364,7 @@ imageStore(cell_diag_flags, cell, vec4(
     (focusChange || isDefocused) ? 1.0 : 0.0,
     cellNonFinite ? 1.0 : 0.0,
     cellSingular ? 1.0 : 0.0,
-    cellSingleRefA2 ? 1.0 : 0.0));
+    (cellSingleRefA2 ? 1.0 : 0.0) + (cellDpbVoterVetoed ? 2.0 : 0.0)));
 )GLSL";
 
 	inline std::string BuildPass2MergeAndSolveBody()
@@ -4620,13 +4746,34 @@ float td_soft_clamp_nbr_3sigma(float refVal, float mu, float sig)
     return mu + ((d >= 0.0) ? clampedMag : -clampedMag);
 }
 
-float td_p3_accum_ref(bool activeRef, float ownWk, float curV, float refV, bool applyNbrClamp, float nbrMean, float nbrSigma,
+// Pass 3C Layer 3: Salvi TAA 3x3 min/max + 3-sigma variance envelope strictly inside quantization-cell slack qFloor.
+// Exact 1:1 mirror of CPU ClampToSalvi3x3Envelope in TdV2BlendMath.h.
+float td_dpb_salvi_3x3_clamp(float refVal, float minV, float maxV, float mu, float sig, float qFloor)
+{
+    if (td_is_bad(refVal) || td_is_bad(minV) || td_is_bad(maxV) || td_is_bad(mu) || td_is_bad(sig) || td_is_bad(qFloor))
+        return td_is_bad(mu) ? 0.0 : mu;
+    float q = max(0.0, qFloor);
+    float gamma = sqrt(TD_HUBER_KNEE_SQ);
+    float boxLo = minV - q;
+    float boxHi = maxV + q;
+    float varLo = mu - gamma * max(0.0, sig) - q;
+    float varHi = mu + gamma * max(0.0, sig) + q;
+    float lo = max(boxLo, varLo);
+    float hi = min(boxHi, varHi);
+    if (lo > hi) { lo = boxLo; hi = boxHi; }
+    return clamp(refVal, lo, hi);
+}
+
+float td_p3_accum_ref(bool activeRef, float ownWk, float curV, float refV,
+                      bool applyNbrClamp, bool applyDpbEnv, float nbrMean, float nbrSigma, float nbrMin, float nbrMax, float qFloor,
                       float c00, float c10, float c01, float c11, float q00v, float q10v, float q01v, float q11v,
                       float a00, float a10, float a01, float a11, bool enableHuber)
 {
     if (!activeRef || ownWk <= 0.0)
         return 0.0;
-    float rv = applyNbrClamp ? td_soft_clamp_nbr_3sigma(refV, nbrMean, nbrSigma) : refV;
+    float rv = applyDpbEnv
+        ? td_dpb_salvi_3x3_clamp(refV, nbrMin, nbrMax, nbrMean, nbrSigma, qFloor)
+        : (applyNbrClamp ? td_soft_clamp_nbr_3sigma(refV, nbrMean, nbrSigma) : refV);
     float diff = curV - rv;
     if (td_is_bad(diff))
         return 0.0;
@@ -5018,18 +5165,25 @@ else if (u_enable_edge_aware_upsample > 0.5)
     }
 }
 
-// Compute M and H 3x3 neighborhood stats in ONE single LDS sweep!
+// Compute M and H 3x3 neighborhood stats (mean, sigma, min, max) in ONE single LDS sweep (0 extra LDS!).
 vec2 nbrMeanMH = curB.yz;
 vec2 nbrSigMH = vec2(0.0);
+vec2 nbrMinMH = curB.yz;
+vec2 nbrMaxMH = curB.yz;
 #if TD_NEED_NBR_CLAMP
 {
     vec2 sumS = vec2(0.0);
     vec2 sumSq = vec2(0.0);
+    nbrMinMH = curB.yz;
+    nbrMaxMH = curB.yz;
     for (int dy = 0; dy <= 2; ++dy)
     {
         for (int dx = 0; dx <= 2; ++dx)
         {
-            vec2 s = td_sh_mh[ly + dy][lx + dx] - curB.yz;
+            vec2 vS = td_sh_mh[ly + dy][lx + dx];
+            nbrMinMH = min(nbrMinMH, vS);
+            nbrMaxMH = max(nbrMaxMH, vS);
+            vec2 s = vS - curB.yz;
             sumS += s;
             sumSq += s * s;
         }
@@ -5061,6 +5215,7 @@ float totalDelta = 0.0;
 float boundedDelta = 0.0;
 float sumBandVar = cellU0 + cellU1 + cellU2;
 float boundEngaged = 0.0;
+bool enableDpbEnvClamp = (u_enable_dpb_env_clamp > 0.5);
 
 for (int b = 0; b < 3; ++b)
 {
@@ -5068,9 +5223,14 @@ for (int b = 0; b < 3; ++b)
     float r0v  = (b == 0) ? refB0.x : ((b == 1) ? refB0.y : refB0.z);
     float r1v  = (b == 0) ? refB1.x : ((b == 1) ? refB1.y : refB1.z);
     float r2v  = (b == 0) ? refB2.x : ((b == 1) ? refB2.y : refB2.z);
-    bool applyNbrClamp = enableNbrClamp && (b >= 1);
+    bool applyDpbEnv = enableDpbEnvClamp && (b >= 1);
+    bool applyNbrClamp = (applyDpbEnv || enableNbrClamp) && (b >= 1);
     float nbrMean = (b == 1) ? nbrMeanMH.x : nbrMeanMH.y;
     float nbrSigma = (b == 1) ? nbrSigMH.x : nbrSigMH.y;
+    float nbrMin = (b == 1) ? nbrMinMH.x : nbrMinMH.y;
+    float nbrMax = (b == 1) ? nbrMaxMH.x : nbrMaxMH.y;
+    float bandVar = (b == 0) ? cellU0 : ((b == 1) ? cellU1 : cellU2);
+    float qFloorB = applyDpbEnv ? sqrt(max(TD_BASE_QUANT_VAR * td_band_gain(b), max(0.0, bandVar))) : 0.0;
 #if TD_CELL_PX == 16
     int bOff = b * 9;
     vec4 ownW = td_p3_cw[bOff + 4];
@@ -5095,14 +5255,13 @@ for (int b = 0; b < 3; ++b)
 #endif
 
     float bandDelta = 0.0;
-    bandDelta += td_p3_accum_ref(refOk0, ownW.x, curV, r0v, applyNbrClamp, nbrMean, nbrSigma,
+    bandDelta += td_p3_accum_ref(refOk0, ownW.x, curV, r0v, applyNbrClamp, applyDpbEnv, nbrMean, nbrSigma, nbrMin, nbrMax, qFloorB,
                                  w00.x, w10.x, w01.x, w11.x, d00.x, d10.x, d01.x, d11.x, a00, a10, a01, a11, enableHuber);
-    bandDelta += td_p3_accum_ref(refOk1, ownW.y, curV, r1v, applyNbrClamp, nbrMean, nbrSigma,
+    bandDelta += td_p3_accum_ref(refOk1, ownW.y, curV, r1v, applyNbrClamp, applyDpbEnv, nbrMean, nbrSigma, nbrMin, nbrMax, qFloorB,
                                  w00.y, w10.y, w01.y, w11.y, d00.y, d10.y, d01.y, d11.y, a00, a10, a01, a11, enableHuber);
-    bandDelta += td_p3_accum_ref(refOk2, ownW.z, curV, r2v, applyNbrClamp, nbrMean, nbrSigma,
+    bandDelta += td_p3_accum_ref(refOk2, ownW.z, curV, r2v, applyNbrClamp, applyDpbEnv, nbrMean, nbrSigma, nbrMin, nbrMax, qFloorB,
                                  w00.z, w10.z, w01.z, w11.z, d00.z, d10.z, d01.z, d11.z, a00, a10, a01, a11, enableHuber);
 
-    float bandVar = (b == 0) ? cellU0 : ((b == 1) ? cellU1 : cellU2);
     float clampedBand = bandDelta;
     if (abs(bandDelta) > 0.0)
     {
@@ -6155,7 +6314,7 @@ for (int idx = tid; idx < totalCells; idx += 256)
     a0.w += limited ? 1.0 : 0.0;
 
     a1.x += (df.z > 0.5) ? 1.0 : 0.0;
-    a1.y += (df.w > 0.5) ? 1.0 : 0.0;
+    a1.y += ((int(round(df.w)) & 1) != 0) ? 1.0 : 0.0;
     a1.z += isFace;
     a1.w += max(0.0, wd.x);
 }

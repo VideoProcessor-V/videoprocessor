@@ -3453,6 +3453,10 @@ imageStore(warp_diag, cell, vec4(0.0));
 		double zeroCoeffFraction = 0.0;
 		bool isCutOrSpanInvalid = false;
 		double fadeKeep = 1.0;                   // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN closes delta to 0)
+		bool isFlash = false;                    // s3.5 P4 1-frame flash/strobe: preserve anchor untouched & abstain K=0
+		bool isResync = false;                   // s3.5 VpIndicator discontinuity/seek: cold-start flush WITHOUT seeding frame 0
+		bool isPulldownRepeat = false;           // s3.5 3:2 pulldown repeat: do NOT advance anchor age or double-write anchor
+		bool isAnchorFrame = false;              // Confirmed keyframe peak for Pass 3C persistent GPU chroma anchor bank
 		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
 
 		// Optional precomputed luma cell weights, diagonal variance, and motion-gate textures (3*cw x ch RGBA32F) for Plan 6.6 + Pass 3A:
@@ -3501,6 +3505,11 @@ imageStore(warp_diag, cell, vec4(0.0));
 		bool usedNorm16ChromaL = false;          // Pass 3A SC-06: true when RG16 normalized integer Chroma L bands were used
 		bool usedLeanLumaReuse = false;          // Pass 3A: true when lean chromaReuseLumaWeights skipped C2A/C2EB/C2B
 		bool reusedLumaMotionGate = false;       // Pass 3A: true when Luma's motionGate skipped c1_motion_gate
+		bool anchorReset = false;                // s3.5: hard cut / resync flushed GPU chroma anchor bank
+		bool flashAbstained = false;             // s3.5: P4 flash abstained (K=0, anchor preserved)
+		bool resyncReset = false;                // s3.5: cold-start resync flush (no frame-0 seed)
+		bool fadeFrozenAnchor = false;           // s3.5: U7 fade froze GPU chroma anchor updates
+		bool pulldownRepeatSkipped = false;      // s3.5: 3:2 pulldown repeat skipped anchor update
 		bool scratchShort = false;
 		bool succeeded = false;
 		std::string lastError;
@@ -3538,6 +3547,11 @@ imageStore(warp_diag, cell, vec4(0.0));
 		bool usedNorm16ChromaL = false;          // Pass 3A SC-06: true when RG16 normalized integer Chroma L bands were used
 		bool usedLeanLumaReuse = false;          // Pass 3A: true when lean chromaReuseLumaWeights skipped C2A/C2EB/C2B
 		bool reusedLumaMotionGate = false;       // Pass 3A: true when Luma's motionGate skipped c1_motion_gate
+		bool anchorReset = false;                // s3.5: hard cut / resync flushed GPU chroma anchor bank
+		bool flashAbstained = false;             // s3.5: P4 flash abstained (K=0, anchor preserved)
+		bool resyncReset = false;                // s3.5: cold-start resync flush (no frame-0 seed)
+		bool fadeFrozenAnchor = false;           // s3.5: U7 fade froze GPU chroma anchor updates
+		bool pulldownRepeatSkipped = false;      // s3.5: 3:2 pulldown repeat skipped anchor update
 		bool scratchShort = false;
 		bool succeeded = false;
 		std::string lastError;
@@ -3746,17 +3760,22 @@ imageStore(warp_diag, cell, vec4(0.0));
 		{
 			a2eHistoryCb_.Reset();
 			a2eHistoryCr_.Reset();
+			hasChromaAnchor_ = false;
+			chromaAnchorW_ = 0;
+			chromaAnchorH_ = 0;
+			chromaAnchorAge_ = 0;
 		}
+		bool HasChromaAnchor() const { return hasChromaAnchor_; }
+		int ChromaAnchorAge() const { return chromaAnchorAge_; }
 
 		void Release(pl_gpu gpu)
 		{
-			a2eHistoryCb_.Reset();
-			a2eHistoryCr_.Reset();
+			Reset();
 			if (gpu != nullptr)
 			{
 				DestroyPrivateScratch(gpu);
 				for (pl_tex* t : {
-					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_,
+					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_, &chromaAnchorUvTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outCodedDeltaTex_, &outDelivUvTex_, &outDelivRgbTex_, &outDelivDeltaTex_,
 					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebScratchTex_, &chProjIrTex_, &inLumaCellWeightsTex_ })
@@ -3774,7 +3793,7 @@ imageStore(warp_diag, cell, vec4(0.0));
 					&privRefFlags_[0], &privRefFlags_[1],
 					&privMotionGate_, &privWeightsCb_, &privWeightsCr_, &privDiagCb_, &privDiagCr_,
 					&privStatsCb_, &privStatsCr_, &privOwnGrain_, &privWarpDiag_, &privDiagFlags_, &privGuardCell_,
-					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_,
+					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_, &chromaAnchorUvTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outCodedDeltaTex_, &outDelivUvTex_, &outDelivRgbTex_, &outDelivDeltaTex_,
 					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebScratchTex_, &chProjIrTex_, &inLumaCellWeightsTex_ })
@@ -3788,7 +3807,7 @@ imageStore(warp_diag, cell, vec4(0.0));
 		{
 			uint64_t total = 0;
 			for (pl_tex t : {
-				inRecUvTex_, inRecRgbTex_, inCleanUvTex_, inRefUvTex_,
+				inRecUvTex_, inRecRgbTex_, inCleanUvTex_, inRefUvTex_, chromaAnchorUvTex_,
 				inMotionVecTex_, inMotionMetaTex_, inCellPriorTex_, inFaceMaskTex_,
 				outCodedDeltaTex_, outDelivUvTex_, outDelivRgbTex_, outDelivDeltaTex_,
 				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, ebPriorTex_, ebScratchTex_, chProjIrTex_, inLumaCellWeightsTex_ })
@@ -4153,17 +4172,73 @@ imageStore(warp_diag, cell, vec4(0.0));
 					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ChromaGpuEngine non-finite fadeKeep; failing closed to 0.0");
 				out.nonFiniteCells = numCells;
 			}
+			const bool isFadeActive = (effFadeKeep > 0.0 && effFadeKeep < 1.0);
 			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
-			if (effectiveCut)
+			if (in.isResync)
 			{
-				a2eHistoryCb_.Reset();
-				a2eHistoryCr_.Reset();
+				Reset();
+				out.anchorReset = true;
+				out.resyncReset = true;
 			}
-
-			if (!effectiveCut)
+			else if (in.isFlash && !effectiveCut)
 			{
-				tryAddRef(in.prevPeak, 0, 0);
-				tryAddRef(in.nextPeak, 1, 1);
+				out.flashAbstained = true;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::FlashFrameAbstained, "TdV2ChromaGpuEngine P4 flash abstained (K=0, anchor preserved)");
+			}
+			else
+			{
+				if (effectiveCut)
+				{
+					Reset();
+					out.anchorReset = true;
+				}
+				if (in.isPulldownRepeat)
+					out.pulldownRepeatSkipped = true;
+				if (!effectiveCut)
+				{
+					tryAddRef(in.prevPeak, 0, 0);
+					tryAddRef(in.nextPeak, 1, 1);
+				}
+			}
+			// Pass 3C persistent GPU chroma anchor bank lifecycle (strictly grain-free, s3.5 compliant, 0 VRAM when OFF):
+			if (cfg_.enableDpbDetailBankV2 && cfg_.enableAnchoredCarry && !in.isResync && !in.isFlash)
+			{
+				if (in.isAnchorFrame && isFadeActive)
+				{
+					out.fadeFrozenAnchor = true;
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::CadenceSuspendedFade, "TdV2ChromaGpuEngine U7 fade froze chroma anchor bank");
+				}
+				else if (in.isAnchorFrame && !in.isPulldownRepeat && in.hasCleanSplit && in.cleanUvTex != nullptr &&
+				         in.cleanUvTex->params.w == cW && in.cleanUvTex->params.h == cH)
+				{
+					if (Detail::EnsureTex(gpu, chromaAnchorUvTex_, cW, cH, fmtRG32, true, true, false, false))
+					{
+						const std::string cpyHdr = VpvGpu::DefineInt("TD_CH_W", cW) + VpvGpu::DefineInt("TD_CH_H", cH);
+						constexpr const char* kCopyRgBody = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x >= TD_CH_W || p.y >= TD_CH_H) return;
+imageStore(dst_uv, p, vec4(texelFetch(src_uv, p, 0).xy, 0.0, 0.0));
+)GLSL";
+						pl_shader_desc dc[2] = {
+							VpvGpu::Sampled("src_uv", in.cleanUvTex),
+							VpvGpu::Storage("dst_uv", chromaAnchorUvTex_)
+						};
+						if (VpvGpu::Pass(dispatch, "td_v2_chroma_anchor_snapshot", cpyHdr, kCopyRgBody, dc, 2, nullptr, 0,
+						                 Detail::GroupsFor(cW, 16), Detail::GroupsFor(cH, 16), 0, 16, 16))
+						{
+							hasChromaAnchor_ = true;
+							chromaAnchorW_ = cW;
+							chromaAnchorH_ = cH;
+							chromaAnchorAge_ = 1;
+						}
+					}
+				}
+				else if (hasChromaAnchor_ && !in.isPulldownRepeat)
+				{
+					++chromaAnchorAge_;
+				}
 			}
 			out.activeRefCount = refSpecs.size();
 
@@ -5605,6 +5680,10 @@ float td_huber_taper(float diffSq, float diagC)
 			gIn.zeroCoeffFraction = in.zeroCoeffFraction;
 			gIn.isCutOrSpanInvalid = in.isCutOrSpanInvalid;
 			gIn.fadeKeep = in.fadeKeep;
+			gIn.isFlash = in.isFlash;
+			gIn.isResync = in.isResync;
+			gIn.isPulldownRepeat = in.isPulldownRepeat;
+			gIn.isAnchorFrame = in.isAnchorFrame;
 			gIn.psdShape = in.psdShape;
 			gIn.lumaRefRoles = in.lumaRefRoles;
 			gIn.lumaActiveRefCount = in.lumaActiveRefCount;
@@ -5759,6 +5838,11 @@ float td_huber_taper(float diffSq, float diagC)
 			res.usedNorm16ChromaL = gOut.usedNorm16ChromaL;
 			res.usedLeanLumaReuse = gOut.usedLeanLumaReuse;
 			res.reusedLumaMotionGate = gOut.reusedLumaMotionGate;
+			res.anchorReset = gOut.anchorReset;
+			res.flashAbstained = gOut.flashAbstained;
+			res.resyncReset = gOut.resyncReset;
+			res.fadeFrozenAnchor = gOut.fadeFrozenAnchor;
+			res.pulldownRepeatSkipped = gOut.pulldownRepeatSkipped;
 			res.scratchShort = gOut.scratchShort;
 			res.lastError = gOut.lastError;
 			if (!ok)
@@ -5981,6 +6065,11 @@ float td_huber_taper(float diffSq, float diagC)
 		pl_tex inRecRgbTex_ = nullptr;
 		pl_tex inCleanUvTex_ = nullptr;
 		pl_tex inRefUvTex_ = nullptr;
+		pl_tex chromaAnchorUvTex_ = nullptr;
+		bool hasChromaAnchor_ = false;
+		int chromaAnchorW_ = 0;
+		int chromaAnchorH_ = 0;
+		int chromaAnchorAge_ = 0;
 		pl_tex inMotionVecTex_ = nullptr;
 		pl_tex inMotionMetaTex_ = nullptr;
 		pl_tex inCellPriorTex_ = nullptr;

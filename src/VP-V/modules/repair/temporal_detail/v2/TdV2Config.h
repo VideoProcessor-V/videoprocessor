@@ -346,6 +346,23 @@ namespace TdV2
 		bool enablePeakV2InnovationBidir = true;
 		bool enablePeakV2CadenceLock = true;
 
+		// Pass 3C — Encoder-DPB Keyframe Detail Bank & 3-Layer Agreement-Gated Carry (strictly DEFAULT OFF):
+		//   - enableDpbDetailBankV2: upgrades anchored carry into a shot-scoped persistent Keyframe Detail Bank
+		//     with zero-drift composed camera homography, progressive 1/sigma^2 grain-free Kalman accumulation,
+		//     Layer 1 coarse-band (L) 2-vs-1 agreement voter, and Layer 3 Salvi 3x3 neighborhood envelope clamp.
+		//     Default OFF -> legacy enableAnchoredCarry stays 100% bit-identical.
+		//   - enableDpbHomographyTracking: single-resample composed H_{key->t} on Camera cells (8-32+ frames).
+		//   - enableDpbKalmanAccum: progressive precision-weighted (1/sigma^2) grain-free Kalman update on static/agreed cells.
+		//   - enableDpbAgreementVoter: Layer 1 coarse-band (L) 2-vs-1 agreement voter before joint covariance solve.
+		//   - enableDpbNeighborhoodEnvelopeClamp: Layer 3 Salvi 3x3 min/max+variance clamp strictly inside quant-cell bound.
+		//   - maxDpbBankAgeFrames: max age in unique source frames for DPB detail bank (default 32 = 4 * kContractBackRefs).
+		bool enableDpbDetailBankV2 = false;
+		bool enableDpbHomographyTracking = true;
+		bool enableDpbKalmanAccum = true;
+		bool enableDpbAgreementVoter = true;
+		bool enableDpbNeighborhoodEnvelopeClamp = true;
+		int maxDpbBankAgeFrames = 4 * kContractBackRefs;
+
 		// Measured source rate in Hz (used to express any temporal horizon in seconds, never hardcoded frame counts).
 		double sourceHz = kDefaultSourceHz;
 

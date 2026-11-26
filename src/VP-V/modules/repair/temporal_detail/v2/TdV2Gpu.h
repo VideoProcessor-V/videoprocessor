@@ -97,6 +97,13 @@ namespace Gpu
 		bool usedNorm16Bands = false;            // Pass 3A SC-06: true when RG16 normalized integer bands were used
 		uint64_t bandRingHits = 0;               // Pass 3A: 3-frame band ring cache hits this frame
 		uint64_t bandRingMisses = 0;             // Pass 3A: 3-frame band ring cache misses this frame
+		size_t voterCarryVetoCells = 0;          // Pass 3C Layer 1: L-band 2-vs-1 voter vetoed cells
+		size_t dpbKalmanUpdatedCells = 0;        // Pass 3C: progressive Kalman updated bank cells
+		bool dpbHomographyUsed = false;          // Pass 3C: single-resample composed H_{key->t} active
+		bool flashAbstained = false;             // s3.5: P4 flash abstained (K=0, bank preserved)
+		bool resyncReset = false;                // s3.5: cold-start resync flush (no frame-0 seed)
+		bool fadeFrozenBank = false;             // s3.5: U7 fade froze bank updates
+		bool pulldownRepeatSkipped = false;      // s3.5: 3:2 pulldown repeat skipped age/bank advance
 		bool succeeded = false;
 		std::string lastError;
 	};
@@ -187,6 +194,12 @@ namespace Gpu
 
 		// Pass 3A optional explicit active-tile coverage override in [0, 1] (< 0.0 => computed from activeRect/faceMask).
 		double activeTileFractionOverride = -1.0;
+
+		// Pass 3C & s3.5 mandatory scene/continuity contract inputs (all default-inert when unset):
+		bool isFlash = false;
+		bool isResync = false;
+		bool isPulldownRepeat = false;
+		Homography3x3 stepCameraHomography;
 	};
 
 	struct GpuFrameOutput
@@ -240,6 +253,13 @@ namespace Gpu
 		bool usedNorm16Bands = false;            // Pass 3A SC-06: true when RG16 normalized integer bands were used
 		uint64_t bandRingHits = 0;               // Pass 3A: 3-frame band ring cache hits this frame
 		uint64_t bandRingMisses = 0;             // Pass 3A: 3-frame band ring cache misses this frame
+		size_t voterCarryVetoCells = 0;          // Pass 3C Layer 1: L-band 2-vs-1 voter vetoed cells
+		size_t dpbKalmanUpdatedCells = 0;        // Pass 3C: progressive Kalman updated bank cells
+		bool dpbHomographyUsed = false;          // Pass 3C: single-resample composed H_{key->t} active
+		bool flashAbstained = false;             // s3.5: P4 flash abstained (K=0, bank preserved)
+		bool resyncReset = false;                // s3.5: cold-start resync flush (no frame-0 seed)
+		bool fadeFrozenBank = false;             // s3.5: U7 fade froze bank updates
+		bool pulldownRepeatSkipped = false;      // s3.5: 3:2 pulldown repeat skipped age/bank advance
 		bool succeeded = false;
 		std::string lastError;
 		std::vector<TdMapsView::Block> tdMaps;
@@ -628,6 +648,8 @@ namespace Gpu
 			anchorAgeFrames_ = 0;
 			ancBarSlot_ = 0;
 			anchorSourceTex_ = nullptr;
+			anchorHomography_ = Homography3x3{};
+			anchorPrecSlot_ = 0;
 			hasAnchorSampleSig_ = false;
 			anchorSampleSig_.clear();
 			anchorSampleW_ = 0;
@@ -652,7 +674,7 @@ namespace Gpu
 			}
 			if (gpu != nullptr)
 			{
-				for (pl_tex* t : { &carryCleanTex_, &anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &cellDriftTex_ })
+				for (pl_tex* t : { &carryCleanTex_, &anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &anchorPrecTex_[0], &anchorPrecTex_[1], &cellDriftTex_ })
 				{
 					if (*t != nullptr)
 						pl_tex_destroy(gpu, t);
@@ -676,7 +698,7 @@ namespace Gpu
 					&outLumaCellDiagCTex_, &outLumaMotionGateTex_,
 					&ebPriorTex_, &ebScratchTex_, &counterSummaryTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
 					&dummySampledTex_[0], &dummySampledTex_[1], &dummySampledTex_[2], &dummySampledTex_[3],
-					&anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &cellDriftTex_,
+					&anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &anchorPrecTex_[0], &anchorPrecTex_[1], &cellDriftTex_,
 					&chromaCodedDeltaTex_, &chromaDelivUvTex_, &chromaDelivRgbTex_,
 					&chromaOutUvTex_, &chromaOutRgbTex_, &chromaOutDeltaTex_ })
 				{
@@ -695,7 +717,7 @@ namespace Gpu
 					&privMotionGate_, &privCellWeights_, &privCellDiagC_, &privCellStats_, &privCellFocus_,
 					&ebPriorTex_, &ebScratchTex_, &counterSummaryTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
 					&dummySampledTex_[0], &dummySampledTex_[1], &dummySampledTex_[2], &dummySampledTex_[3],
-					&carryCleanTex_, &anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &cellDriftTex_,
+					&carryCleanTex_, &anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &anchorPrecTex_[0], &anchorPrecTex_[1], &cellDriftTex_,
 					&inRecYTex_, &inCleanYTex_, &inRefCleanTex_, &inCodecModelPbTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&inAnchorCompMvTex_, &inDirectP2pMvTex_,
@@ -1275,7 +1297,89 @@ namespace Gpu
 					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2GpuEngine::ProcessFrameGpu non-finite fadeKeep; failing closed to 0.0");
 				out.nonFiniteCells = numCells;
 			}
+			const bool isFadeActive = (effFadeKeep > 0.0 && effFadeKeep < 1.0);
 			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
+
+			// s3.5 Resync / Discontinuity / Seek: full cold-start flush WITHOUT seeding frame 0!
+			if (in.isResync)
+			{
+				ResetCarry(gpu);
+				out.carryReset = true;
+				out.resyncReset = true;
+				hasLastSeq_ = true;
+				lastSeq_ = in.seq;
+				// Copy passthrough outputs without touching carry/bank.
+				const bool copyClean = (out.outputCleanTex != nullptr);
+				const bool copyOutY = cfg_.ModifiesPixels() && (out.outputYTex != nullptr);
+				const bool zeroDelta = (out.tdDeltaTex != nullptr);
+				if (copyClean || copyOutY || zeroDelta)
+				{
+					const bool distinctRec = copyOutY && (curCleanTex != in.receivedYTex);
+					std::string hdr = Detail::StaticGeomDefines(w, h, out.cellsW, out.cellsH, cellPx);
+					hdr += VpvGpu::DefineInt("TD_SEED_HAS_CLEAN", copyClean ? 1 : 0);
+					hdr += VpvGpu::DefineInt("TD_SEED_HAS_OUT_Y", copyOutY ? 1 : 0);
+					hdr += VpvGpu::DefineInt("TD_SEED_HAS_DELTA", zeroDelta ? 1 : 0);
+					hdr += VpvGpu::DefineInt("TD_SEED_DISTINCT_REC", distinctRec ? 1 : 0);
+					hdr += Shaders::kCoreHelpers;
+					const pl_fmt fmtR32Tmp = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R32F);
+					if (fmtR32Tmp && Detail::EnsureTex(gpu, dummySampledTex_[3], w, h, fmtR32Tmp, true, true, false, false))
+					{
+						pl_shader_desc d[6]{};
+						int nd = 0;
+						d[nd++] = VpvGpu::Sampled("src_clean", curCleanTex);
+						if (distinctRec) d[nd++] = VpvGpu::Sampled("src_rec", in.receivedYTex);
+						d[nd++] = VpvGpu::Storage("dst_carry", dummySampledTex_[3]);
+						if (copyClean) d[nd++] = VpvGpu::Storage("dst_clean", out.outputCleanTex);
+						if (copyOutY) d[nd++] = VpvGpu::Storage("dst_out_y", out.outputYTex);
+						if (zeroDelta) d[nd++] = VpvGpu::Storage("dst_delta", out.tdDeltaTex);
+						VpvGpu::Pass(dispatch, "td_v2_p0_resync_pass", hdr, Shaders::kPassSeedCopy,
+						             d, nd, nullptr, 0, Detail::GroupsFor(w, 16), Detail::GroupsFor(h, 16), 0, 16, 16);
+					}
+				}
+				out.succeeded = true;
+				return true;
+			}
+
+			// s3.5 Flash / Strobe (P4): preserve pre-flash bank, carry, & bandRing untouched; abstain cleanly (K = 0)!
+			if (in.isFlash && !effectiveCut)
+			{
+				out.flashAbstained = true;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::FlashFrameAbstained, "TdV2GpuEngine::ProcessFrameGpu P4 flash abstained (K=0, bank preserved)");
+				if (hasAnchor_ && !in.isPulldownRepeat)
+					++anchorAgeFrames_;
+				hasLastSeq_ = true;
+				lastSeq_ = in.seq;
+				const bool copyClean = (out.outputCleanTex != nullptr);
+				const bool copyOutY = cfg_.ModifiesPixels() && (out.outputYTex != nullptr);
+				const bool zeroDelta = (out.tdDeltaTex != nullptr);
+				if (copyClean || copyOutY || zeroDelta)
+				{
+					const bool distinctRec = copyOutY && (curCleanTex != in.receivedYTex);
+					std::string hdr = Detail::StaticGeomDefines(w, h, out.cellsW, out.cellsH, cellPx);
+					hdr += VpvGpu::DefineInt("TD_SEED_HAS_CLEAN", copyClean ? 1 : 0);
+					hdr += VpvGpu::DefineInt("TD_SEED_HAS_OUT_Y", copyOutY ? 1 : 0);
+					hdr += VpvGpu::DefineInt("TD_SEED_HAS_DELTA", zeroDelta ? 1 : 0);
+					hdr += VpvGpu::DefineInt("TD_SEED_DISTINCT_REC", distinctRec ? 1 : 0);
+					hdr += Shaders::kCoreHelpers;
+					const pl_fmt fmtR32Tmp = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R32F);
+					if (fmtR32Tmp && Detail::EnsureTex(gpu, dummySampledTex_[3], w, h, fmtR32Tmp, true, true, false, false))
+					{
+						pl_shader_desc d[6]{};
+						int nd = 0;
+						d[nd++] = VpvGpu::Sampled("src_clean", curCleanTex);
+						if (distinctRec) d[nd++] = VpvGpu::Sampled("src_rec", in.receivedYTex);
+						d[nd++] = VpvGpu::Storage("dst_carry", dummySampledTex_[3]);
+						if (copyClean) d[nd++] = VpvGpu::Storage("dst_clean", out.outputCleanTex);
+						if (copyOutY) d[nd++] = VpvGpu::Storage("dst_out_y", out.outputYTex);
+						if (zeroDelta) d[nd++] = VpvGpu::Storage("dst_delta", out.tdDeltaTex);
+						VpvGpu::Pass(dispatch, "td_v2_p0_flash_pass", hdr, Shaders::kPassSeedCopy,
+						             d, nd, nullptr, 0, Detail::GroupsFor(w, 16), Detail::GroupsFor(h, 16), 0, 16, 16);
+					}
+				}
+				out.succeeded = true;
+				return true;
+			}
 
 			const bool seqDiscontinuous = hasCarry_ && hasLastSeq_ &&
 				!(in.seq == 0 && lastSeq_ == 0) &&
@@ -1285,6 +1389,10 @@ namespace Gpu
 				ResetCarry(gpu);
 				out.carryReset = true;
 			}
+			if (isFadeActive && cfg_.enableDpbDetailBankV2 && standIns != nullptr)
+				standIns->Engage(StandInKind::CadenceSuspendedFade, "TdV2GpuEngine::ProcessFrameGpu U7 fade active (bank frozen)");
+			if (in.isPulldownRepeat)
+				out.pulldownRepeatSkipped = true;
 
 			if (!hasClean && standIns != nullptr)
 				standIns->Engage(StandInKind::P10gGrainSeparator, "no upstream P10g split supplied");
@@ -1375,17 +1483,36 @@ namespace Gpu
 			};
 
 			int anchoredCarryRefIdx = -1;
-			const int maxAnchorAge = cfg_.maxAnchorAgeFrames > 0 ? cfg_.maxAnchorAgeFrames : kContractBackRefs;
+			const int maxAnchorAge = cfg_.enableDpbDetailBankV2
+				? (cfg_.maxDpbBankAgeFrames > 0 ? cfg_.maxDpbBankAgeFrames : 4 * kContractBackRefs)
+				: (cfg_.maxAnchorAgeFrames > 0 ? cfg_.maxAnchorAgeFrames : kContractBackRefs);
 			if (hasAnchor_ && (anchorAgeFrames_ > maxAnchorAge || anchorW_ != w || anchorH_ != h))
 			{
 				hasAnchor_ = false;
 				anchorW_ = 0;
 				anchorH_ = 0;
 				anchorAgeFrames_ = 0;
+				anchorHomography_ = Homography3x3{};
+			}
+
+			// Pass 3C: Compose single-resample camera homography H_{cur->key} on unique non-repeat frames.
+			const ActiveRect effActCovGpu = in.activeRect.Empty() ? ActiveRect::Full(w, h) : in.activeRect.ClampedTo(w, h);
+			if (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbHomographyTracking &&
+			    hasAnchor_ && !in.isPulldownRepeat && in.stepCameraHomography.valid)
+			{
+				if (!anchorHomography_.valid)
+					anchorHomography_ = in.stepCameraHomography;
+				else
+					anchorHomography_ = Homography3x3::Compose(anchorHomography_, in.stepCameraHomography);
+				if (!anchorHomography_.valid || anchorHomography_.HasDegenerateProjection(effActCovGpu.x0, effActCovGpu.y0, effActCovGpu.x1, effActCovGpu.y1))
+				{
+					anchorHomography_ = Homography3x3{};
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::NonFiniteClosure, "TdV2GpuEngine composed anchorHomography degenerate/non-finite");
+				}
 			}
 
 			// Pass 3A adaptive-K & budget-protection controller (4K60 auto K=1, Role-Adaptive K=0/1/2, Coverage-Adaptive K=2->1).
-			const ActiveRect effActCovGpu = in.activeRect.Empty() ? ActiveRect::Full(w, h) : in.activeRect.ClampedTo(w, h);
 			double activeTileFracGpu = 1.0;
 			if (in.activeTileFractionOverride >= 0.0 && std::isfinite(in.activeTileFractionOverride))
 			{
@@ -1463,11 +1590,16 @@ namespace Gpu
 				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
 				{
 					const int aSlot = hasPrepackedMotion ? 2 : pickUnusedSlot(2, 1, 0);
-					if (tryAddGpuRef(anchorCleanTex_, false, aSlot, static_cast<int>(RefRole::PrevPeak2), in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false))
+					const Homography3x3 ancCamH = (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbHomographyTracking && anchorHomography_.valid)
+						? anchorHomography_
+						: Homography3x3{};
+					if (tryAddGpuRef(anchorCleanTex_, false, aSlot, static_cast<int>(RefRole::PrevPeak2), in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false, ancCamH))
 					{
 						anchoredCarryRefIdx = static_cast<int>(refSpecs.size()) - 1;
 						out.anchoredCarryUsed = true;
 						out.carryUsed = true;
+						if (ancCamH.valid)
+							out.dpbHomographyUsed = true;
 					}
 				}
 				else if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
@@ -1588,7 +1720,7 @@ namespace Gpu
 				hasCarry_ = true;
 				carryW_ = w;
 				carryH_ = h;
-				if (in.isConfirmedPeak && cfg_.enableAnchoredCarry)
+				if (in.isConfirmedPeak && cfg_.enableAnchoredCarry && !isFadeActive && !in.isPulldownRepeat)
 				{
 					if (Detail::EnsureTex(gpu, anchorCleanTex_, w, h, fmtR32, true, true, false, false))
 					{
@@ -1608,17 +1740,33 @@ namespace Gpu
 							anchorW_ = w;
 							anchorH_ = h;
 							anchorAgeFrames_ = 1;
+							anchorHomography_ = Homography3x3::Identity(true);
 							ancBarSlot_ = 0;
+							anchorPrecSlot_ = 0;
 							anchorSourceTex_ = curCleanTex;
 							if (Detail::EnsureTex(gpu, anchorBarredTex_[0], out.cellsW, out.cellsH, fmtR32, true, true, true, false))
 							{
 								std::vector<float> zBar(numCells, 0.0f);
 								Detail::UploadFloats(gpu, anchorBarredTex_[0], zBar.data());
 							}
+							if (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbKalmanAccum &&
+							    Detail::EnsureTex(gpu, anchorPrecTex_[0], out.cellsW, out.cellsH, fmtRG32, true, true, true, true))
+							{
+								const double dS = DepthScale(cfg_.sourceBits);
+								const double bqVar = (dS * dS) / 12.0;
+								const float pInit = (bqVar > 1e-12) ? static_cast<float>(1.0 / bqVar) : 1.0f;
+								std::vector<float> pBuf(numCells * 2u, 0.0f);
+								for (size_t i = 0; i < numCells; ++i) pBuf[i * 2u] = pInit;
+								Detail::UploadFloats(gpu, anchorPrecTex_[0], pBuf.data());
+							}
 						}
 					}
 				}
-				else if (hasAnchor_)
+				else if (in.isConfirmedPeak && isFadeActive)
+				{
+					out.fadeFrozenBank = true;
+				}
+				else if (hasAnchor_ && !in.isPulldownRepeat)
 				{
 					++anchorAgeFrames_;
 				}
@@ -1703,6 +1851,7 @@ namespace Gpu
 			p.transformIdentified8x8 = in.transformIdentified8x8;
 			p.frameRole = in.frameRole;
 			p.isConfirmedPeak = in.isConfirmedPeak;
+			p.isPulldownRepeat = in.isPulldownRepeat;
 			p.anchoredCarryRefIdx = anchoredCarryRefIdx;
 			p.hasAnchorComposedMotion = in.hasAnchorComposedMotion;
 			p.anchorComposedMotion = in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr;
@@ -1744,6 +1893,9 @@ namespace Gpu
 			out.usedNorm16Bands = oc.usedNorm16Bands;
 			out.bandRingHits = oc.bandRingHits;
 			out.bandRingMisses = oc.bandRingMisses;
+			out.voterCarryVetoCells = oc.voterCarryVetoCells;
+			out.dpbKalmanUpdatedCells = oc.dpbKalmanUpdatedCells;
+			out.fadeFrozenBank = out.fadeFrozenBank || oc.fadeFrozenBank;
 			out.lumaActiveRefCount = lastLumaActiveRefCount_;
 			for (int i = 0; i < 3; ++i)
 				out.lumaRefRoles[i] = lastLumaRefRoles_[i];
@@ -1846,7 +1998,34 @@ namespace Gpu
 					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2GpuEngine non-finite fadeKeep; failing closed to 0.0");
 				res.nonFiniteCells = numCells;
 			}
+			const bool isFadeActive = (effFadeKeep > 0.0 && effFadeKeep < 1.0);
 			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
+
+			// s3.5 Resync / Discontinuity / Seek: full cold-start flush WITHOUT seeding frame 0!
+			if (in.isResync)
+			{
+				ResetCarry(gpu);
+				res.carryReset = true;
+				res.resyncReset = true;
+				hasLastSeq_ = true;
+				lastSeq_ = in.seq;
+				res.succeeded = true;
+				return res;
+			}
+
+			// s3.5 Flash / Strobe (P4): preserve pre-flash bank & carry untouched; abstain cleanly (K = 0)!
+			if (in.isFlash && !effectiveCut)
+			{
+				res.flashAbstained = true;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::FlashFrameAbstained, "TdV2GpuEngine P4 flash abstained (K=0, bank preserved)");
+				if (hasAnchor_ && !in.isPulldownRepeat)
+					++anchorAgeFrames_;
+				hasLastSeq_ = true;
+				lastSeq_ = in.seq;
+				res.succeeded = true;
+				return res;
+			}
 
 			// Cut / invalid span, fadeKeep <= 0, resolution change, seek, or non-consecutive frame sequence resets recurrent carry cleanly.
 			const bool seqDiscontinuous = hasCarry_ && hasLastSeq_ &&
@@ -1857,6 +2036,10 @@ namespace Gpu
 				ResetCarry(gpu);
 				res.carryReset = true;
 			}
+			if (isFadeActive && cfg_.enableDpbDetailBankV2 && standIns != nullptr)
+				standIns->Engage(StandInKind::CadenceSuspendedFade, "TdV2GpuEngine U7 fade active (bank frozen)");
+			if (in.isPulldownRepeat)
+				res.pulldownRepeatSkipped = true;
 
 			// Validate receivedY finite upfront (matches TdV2ReferenceEngine fail-closed behavior).
 			for (double val : in.receivedY.v)
@@ -1991,13 +2174,32 @@ namespace Gpu
 			};
 
 			int anchoredCarryRefIdx = -1;
-			const int maxAnchorAge = cfg_.maxAnchorAgeFrames > 0 ? cfg_.maxAnchorAgeFrames : kContractBackRefs;
+			const int maxAnchorAge = cfg_.enableDpbDetailBankV2
+				? (cfg_.maxDpbBankAgeFrames > 0 ? cfg_.maxDpbBankAgeFrames : 4 * kContractBackRefs)
+				: (cfg_.maxAnchorAgeFrames > 0 ? cfg_.maxAnchorAgeFrames : kContractBackRefs);
 			if (hasAnchor_ && (anchorAgeFrames_ > maxAnchorAge || anchorW_ != w || anchorH_ != h))
 			{
 				hasAnchor_ = false;
 				anchorW_ = 0;
 				anchorH_ = 0;
 				anchorAgeFrames_ = 0;
+				anchorHomography_ = Homography3x3{};
+			}
+
+			// Pass 3C: Compose single-resample camera homography H_{cur->key} on unique non-repeat frames.
+			if (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbHomographyTracking &&
+			    hasAnchor_ && !in.isPulldownRepeat && in.stepCameraHomography.valid)
+			{
+				if (!anchorHomography_.valid)
+					anchorHomography_ = in.stepCameraHomography;
+				else
+					anchorHomography_ = Homography3x3::Compose(anchorHomography_, in.stepCameraHomography);
+				if (!anchorHomography_.valid || anchorHomography_.HasDegenerateProjection(active.x0, active.y0, active.x1, active.y1))
+				{
+					anchorHomography_ = Homography3x3{};
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::NonFiniteClosure, "TdV2GpuEngine composed anchorHomography degenerate/non-finite");
+				}
 			}
 
 			// Pass 3A adaptive-K & budget-protection controller (1:1 CPU parity!).
@@ -2066,11 +2268,16 @@ namespace Gpu
 				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
 				{
 					const int aSlot = pickUnusedSlot(2, 1, 0);
-					if (tryAddRefSpec(nullptr, false, aSlot, static_cast<int>(RefRole::PrevPeak2), in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false, Homography3x3{}, anchorCleanTex_))
+					const Homography3x3 ancCamH = (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbHomographyTracking && anchorHomography_.valid)
+						? anchorHomography_
+						: Homography3x3{};
+					if (tryAddRefSpec(nullptr, false, aSlot, static_cast<int>(RefRole::PrevPeak2), in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false, ancCamH, anchorCleanTex_))
 					{
 						anchoredCarryRefIdx = static_cast<int>(refSpecs.size()) - 1;
 						res.anchoredCarryUsed = true;
 						res.carryUsed = true;
+						if (ancCamH.valid)
+							res.dpbHomographyUsed = true;
 					}
 				}
 				else if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
@@ -2114,7 +2321,7 @@ namespace Gpu
 				hasCarry_ = true;
 				carryW_ = w;
 				carryH_ = h;
-				if (in.isConfirmedPeak && cfg_.enableAnchoredCarry)
+				if (in.isConfirmedPeak && cfg_.enableAnchoredCarry && !isFadeActive && !in.isPulldownRepeat)
 				{
 					if (Detail::EnsureTex(gpu, anchorCleanTex_, w, h, fmtR32, true, true, true, false) &&
 					    Detail::UploadPlaneR32F(gpu, anchorCleanTex_, curCleanPlane))
@@ -2123,17 +2330,33 @@ namespace Gpu
 						anchorW_ = w;
 						anchorH_ = h;
 						anchorAgeFrames_ = 1;
+						anchorHomography_ = Homography3x3::Identity(true);
 						anchorSourceTex_ = nullptr;
 						ancBarSlot_ = 0;
+						anchorPrecSlot_ = 0;
 						RecordAnchorSampleSig(curCleanPlane);
 						if (Detail::EnsureTex(gpu, anchorBarredTex_[0], res.cellsW, res.cellsH, fmtR32, true, true, true, false))
 						{
 							std::vector<float> zBar(numCells, 0.0f);
 							Detail::UploadFloats(gpu, anchorBarredTex_[0], zBar.data());
 						}
+						if (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbKalmanAccum &&
+						    Detail::EnsureTex(gpu, anchorPrecTex_[0], res.cellsW, res.cellsH, fmtRG32, true, true, true, true))
+						{
+							const double dS = DepthScale(cfg_.sourceBits);
+							const double bqVar = (dS * dS) / 12.0;
+							const float pInit = (bqVar > 1e-12) ? static_cast<float>(1.0 / bqVar) : 1.0f;
+							std::vector<float> pBuf(numCells * 2u, 0.0f);
+							for (size_t i = 0; i < numCells; ++i) pBuf[i * 2u] = pInit;
+							Detail::UploadFloats(gpu, anchorPrecTex_[0], pBuf.data());
+						}
 					}
 				}
-				else if (hasAnchor_)
+				else if (in.isConfirmedPeak && isFadeActive)
+				{
+					res.fadeFrozenBank = true;
+				}
+				else if (hasAnchor_ && !in.isPulldownRepeat)
 				{
 					++anchorAgeFrames_;
 				}
@@ -2173,7 +2396,7 @@ namespace Gpu
 				hasCarry_ = true;
 				carryW_ = w;
 				carryH_ = h;
-				if (in.isConfirmedPeak && cfg_.enableAnchoredCarry)
+				if (in.isConfirmedPeak && cfg_.enableAnchoredCarry && !isFadeActive && !in.isPulldownRepeat)
 				{
 					if (Detail::EnsureTex(gpu, anchorCleanTex_, w, h, fmtR32, true, true, true, false) &&
 					    Detail::UploadPlaneR32F(gpu, anchorCleanTex_, curCleanPlane))
@@ -2182,17 +2405,33 @@ namespace Gpu
 						anchorW_ = w;
 						anchorH_ = h;
 						anchorAgeFrames_ = 1;
+						anchorHomography_ = Homography3x3::Identity(true);
 						anchorSourceTex_ = nullptr;
 						ancBarSlot_ = 0;
+						anchorPrecSlot_ = 0;
 						RecordAnchorSampleSig(curCleanPlane);
 						if (Detail::EnsureTex(gpu, anchorBarredTex_[0], res.cellsW, res.cellsH, fmtR32, true, true, true, false))
 						{
 							std::vector<float> zBar(numCells, 0.0f);
 							Detail::UploadFloats(gpu, anchorBarredTex_[0], zBar.data());
 						}
+						if (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbKalmanAccum &&
+						    Detail::EnsureTex(gpu, anchorPrecTex_[0], res.cellsW, res.cellsH, fmtRG32, true, true, true, true))
+						{
+							const double dS = DepthScale(cfg_.sourceBits);
+							const double bqVar = (dS * dS) / 12.0;
+							const float pInit = (bqVar > 1e-12) ? static_cast<float>(1.0 / bqVar) : 1.0f;
+							std::vector<float> pBuf(numCells * 2u, 0.0f);
+							for (size_t i = 0; i < numCells; ++i) pBuf[i * 2u] = pInit;
+							Detail::UploadFloats(gpu, anchorPrecTex_[0], pBuf.data());
+						}
 					}
 				}
-				else if (hasAnchor_)
+				else if (in.isConfirmedPeak && isFadeActive)
+				{
+					res.fadeFrozenBank = true;
+				}
+				else if (hasAnchor_ && !in.isPulldownRepeat)
 				{
 					++anchorAgeFrames_;
 				}
@@ -2291,6 +2530,7 @@ namespace Gpu
 			p.transformIdentified8x8 = in.transformIdentified8x8;
 			p.frameRole = in.frameRole;
 			p.isConfirmedPeak = in.isConfirmedPeak;
+			p.isPulldownRepeat = in.isPulldownRepeat;
 			p.anchoredCarryRefIdx = anchoredCarryRefIdx;
 			p.hasAnchorComposedMotion = in.hasAnchorComposedMotion;
 			p.anchorComposedMotion = in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr;
@@ -2326,6 +2566,9 @@ namespace Gpu
 			res.usedNorm16Bands = oc.usedNorm16Bands;
 			res.bandRingHits = oc.bandRingHits;
 			res.bandRingMisses = oc.bandRingMisses;
+			res.voterCarryVetoCells = oc.voterCarryVetoCells;
+			res.dpbKalmanUpdatedCells = oc.dpbKalmanUpdatedCells;
+			res.fadeFrozenBank = res.fadeFrozenBank || oc.fadeFrozenBank;
 			res.tdMaps = std::move(oc.tdMaps);
 
 			// Download full-res planes (Mode::Shadow skips outYTex_ download since outputY == receivedY bit-exact!).
@@ -2769,6 +3012,7 @@ namespace Gpu
 			bool transformIdentified8x8 = false;
 			QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown;
 			bool isConfirmedPeak = false;
+			bool isPulldownRepeat = false;
 			int anchoredCarryRefIdx = -1;
 			bool hasAnchorComposedMotion = false;
 			const CellMotionField* anchorComposedMotion = nullptr;
@@ -2805,6 +3049,9 @@ namespace Gpu
 			bool usedNorm16Bands = false;
 			uint64_t bandRingHits = 0;
 			uint64_t bandRingMisses = 0;
+			size_t voterCarryVetoCells = 0;
+			size_t dpbKalmanUpdatedCells = 0;
+			bool fadeFrozenBank = false;
 			std::vector<TdMapsView::Block> tdMaps;
 		};
 
@@ -4439,7 +4686,7 @@ namespace Gpu
 				}
 
 				// ---- PASS 2B (Speedup 2 + TD-U2/U3/U4 + UPG-BLKR-3/4): Band-Dependent Merge + EB + Active-Set Solve + TdMaps ----
-				std::string p2bHdr = p2bSharedHdr + Shaders::BuildPass2SolverHeader();
+				std::string p2bHdr = p2bSharedHdr + VpvGpu::Define("TD_ANCHOR_DRIFT_BAR_PX", kAnchorDriftBarPx) + Shaders::BuildPass2SolverHeader();
 				const std::string p2bBody = Shaders::BuildPass2MergeAndSolveBody();
 				float uSolverMode = (cfg_.solverMode == SolverMode::LegacyClipRescale) ? 1.0f : 0.0f;
 
@@ -4463,7 +4710,9 @@ namespace Gpu
 				d2b[nD2b++] = VpvGpu::Storage("cell_diag_c", sc.cellDiagC);
 				d2b[nD2b++] = VpvGpu::Storage("td_maps", dstTdMaps);
 				d2b[nD2b++] = VpvGpu::Storage("cell_diag_flags", dstDiagFlags);
-				pl_shader_var v2b[40] = {
+				const float uEnableDpbBankV2 = cfg_.enableDpbDetailBankV2 ? 1.0f : 0.0f;
+				const float uEnableDpbVoter = (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbAgreementVoter) ? 1.0f : 0.0f;
+				pl_shader_var v2b[42] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r_l", &uPoolRL),
 					VpvGpu::Var("u_pool_r_m", &uPoolRM),
@@ -4503,9 +4752,11 @@ namespace Gpu
 					VpvGpu::Var("u_enable_region_deband", &uEnableRegionDeband),
 					VpvGpu::Var("u_has_step_prior", &uHasStepPrior),
 					VpvGpu::Var("u_step_delta", &uStepDelta),
+					VpvGpu::Var("u_enable_dpb_bank_v2", &uEnableDpbBankV2),
+					VpvGpu::Var("u_enable_dpb_voter", &uEnableDpbVoter),
 					VpvGpu::Var("u_has_region_priors", &uHasRegionPriors)
 				};
-				const int nV2b = anyRegionFeature ? 40 : 39;
+				const int nV2b = anyRegionFeature ? 42 : 41;
 				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, p2bBody.c_str(), d2b, nD2b, v2b, nV2b, cellGx8, cellGy8, 8, 8))
 				{
 					resetCarryIfActive();
@@ -4576,7 +4827,9 @@ namespace Gpu
 			// + p4_fused_apply_guard (6,856 B LDS when sameCleanRec = 4 WGs/SM!) — zero 22x22 halo blend duplication!
 			const bool runSmoothGuard = cfg_.enableSmoothLayer4Guard && cfg_.ModifiesPixels();
 			{
-				const bool needNbrClamp = cfg_.enableNeighborhoodSoftClamp;
+				const bool enableDpbEnvClamp = cfg_.enableDpbDetailBankV2 && cfg_.enableDpbNeighborhoodEnvelopeClamp;
+				const float uEnableDpbEnvClamp = enableDpbEnvClamp ? 1.0f : 0.0f;
+				const bool needNbrClamp = cfg_.enableNeighborhoodSoftClamp || enableDpbEnvClamp;
 				const bool needDerivedPxEdge = cfg_.enableRegionTailoring && !hasEdgeMapPlane;
 				std::string bHdr = staticGeom + norm16Defines + phaseADefine;
 				bHdr += VpvGpu::DefineInt("TD_COMPACT_BANDS", compactBands ? 1 : 0);
@@ -4595,7 +4848,7 @@ namespace Gpu
 					bHdr += Shaders::kHalfBandSamplerHelper;
 				bHdr += Shaders::kPass3BlendHeader;
 
-				pl_shader_var bv[26] = {
+				pl_shader_var bv[27] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
@@ -4616,6 +4869,7 @@ namespace Gpu
 					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale),
 					VpvGpu::Var("u_enable_edge_aware_upsample", &uEnableEdgeAwareUpsample),
 					VpvGpu::Var("u_enable_nbr_soft_clamp", &uEnableNbrSoftClamp),
+					VpvGpu::Var("u_enable_dpb_env_clamp", &uEnableDpbEnvClamp),
 					VpvGpu::Var("u_pixel_bound_kappa", &uPixelBoundKappa),
 					VpvGpu::Var("u_enable_joint_bound", &uEnableJointBound),
 					VpvGpu::Var("u_enable_region_tailoring", &uEnableRegionTailoring),
@@ -4647,7 +4901,7 @@ namespace Gpu
 						VpvGpu::Sampled("region_priors", regionPriorsBind3),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, p3aBody.c_str(), db, 11, bv, 26, fullGx, fullGy, 16, 16, shmemP3a);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, p3aBody.c_str(), db, 11, bv, 27, fullGx, fullGy, 16, 16, shmemP3a);
 				}
 				else
 				{
@@ -4668,7 +4922,7 @@ namespace Gpu
 						VpvGpu::Sampled("region_priors", regionPriorsBind3),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, p3aBody.c_str(), db, 15, bv, 26, fullGx, fullGy, 16, 16, shmemP3a);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, p3aBody.c_str(), db, 15, bv, 27, fullGx, fullGy, 16, 16, shmemP3a);
 				}
 				if (!ok3a)
 				{
@@ -4800,21 +5054,112 @@ namespace Gpu
 			hasCarry_ = true;
 			carryW_ = w;
 			carryH_ = h;
-			// UPG-BLKR-3: Re-anchor single-resample GPU anchorCleanTex_ strictly at confirmed peaks (grain-free dstOutClean!).
+			// UPG-BLKR-3 + Pass 3C: Progressive multi-keyframe grain-free Kalman bank update or clean peak re-anchor!
+			// Frozen during active U7 fade; untouched on 3:2 pulldown repeats!
+			const bool coreFadeActive = (p.fadeKeep > 0.0 && p.fadeKeep < 1.0);
 			if (p.isConfirmedPeak && cfg_.enableAnchoredCarry)
 			{
-				if (Detail::EnsureTex(gpu, anchorCleanTex_, w, h, fmtR32, true, true, false, false))
+				if (coreFadeActive)
 				{
-					pl_shader_desc da[2] = {
-						VpvGpu::Sampled("src_plane", dstOutClean),
-						VpvGpu::Storage("dst_plane", anchorCleanTex_)
-					};
-					if (runPass("td_v2_p4_anchor_update", staticGeom, Shaders::kPassCopyPlaneR32, da, 2, nullptr, 0, fullGx, fullGy, 16, 16))
+					oc.fadeFrozenBank = true;
+				}
+				else if (!p.isPulldownRepeat && Detail::EnsureTex(gpu, anchorCleanTex_, w, h, fmtR32, true, true, false, false))
+				{
+					const bool canKalmanGpu = cfg_.enableDpbDetailBankV2 && cfg_.enableDpbKalmanAccum &&
+						hasAnchor_ && anchorW_ == w && anchorH_ == h &&
+						p.anchoredCarryRefIdx >= 0 && p.anchoredCarryRefIdx < K &&
+						anchorPrecTex_[anchorPrecSlot_] != nullptr &&
+						Detail::EnsureTex(gpu, anchorPrecTex_[1 - anchorPrecSlot_], cw, ch, fmtRG32, true, true, true, true);
+					bool updatedOk = false;
+					if (canKalmanGpu)
+					{
+						const int nextSlot = 1 - anchorPrecSlot_;
+						const int maxAgeBank = cfg_.maxDpbBankAgeFrames > 0 ? cfg_.maxDpbBankAgeFrames : 4 * kContractBackRefs;
+						const float uMaxBankPrec = (baseQuantVar > 1e-12)
+							? static_cast<float>(static_cast<double>(maxAgeBank) / baseQuantVar)
+							: 32.0f;
+						std::string kHdr = staticGeom + norm16Defines;
+						kHdr += VpvGpu::DefineInt("TD_COMPACT_BANDS", compactBands ? 1 : 0);
+						kHdr += VpvGpu::Define("TD_BASE_QUANT_VAR", baseQuantVar);
+						kHdr += VpvGpu::Define("TD_ANCHOR_DRIFT_BAR_PX", kAnchorDriftBarPx);
+						kHdr += Shaders::kCoreHelpers;
+						pl_shader_var kv[10] = {
+							VpvGpu::Var("u_anchor_ref_idx", &uAnchorRefIdx),
+							VpvGpu::Var("u_ax0", &uAx0),
+							VpvGpu::Var("u_ay0", &uAy0),
+							VpvGpu::Var("u_ax1", &uAx1),
+							VpvGpu::Var("u_ay1", &uAy1),
+							VpvGpu::Var("u_hax0", &uHAx0),
+							VpvGpu::Var("u_hay0", &uHAy0),
+							VpvGpu::Var("u_hax1", &uHAx1),
+							VpvGpu::Var("u_hay1", &uHAy1),
+							VpvGpu::Var("u_max_bank_prec", &uMaxBankPrec)
+						};
+						pl_tex refAncTex = compactBands ? sc.refBandsMH[p.anchoredCarryRefIdx] : sc.refBands[p.anchoredCarryRefIdx];
+						pl_shader_desc dk[10] = {
+							VpvGpu::Sampled("cur_clean", dstOutClean),
+							VpvGpu::Sampled(compactBands ? "ref_bands_mh_anc" : "ref_bands_anc", refAncTex),
+							VpvGpu::Sampled("ref_flags", finalRefFlagsTex),
+							VpvGpu::Sampled("anchor_prec_in", anchorPrecTex_[anchorPrecSlot_]),
+							VpvGpu::Sampled("cell_drift", cellDriftBind),
+							VpvGpu::Sampled("cell_weights", sc.cellWeights),
+							VpvGpu::Sampled("cell_diag_c", sc.cellDiagC),
+							VpvGpu::Sampled("cell_diag_flags", dstDiagFlags),
+							VpvGpu::Sampled("motion_gate", sc.motionGate),
+							VpvGpu::Storage("anchor_clean_out", anchorCleanTex_)
+						};
+						// Bind 2nd UAV anchor_prec_out (11 total descriptors: 9 SRVs <= 16, 2 UAVs <= 8).
+						pl_shader_desc dkAll[11] = {
+							dk[0], dk[1], dk[2], dk[3], dk[4], dk[5], dk[6], dk[7], dk[8], dk[9],
+							VpvGpu::Storage("anchor_prec_out", anchorPrecTex_[nextSlot])
+						};
+						if (runPass("td_v2_p4_dpb_kalman_update", kHdr, Shaders::kPassDpbKalmanUpdate, dkAll, 11, kv, 10, fullGx, fullGy, 16, 16))
+						{
+							anchorPrecSlot_ = nextSlot;
+							updatedOk = true;
+							if (p.readbackCellDiag)
+							{
+								std::vector<float> precBuf(numCells * 2u, 0.0f);
+								if (Detail::DownloadFloats(gpu, anchorPrecTex_[anchorPrecSlot_], precBuf.data()))
+								{
+									for (size_t ci = 0; ci < numCells; ++ci)
+										if (precBuf[ci * 2u + 1u] > 0.5f) ++oc.dpbKalmanUpdatedCells;
+								}
+							}
+						}
+					}
+					else
+					{
+						pl_shader_desc da[2] = {
+							VpvGpu::Sampled("src_plane", dstOutClean),
+							VpvGpu::Storage("dst_plane", anchorCleanTex_)
+						};
+						if (runPass("td_v2_p4_anchor_update", staticGeom, Shaders::kPassCopyPlaneR32, da, 2, nullptr, 0, fullGx, fullGy, 16, 16))
+						{
+							updatedOk = true;
+							if (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbKalmanAccum &&
+							    Detail::EnsureTex(gpu, anchorPrecTex_[0], cw, ch, fmtRG32, true, true, true, true))
+							{
+								anchorPrecSlot_ = 0;
+								std::string pHdr = staticGeom + VpvGpu::Define("TD_BASE_QUANT_VAR", baseQuantVar) + Shaders::kCoreHelpers;
+								float uHasCellU = 1.0f;
+								pl_shader_var pv[1] = { VpvGpu::Var("u_has_cell_u", &uHasCellU) };
+								pl_shader_desc dp[3] = {
+									VpvGpu::Sampled("cell_weights", sc.cellWeights),
+									VpvGpu::Sampled("cell_diag_c", sc.cellDiagC),
+									VpvGpu::Storage("anchor_prec_out", anchorPrecTex_[0])
+								};
+								runPass("td_v2_p4_dpb_init_prec", pHdr, Shaders::kPassDpbInitPrecision, dp, 3, pv, 1, cellGx8, cellGy8, 8, 8);
+							}
+						}
+					}
+					if (updatedOk)
 					{
 						hasAnchor_ = true;
 						anchorW_ = w;
 						anchorH_ = h;
 						anchorAgeFrames_ = 1;
+						anchorHomography_ = Homography3x3::Identity(true);
 						anchorSourceTex_ = p.curCleanTex;
 						// PROD-GPU-BUG-2: When re-anchoring at a confirmed peak without composed drift audit
 						// (anchorDriftMode == 0), clear anchorBarredTex_[ancBarSlot_] to 0.0 for the new span!
@@ -4823,7 +5168,7 @@ namespace Gpu
 					}
 				}
 			}
-			else if (hasAnchor_)
+			else if (hasAnchor_ && !p.isPulldownRepeat)
 			{
 				++anchorAgeFrames_;
 			}
@@ -4999,8 +5344,11 @@ namespace Gpu
 					const bool cellDiagNonFinite = (diagBuf[cIdx * 4u + 1u] > 0.5f);
 					if (diagBuf[cIdx * 4u + 2u] > 0.5f)
 						++oc.singularCells;
-					if (diagBuf[cIdx * 4u + 3u] > 0.5f)
+					const unsigned dfWBits = static_cast<unsigned>(Detail::NonNegRoundToSize(diagBuf[cIdx * 4u + 3u]));
+					if ((dfWBits & 1u) != 0u)
 						++oc.singleRefA2Cells;
+					if ((dfWBits & 2u) != 0u)
+						++oc.voterCarryVetoCells;
 
 					const unsigned gFlags = static_cast<unsigned>(Detail::NonNegRoundToSize(guardBuf[cIdx * 2u + 1u]));
 					if ((gFlags & 2u) != 0u)
@@ -5040,6 +5388,8 @@ namespace Gpu
 					standIns->Engage(StandInKind::TransformUnknownBound);
 				if (oc.faceMaskedCells > 0)
 					standIns->Engage(StandInKind::FaceNonRigidMask);
+				if (oc.voterCarryVetoCells > 0)
+					standIns->Engage(StandInKind::VoterCarryVetoed, "TdV2GpuEngine Pass 3C L-band 2-vs-1 voter vetoed carry");
 			}
 
 			return true;
@@ -5401,6 +5751,9 @@ float td_fine_hp_warp_gain(vec2 mv)
 		pl_tex carryCleanTex_ = nullptr;
 		pl_tex anchorCleanTex_ = nullptr;
 		pl_tex anchorBarredTex_[2] = {};
+		pl_tex anchorPrecTex_[2] = {};
+		int anchorPrecSlot_ = 0;
+		Homography3x3 anchorHomography_{};
 		pl_tex cellDriftTex_ = nullptr;
 		pl_tex dummySampledTex_[4] = {};
 

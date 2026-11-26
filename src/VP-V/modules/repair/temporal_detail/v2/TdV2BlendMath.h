@@ -1285,6 +1285,47 @@ namespace TdV2
 		double h[9] = { 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 };
 		bool valid = false;
 
+		static Homography3x3 Identity(bool isValid = true)
+		{
+			Homography3x3 out;
+			out.valid = isValid;
+			return out;
+		}
+
+		// Single-resample composition H_cur_to_key = H_prev_to_key * H_cur_to_prev (normalized by h[8]).
+		// Maps current-frame coordinates directly into keyframe-bank coordinates in ONE resample over 8-32+ frames.
+		// Fails closed (valid = false) on any non-finite entry or vanishing projective scale h[8].
+		static Homography3x3 Compose(const Homography3x3& hPrevToKey, const Homography3x3& hCurToPrev)
+		{
+			Homography3x3 out;
+			out.valid = false;
+			if (!hPrevToKey.valid || !hCurToPrev.valid || !hPrevToKey.AllFinite() || !hCurToPrev.AllFinite())
+				return out;
+			double m[9] = {};
+			for (int r = 0; r < 3; ++r)
+			{
+				for (int c = 0; c < 3; ++c)
+				{
+					m[r * 3 + c] = hPrevToKey.h[r * 3 + 0] * hCurToPrev.h[0 * 3 + c] +
+					               hPrevToKey.h[r * 3 + 1] * hCurToPrev.h[1 * 3 + c] +
+					               hPrevToKey.h[r * 3 + 2] * hCurToPrev.h[2 * 3 + c];
+				}
+			}
+			const double s = m[8];
+			if (!std::isfinite(s) || std::fabs(s) <= kSolveNumericalFloor)
+				return out;
+			const double invS = 1.0 / s;
+			for (int i = 0; i < 9; ++i)
+			{
+				out.h[i] = m[i] * invS;
+				if (!std::isfinite(out.h[i]))
+					return Homography3x3{};
+			}
+			out.h[8] = 1.0;
+			out.valid = true;
+			return out;
+		}
+
 		bool AllFinite() const
 		{
 			for (int i = 0; i < 9; ++i)
@@ -1482,5 +1523,57 @@ namespace TdV2
 		out.p10gShare = SmoothstepC1(0.5 * in.baseQuantVar, kHuberKneeSq * in.baseQuantVar, ownG + retG);
 
 		return out;
+	}
+
+	// ---- Pass 3C Layer 1: Coarse-Band (L) 2-vs-1 Agreement Voter (Rule 1, 1:1 CPU/GPU parity) ----
+	// Compares carried/bank anchor coarse-band RMS difference `rmsCarryL` against local peak consensus
+	// `rmsLocalL` (normalized by coarse-band noise/quantization floor `sigmaL`).
+	// When local peak(s) agree with X_clean while carried anchor disagrees beyond 2-to-3 sigma above
+	// 2 * rmsLocalL, smoothly drives g_agree -> 0.0 BEFORE solving w* = C^-1 c!
+	inline double ComputeCoarse2vs1VoterGate(double rmsCarryL, double rmsLocalL, double sigmaL)
+	{
+		if (!std::isfinite(rmsCarryL) || !std::isfinite(rmsLocalL) || !std::isfinite(sigmaL))
+			return 0.0;
+		const double sig = (sigmaL > kSolveNumericalFloor) ? sigmaL : kSolveNumericalFloor;
+		const double excess = rmsCarryL - 2.0 * (rmsLocalL > 0.0 ? rmsLocalL : 0.0);
+		// Derived 2-sigma to 3-sigma tail (sqrt(kHuberKneeSq) = 3.0):
+		// g_agree = 1.0 when rmsCarryL <= 2*rmsLocalL + 2*sig; 0.0 when rmsCarryL >= 2*rmsLocalL + 3*sig.
+		const double hiSigma = std::sqrt(kHuberKneeSq);
+		return 1.0 - SmoothstepC1(2.0 * sig, hiSigma * sig, excess);
+	}
+
+	// ---- Pass 3C Layer 3: Per-Pixel Grain-Free 3x3 Salvi TAA Neighborhood Envelope Clamp (Rule 1) ----
+	// Intersects the 3x3 min/max AABB and 3-sigma variance interval around X_clean, admitting quantization-cell
+	// slack `qFloor = sqrt(max(baseQuantVar * bandGain, cellOwnU))` so legitimate quantization recovery passes
+	// while rogue ghost edges outside the local 3x3 envelope are physically impossible.
+	inline double ClampToSalvi3x3Envelope(
+		double refV,
+		double min3x3,
+		double max3x3,
+		double mu3x3,
+		double sig3x3,
+		double qFloor)
+	{
+		if (!std::isfinite(refV) || !std::isfinite(min3x3) || !std::isfinite(max3x3) ||
+		    !std::isfinite(mu3x3) || !std::isfinite(sig3x3) || !std::isfinite(qFloor))
+		{
+			return std::isfinite(mu3x3) ? mu3x3 : 0.0;
+		}
+		const double q = qFloor > 0.0 ? qFloor : 0.0;
+		const double gamma = std::sqrt(kHuberKneeSq); // Exact 3.0-sigma Gaussian tail
+		const double boxLo = min3x3 - q;
+		const double boxHi = max3x3 + q;
+		const double varLo = mu3x3 - gamma * (sig3x3 > 0.0 ? sig3x3 : 0.0) - q;
+		const double varHi = mu3x3 + gamma * (sig3x3 > 0.0 ? sig3x3 : 0.0) + q;
+		double lo = (boxLo > varLo) ? boxLo : varLo;
+		double hi = (boxHi < varHi) ? boxHi : varHi;
+		if (lo > hi)
+		{
+			lo = boxLo;
+			hi = boxHi;
+		}
+		if (refV < lo) return lo;
+		if (refV > hi) return hi;
+		return refV;
 	}
 }

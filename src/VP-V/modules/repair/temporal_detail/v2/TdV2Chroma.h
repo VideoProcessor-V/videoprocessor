@@ -1857,6 +1857,9 @@ namespace TdV2
 
 		bool isCutOrSpanInvalid = false;              // Resets 4:4:4 anchor canvas cleanly
 		double fadeKeep = 1.0;                        // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets anchor)
+		bool isFlash = false;                         // s3.5 P4 1-frame flash/strobe: preserve anchor canvas untouched & abstain K=0
+		bool isResync = false;                        // s3.5 VpIndicator discontinuity/seek: cold-start flush WITHOUT seeding frame 0
+		bool isPulldownRepeat = false;                // s3.5 3:2 pulldown repeat: skip anchor canvas double-write
 		QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown; // TD-U1/U4 role for A2e history & optional 2-frame stats pool
 
 		// Optional Pass-1 face / non-rigid cell mask (cellsW * cellsH luma-cell layout matching FrameProcessInput::faceMask;
@@ -1921,6 +1924,10 @@ namespace TdV2
 		bool anchorReset = false;
 		bool anchorCanvasUsed = false;
 		bool carriedCflUsed = false;
+		bool flashAbstained = false;
+		bool resyncReset = false;
+		bool fadeFrozenAnchor = false;
+		bool pulldownRepeatSkipped = false;
 	};
 
 	// ---- Stage TD-S4 Coded-Grid Chroma Recovery Engine ----
@@ -2061,7 +2068,26 @@ namespace TdV2
 					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ChromaEngine non-finite fadeKeep; failing closed to 0.0");
 				res.nonFiniteCells = numCells;
 			}
+			const bool isFadeActive = (effFadeKeep > 0.0 && effFadeKeep < 1.0);
 			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
+
+			// s3.5 Resync / Discontinuity / Seek: cold-start flush WITHOUT seeding frame 0!
+			if (in.isResync)
+			{
+				ResetAnchor();
+				res.anchorReset = true;
+				res.resyncReset = true;
+				return res;
+			}
+
+			// s3.5 Flash / Strobe (P4): preserve pre-flash 4:4:4 anchor canvas untouched & abstain cleanly (K = 0)!
+			if (in.isFlash && !effectiveCut)
+			{
+				res.flashAbstained = true;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::FlashFrameAbstained, "TdV2ChromaEngine P4 flash abstained (K=0, anchor preserved)");
+				return res;
+			}
 
 			// Cut / invalid span, fadeKeep <= 0, resolution change, or ActiveRect change resets 4:4:4 anchor canvas cleanly;
 			// gradual fade (0 < fadeKeep < 1) smoothly decays existing accumulated anchor weights.
@@ -2078,6 +2104,8 @@ namespace TdV2
 			{
 				anchorCanvas_.ApplyFadeKeep(effFadeKeep);
 			}
+			if (in.isPulldownRepeat)
+				res.pulldownRepeatSkipped = true;
 
 			// Validate all delivered pixels are finite (Rule 4).
 			auto planeAllFinite = [](const TdV2Plane& p) -> bool
@@ -2917,6 +2945,17 @@ namespace TdV2
 			auto ingestAnchorIfSplit = [&]()
 			{
 				if (!in.isAnchorFrame)
+					return;
+				// s3.5 Fade: freeze 4:4:4 anchor canvas updates during active fade (never write mid-fade frames!).
+				if (isFadeActive)
+				{
+					res.fadeFrozenAnchor = true;
+					if (cfg_.enableDpbDetailBankV2 && standIns != nullptr)
+						standIns->Engage(StandInKind::CadenceSuspendedFade, "TdV2ChromaEngine U7 fade froze 4:4:4 anchor canvas");
+					return;
+				}
+				// s3.5 3:2 Pulldown repeat: never double-write anchor canvas on duplicate repeat frames.
+				if (in.isPulldownRepeat)
 					return;
 				if (!splitActive)
 				{

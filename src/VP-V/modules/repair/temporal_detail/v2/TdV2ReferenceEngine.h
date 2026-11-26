@@ -808,6 +808,12 @@ namespace TdV2
 
 		// Pass 3A optional explicit active-tile coverage override in [0, 1] (< 0.0 => computed from activeRect/faceMask/motion).
 		double activeTileFractionOverride = -1.0;
+
+		// Pass 3C & s3.5 mandatory scene/continuity contract inputs (all default-inert when unset):
+		bool isFlash = false;                  // P4 1-frame flash/strobe: preserve bank/carry untouched & abstain K=0
+		bool isResync = false;                 // VpIndicator kFull|kContinuity / seek: cold-start flush WITHOUT seeding frame 0
+		bool isPulldownRepeat = false;         // 3:2 pulldown repeat (dt == 0): do NOT advance age, drift, homography, or bank
+		Homography3x3 stepCameraHomography;    // Per-step cur->prev P7 homography for single-resample composed H_{key->t}
 	};
 
 	struct FrameProcessResult
@@ -849,6 +855,15 @@ namespace TdV2
 		bool auto4k60SingleRefActive = false;
 		bool roleAdaptiveKReduced = false;
 		bool coverageAdaptiveKCapped = false;
+
+		// Pass 3C & s3.5 DPB Detail Bank & transition telemetry (always visible).
+		size_t voterCarryVetoCells = 0;
+		size_t dpbKalmanUpdatedCells = 0;
+		bool dpbHomographyUsed = false;
+		bool flashAbstained = false;
+		bool resyncReset = false;
+		bool fadeFrozenBank = false;
+		bool pulldownRepeatSkipped = false;
 	};
 
 	// ---- Corner-Tapered Spatial-Only Bilinear Weight Interpolation (Zero New Constants) ----
@@ -1166,6 +1181,8 @@ namespace TdV2
 			carryClean_ = TdV2Plane();
 			hasAnchor_ = false;
 			anchorClean_ = TdV2Plane();
+			anchorPrecisionCells_.clear();
+			anchorHomography_ = Homography3x3{};
 			anchorAgeFrames_ = 0;
 			anchorBarredCells_.clear();
 			anchorReseedCells_.clear();
@@ -1183,8 +1200,15 @@ namespace TdV2
 		bool HasAnchor() const { return hasAnchor_; }
 		int AnchorAgeFrames() const { return anchorAgeFrames_; }
 		const TdV2Plane& AnchorClean() const { return anchorClean_; }
+		const std::vector<double>& AnchorPrecisionCells() const { return anchorPrecisionCells_; }
+		const Homography3x3& AnchorHomography() const { return anchorHomography_; }
 		const std::vector<uint8_t>& AnchorBarredCells() const { return anchorBarredCells_; }
 		const std::vector<uint8_t>& AnchorReseedCells() const { return anchorReseedCells_; }
+		uint64_t CutResetCount() const { return cutResetCount_; }
+		uint64_t ResyncResetCount() const { return resyncResetCount_; }
+		uint64_t FadeFreezeCount() const { return fadeFreezeCount_; }
+		uint64_t FlashAbstainCount() const { return flashAbstainCount_; }
+		uint64_t PulldownRepeatSkipCount() const { return pulldownRepeatSkipCount_; }
 
 		FrameProcessResult ProcessFrame(const FrameProcessInput& in, StandInRegistry* standIns = nullptr)
 		{
@@ -1240,7 +1264,34 @@ namespace TdV2
 					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ReferenceEngine non-finite fadeKeep; failing closed to 0.0");
 				res.nonFiniteCells = numCells;
 			}
+			const bool isFadeActive = (effFadeKeep > 0.0 && effFadeKeep < 1.0);
 			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
+
+			// s3.5 Resync / Discontinuity / Seek: cold-start flush WITHOUT blindly seeding frame 0!
+			if (in.isResync)
+			{
+				ResetCarry();
+				res.carryReset = true;
+				res.resyncReset = true;
+				++resyncResetCount_;
+				hasLastSeq_ = true;
+				lastSeq_ = in.seq;
+				return res;
+			}
+
+			// s3.5 Flash / Strobe (P4): preserve pre-flash bank & carry 100% untouched; abstain cleanly (K = 0)!
+			if (in.isFlash && !effectiveCut)
+			{
+				res.flashAbstained = true;
+				++flashAbstainCount_;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::FlashFrameAbstained, "TdV2ReferenceEngine P4 flash abstained (K=0, bank preserved)");
+				if (hasAnchor_ && !in.isPulldownRepeat)
+					++anchorAgeFrames_;
+				hasLastSeq_ = true;
+				lastSeq_ = in.seq;
+				return res;
+			}
 
 			// Cut / invalid span, fadeKeep <= 0, resolution change, seek, or non-consecutive frame sequence resets carry & anchor cleanly.
 			const bool seqDiscontinuous = (hasCarry_ || hasAnchor_) && hasLastSeq_ &&
@@ -1252,6 +1303,16 @@ namespace TdV2
 			{
 				ResetCarry();
 				res.carryReset = true;
+				if (effectiveCut)
+					++cutResetCount_;
+			}
+
+			if (isFadeActive && cfg_.enableDpbDetailBankV2 && standIns != nullptr)
+				standIns->Engage(StandInKind::CadenceSuspendedFade, "TdV2ReferenceEngine U7 fade active (bank writes frozen)");
+			if (in.isPulldownRepeat)
+			{
+				res.pulldownRepeatSkipped = true;
+				++pulldownRepeatSkipCount_;
 			}
 
 			// Validate receivedY finite; any non-finite input closes the frame cleanly with visible telemetry.
@@ -1353,14 +1414,35 @@ namespace TdV2
 			};
 
 			int anchoredCarryRefIdx = -1;
-			const int maxAnchorAge = cfg_.maxAnchorAgeFrames > 0 ? cfg_.maxAnchorAgeFrames : kContractBackRefs;
+			const int maxAnchorAge = cfg_.enableDpbDetailBankV2
+				? (cfg_.maxDpbBankAgeFrames > 0 ? cfg_.maxDpbBankAgeFrames : 4 * kContractBackRefs)
+				: (cfg_.maxAnchorAgeFrames > 0 ? cfg_.maxAnchorAgeFrames : kContractBackRefs);
 			if (hasAnchor_ && anchorAgeFrames_ > maxAnchorAge)
 			{
 				hasAnchor_ = false;
 				anchorClean_ = TdV2Plane();
+				anchorPrecisionCells_.clear();
+				anchorHomography_ = Homography3x3{};
 				anchorAgeFrames_ = 0;
 				anchorBarredCells_.clear();
 				anchorReseedCells_.clear();
+			}
+
+			// Pass 3C: Compose single-resample camera homography H_{cur->key} = H_{prev->key} * H_{cur->prev}
+			// strictly on unique non-repeat frames (never double-composed on 3:2 pulldown repeats!).
+			if (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbHomographyTracking &&
+			    hasAnchor_ && !in.isPulldownRepeat && in.stepCameraHomography.valid)
+			{
+				if (!anchorHomography_.valid)
+					anchorHomography_ = in.stepCameraHomography;
+				else
+					anchorHomography_ = Homography3x3::Compose(anchorHomography_, in.stepCameraHomography);
+				if (!anchorHomography_.valid || anchorHomography_.HasDegenerateProjection(active.x0, active.y0, active.x1, active.y1))
+				{
+					anchorHomography_ = Homography3x3{};
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ReferenceEngine composed anchorHomography degenerate/non-finite");
+				}
 			}
 
 			// Pass 3A adaptive-K & budget-protection controller (4K60 auto K=1, Role-Adaptive K=0/1/2, Coverage-Adaptive K=2->1).
@@ -1457,11 +1539,16 @@ namespace TdV2
 				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
 				{
 					const CellMotionField* ancMf = in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr;
-					if (tryAddRefSpec(&anchorClean_, ancMf, false, RefRole::PrevPeak2))
+					const Homography3x3 ancCamH = (cfg_.enableDpbDetailBankV2 && cfg_.enableDpbHomographyTracking && anchorHomography_.valid)
+						? anchorHomography_
+						: Homography3x3{};
+					if (tryAddRefSpec(&anchorClean_, ancMf, false, RefRole::PrevPeak2, ancCamH))
 					{
 						anchoredCarryRefIdx = static_cast<int>(refSpecs.size()) - 1;
 						res.anchoredCarryUsed = true;
 						res.carryUsed = true;
+						if (ancCamH.valid)
+							res.dpbHomographyUsed = true;
 					}
 				}
 				else if (cfg_.enableCarryForward && hasCarry_ && carryClean_.w == w && carryClean_.h == h)
@@ -1477,15 +1564,24 @@ namespace TdV2
 				// First frame / cut frame / all refs skipped: seed carry (and anchor if confirmed peak); output stays receivedY.
 				carryClean_ = curClean;
 				hasCarry_ = true;
-				if (in.isConfirmedPeak)
+				if (in.isConfirmedPeak && !isFadeActive && !in.isPulldownRepeat)
 				{
 					anchorClean_ = curClean;
 					hasAnchor_ = true;
 					anchorAgeFrames_ = 1;
+					anchorHomography_ = Homography3x3::Identity(true);
+					const double dS = DepthScale(cfg_.sourceBits);
+					const double bqVar = (dS * dS) / 12.0;
+					anchorPrecisionCells_.assign(numCells, (bqVar > kEngineNumFloor) ? (1.0 / bqVar) : 1.0);
 					anchorBarredCells_.assign(numCells, 0u);
 					anchorReseedCells_.assign(numCells, 0u);
 				}
-				else if (hasAnchor_)
+				else if (in.isConfirmedPeak && isFadeActive)
+				{
+					res.fadeFrozenBank = true;
+					++fadeFreezeCount_;
+				}
+				else if (hasAnchor_ && !in.isPulldownRepeat)
 				{
 					++anchorAgeFrames_;
 				}
@@ -2711,6 +2807,7 @@ namespace TdV2
 			// M2: Use bit-depth-scaled baseQuantVar = DepthScale(sourceBits)^2 / 12 consistently!
 			const double regionBaseQuantVar = baseQuantVar;
 			std::vector<double> cellDebandBoundL(numCells, 0.0);
+			std::vector<double> cellDpbVoterGateArr(numCells, 1.0);
 
 			for (int cy = 0; cy < res.cellsH; ++cy)
 			{
@@ -2803,6 +2900,7 @@ namespace TdV2
 					bool cellHadSingular = false;
 					double cellDebandAddedShare = 0.0;
 					double cellDebandQuantStep = 0.0;
+					double cellDpbVoterGate = 1.0;
 
 					// H3: Fail closed (w = 0, kValidity = 0) on any cell with non-finite P11/P12/kEdgeMap/stepScale/grain prior!
 					for (int b = 0; !cellRegionNonFinite && b < 3; ++b)
@@ -2812,8 +2910,59 @@ namespace TdV2
 							continue;
 
 						const double (&C)[kMaxBlendRefs][kMaxBlendRefs] = cm.C;
-						// RED-BUG-7b + Stage A4-1 matched-focus bokeh per-ref gating BEFORE solving QP:
-						// occluded, barred, or rack-focus-mismatched refs NEVER distort C^-1 or steal simplex budget!
+
+						// Pass 3C Layer 1: Coarse-band (L) 2-vs-1 Agreement Voter BEFORE solving QP (1:1 CPU/GPU parity).
+						// Evaluates at b == 0 (L-band) and applies across all 3 bands so disagreeing carry never distorts C^-1!
+						if (b == 0 && cfg_.enableDpbDetailBankV2 && cfg_.enableDpbAgreementVoter && anchoredCarryRefIdx >= 0)
+						{
+							const double ancGateL = refs[anchoredCarryRefIdx].motionGate.gateL[cIdx];
+							if (ancGateL > 0.0)
+							{
+								const bool driftOrFocusVeto =
+									focusCells[cIdx].focusChange || focusCells[cIdx].explicitFocusChange ||
+									(cIdx < cellDriftPx.size() && cellDriftPx[cIdx] > kAnchorDriftBarPx);
+								if (driftOrFocusVeto)
+								{
+									cellDpbVoterGate = 0.0;
+								}
+								else
+								{
+									double rmsLocalL = 0.0;
+									int localPeakCount = 0;
+									for (int lk = 0; lk < K; ++lk)
+									{
+										if (lk == anchoredCarryRefIdx || refs[lk].role == RefRole::Carry)
+											continue;
+										if (refs[lk].motionGate.gateL[cIdx] > 0.0)
+										{
+											const double dLoc = std::sqrt((std::max)(0.0, C[lk][lk]));
+											if (localPeakCount == 0 || dLoc > rmsLocalL)
+												rmsLocalL = dLoc;
+											++localPeakCount;
+										}
+									}
+									if (localPeakCount > 0)
+									{
+										const double priorL = res.empiricalOwnError.valid
+											? res.empiricalOwnError.ForBandClass(0, actClass)
+											: (a2Stats.valid ? a2Stats.totalVar * cellStepScaleSq * bandTransfer[0] : 0.0);
+										const double sigmaL = std::sqrt((std::max)(baseQuantVar * bandTransfer[0], (std::max)(0.0, priorL)));
+										const double rmsCarryL = std::sqrt((std::max)(0.0, C[anchoredCarryRefIdx][anchoredCarryRefIdx]));
+										cellDpbVoterGate = ComputeCoarse2vs1VoterGate(rmsCarryL, rmsLocalL, sigmaL);
+									}
+								}
+								if (cellDpbVoterGate < 1.0 - 1e-6)
+								{
+									++res.voterCarryVetoCells;
+									if (standIns != nullptr)
+										standIns->Engage(StandInKind::VoterCarryVetoed, "Pass 3C L-band 2-vs-1 voter attenuated/vetoed carry");
+								}
+							}
+							cellDpbVoterGateArr[cIdx] = cellDpbVoterGate;
+						}
+
+						// RED-BUG-7b + Stage A4-1 matched-focus bokeh + Pass 3C voter per-ref gating BEFORE solving QP:
+						// occluded, barred, voter-vetoed, or rack-focus-mismatched refs NEVER distort C^-1 or steal simplex budget!
 						double effRefGate[kMaxBlendRefs] = {};
 						bool refActive[kMaxBlendRefs] = {};
 						int subMap[kMaxBlendRefs] = {};
@@ -2821,6 +2970,12 @@ namespace TdV2
 						for (int k = 0; k < K; ++k)
 						{
 							double gVal = (b == 0) ? refs[k].motionGate.gateL[cIdx] : refs[k].motionGate.gateMH[cIdx];
+							if (cfg_.enableDpbDetailBankV2 && k == anchoredCarryRefIdx)
+							{
+								gVal *= cellDpbVoterGate;
+								if (effFadeKeep < 1.0)
+									gVal *= effFadeKeep;
+							}
 							if (effBokehMatchDelta > 0.0)
 							{
 								if (focusCells[cIdx].explicitFocusChange || (regDesc.curIsOutOfFocus && b >= 1))
@@ -3303,14 +3458,22 @@ namespace TdV2
 						const TdV2Plane& curBandPlane = bandPlaneOf(curBands, b);
 						const double curV = curBandPlane.at(x, y);
 
-						// SOTA #5: Optional 3x3 grain-free neighborhood 3-sigma C^1 soft clamp on M/H bands (b >= 1).
+						// SOTA #5 / Pass 3C Layer 3: Optional 3x3 grain-free neighborhood clamp on M/H bands (b >= 1).
+						// - Legacy SOTA #5 (enableNeighborhoodSoftClamp): 3-sigma C^1 soft clamp around 3x3 mean.
+						// - Pass 3C Layer 3 (enableDpbDetailBankV2 && enableDpbNeighborhoodEnvelopeClamp): Salvi TAA
+						//   3x3 min/max + 3-sigma variance envelope strictly inside the quantization-cell bound qFloor.
 						double nbrMean = curV;
 						double nbrSigma = 0.0;
-						const bool applyNbrClamp = cfg_.enableNeighborhoodSoftClamp && (b >= 1);
+						double nbrMin = curV;
+						double nbrMax = curV;
+						const bool applyDpbEnvelope = cfg_.enableDpbDetailBankV2 && cfg_.enableDpbNeighborhoodEnvelopeClamp && (b >= 1);
+						const bool applyNbrClamp = (applyDpbEnvelope || cfg_.enableNeighborhoodSoftClamp) && (b >= 1);
 						if (applyNbrClamp)
 						{
 							double sumS = 0.0;
 							double sumSq = 0.0;
+							nbrMin = curV;
+							nbrMax = curV;
 							const int xMaxA = active.x1 - 1;
 							const int yMaxA = active.y1 - 1;
 							for (int dy = -1; dy <= 1; ++dy)
@@ -3319,7 +3482,10 @@ namespace TdV2
 								for (int dx = -1; dx <= 1; ++dx)
 								{
 									const int sx = (std::max)(active.x0, (std::min)(xMaxA, x + dx));
-									const double s = curBandPlane.at(sx, sy) - curV;
+									const double vS = curBandPlane.at(sx, sy);
+									if (vS < nbrMin) nbrMin = vS;
+									if (vS > nbrMax) nbrMax = vS;
+									const double s = vS - curV;
 									sumS += s;
 									sumSq += s * s;
 								}
@@ -3328,6 +3494,9 @@ namespace TdV2
 							nbrMean = curV + meanS;
 							nbrSigma = std::sqrt((std::max)(0.0, (sumSq / 9.0) - meanS * meanS));
 						}
+						const double qFloorBand = applyDpbEnvelope
+							? std::sqrt((std::max)(baseQuantVar * bandTransfer[b], (std::max)(0.0, cellOwnErrU[b][cIdx])))
+							: 0.0;
 
 						double bandDelta = 0.0;
 						for (int k = 0; k < K; ++k)
@@ -3344,7 +3513,9 @@ namespace TdV2
 							// - Optional SOTA #4 clean-luma-guided edge-aware bilinear (cfg_.enableEdgeAwareWeightUpsample)
 							// - Default spatial bilinear with optional per-corner 3-sigma Huber taper (cfg_.enablePerCornerHuber).
 							double refV = bandPlaneOf(refs[k].bands, b).at(x, y);
-							if (applyNbrClamp)
+							if (applyDpbEnvelope)
+								refV = ClampToSalvi3x3Envelope(refV, nbrMin, nbrMax, nbrMean, nbrSigma, qFloorBand);
+							else if (applyNbrClamp)
 								refV = SoftClampToNeighborhood3Sigma(refV, nbrMean, nbrSigma);
 							const double diff = curV - refV;
 							double wEff = 0.0;
@@ -3680,17 +3851,110 @@ namespace TdV2
 			}
 			hasCarry_ = true;
 
-			// TD-U5 (H-4 / Owner D2): Re-anchor single-resample carry strictly at confirmed peaks (grain-free candClean only!),
-			// installing the next-span drift bar mask and clearing held-out re-seed flags.
+			// TD-U5 (H-4 / Owner D2) + Pass 3C Progressive Multi-Keyframe Grain-Free Kalman Fusion:
+			// Re-anchor / precision-update single-resample Keyframe Detail Bank strictly at confirmed peaks
+			// (grain-free candClean only!). Frozen during active fade; untouched on 3:2 pulldown repeats!
 			if (in.isConfirmedPeak && !effectiveCut)
 			{
-				anchorClean_ = candClean;
-				hasAnchor_ = true;
-				anchorAgeFrames_ = 1;
-				anchorBarredCells_ = std::move(nextSpanBarredCells);
-				anchorReseedCells_.assign(numCells, 0u);
+				if (isFadeActive)
+				{
+					// s3.5 Fade: freeze bank updates (never write mid-fade frames into the golden bank!).
+					res.fadeFrozenBank = true;
+					++fadeFreezeCount_;
+				}
+				else if (!in.isPulldownRepeat)
+				{
+					const double maxBankPrec = (baseQuantVar > kEngineNumFloor)
+						? (static_cast<double>(maxAnchorAge) / baseQuantVar)
+						: 32.0;
+					const bool canKalmanFuse = cfg_.enableDpbDetailBankV2 && cfg_.enableDpbKalmanAccum &&
+						hasAnchor_ && anchorClean_.w == w && anchorClean_.h == h &&
+						anchorPrecisionCells_.size() == numCells &&
+						anchoredCarryRefIdx >= 0 && anchoredCarryRefIdx < static_cast<int>(refs.size());
+					if (canKalmanFuse)
+					{
+						const WarpedRef& ancRef = refs[static_cast<size_t>(anchoredCarryRefIdx)];
+						TdV2Plane nextAnchor = candClean;
+						std::vector<double> nextPrec(numCells, 0.0);
+						for (int cy = 0; cy < res.cellsH; ++cy)
+						{
+							const int y0 = (std::max)(active.y0, cy * cellPx);
+							const int y1 = (std::min)(active.y1, (cy + 1) * cellPx);
+							for (int cx = 0; cx < res.cellsW; ++cx)
+							{
+								const int x0 = (std::max)(active.x0, cx * cellPx);
+								const int x1 = (std::min)(active.x1, (cx + 1) * cellPx);
+								const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+								const double cellTotU = (std::max)(baseQuantVar,
+									(std::max)(0.0, cellOwnErrU[0][cIdx]) +
+									(std::max)(0.0, cellOwnErrU[1][cIdx]) +
+									(std::max)(0.0, cellOwnErrU[2][cIdx]));
+								const double pNew = 1.0 / cellTotU;
+								const bool barred = (cIdx < nextSpanBarredCells.size() && nextSpanBarredCells[cIdx] != 0u) ||
+								                    (cIdx < anchorBarredCells_.size() && anchorBarredCells_[cIdx] != 0u);
+								const bool agreed = !barred && !isFaceMaskedCell(cIdx) &&
+								                    !focusCells[cIdx].focusChange && !focusCells[cIdx].explicitFocusChange &&
+								                    cellDpbVoterGateArr[cIdx] > 0.5 &&
+								                    ancRef.motionGate.gateL[cIdx] > 0.5 &&
+								                    anchorPrecisionCells_[cIdx] > 0.0;
+								if (agreed && y1 > y0 && x1 > x0)
+								{
+									const double pOld = anchorPrecisionCells_[cIdx];
+									const double pSum = (std::min)(maxBankPrec, pOld + pNew);
+									const double alpha = pNew / (pOld + pNew);
+									const double oneMinusA = 1.0 - alpha;
+									bool anyUpdated = false;
+									for (int y = y0; y < y1; ++y)
+									{
+										for (int x = x0; x < x1; ++x)
+										{
+											const size_t pIdx = static_cast<size_t>(y) * w + x;
+											if (ancRef.validPx[pIdx] == 0u)
+												continue;
+											const double ancVal = ancRef.bands.L.at(x, y) +
+											                      ancRef.bands.M.at(x, y) +
+											                      ancRef.bands.H.at(x, y);
+											if (std::isfinite(ancVal))
+											{
+												nextAnchor.at(x, y) = oneMinusA * ancVal + alpha * candClean.at(x, y);
+												anyUpdated = true;
+											}
+										}
+									}
+									nextPrec[cIdx] = anyUpdated ? pSum : pNew;
+									if (anyUpdated)
+										++res.dpbKalmanUpdatedCells;
+								}
+								else
+								{
+									nextPrec[cIdx] = pNew;
+								}
+							}
+						}
+						anchorClean_ = std::move(nextAnchor);
+						anchorPrecisionCells_ = std::move(nextPrec);
+					}
+					else
+					{
+						anchorClean_ = candClean;
+						anchorPrecisionCells_.resize(numCells);
+						for (size_t cIdx = 0; cIdx < numCells; ++cIdx)
+						{
+							const double cellTotU = (std::max)(baseQuantVar,
+								(std::max)(0.0, cellOwnErrU[0][cIdx]) +
+								(std::max)(0.0, cellOwnErrU[1][cIdx]) +
+								(std::max)(0.0, cellOwnErrU[2][cIdx]));
+							anchorPrecisionCells_[cIdx] = 1.0 / cellTotU;
+						}
+					}
+					hasAnchor_ = true;
+					anchorAgeFrames_ = 1;
+					anchorHomography_ = Homography3x3::Identity(true);
+					anchorBarredCells_ = std::move(nextSpanBarredCells);
+					anchorReseedCells_.assign(numCells, 0u);
+				}
 			}
-			else if (hasAnchor_)
+			else if (hasAnchor_ && !in.isPulldownRepeat)
 			{
 				++anchorAgeFrames_;
 			}
@@ -3743,9 +4007,16 @@ namespace TdV2
 		TdV2Plane carryClean_;
 		bool hasAnchor_ = false;
 		TdV2Plane anchorClean_;
+		std::vector<double> anchorPrecisionCells_;
+		Homography3x3 anchorHomography_;
 		int anchorAgeFrames_ = 0;
 		std::vector<uint8_t> anchorBarredCells_;
 		std::vector<uint8_t> anchorReseedCells_;
+		uint64_t cutResetCount_ = 0;
+		uint64_t resyncResetCount_ = 0;
+		uint64_t fadeFreezeCount_ = 0;
+		uint64_t flashAbstainCount_ = 0;
+		uint64_t pulldownRepeatSkipCount_ = 0;
 		bool hasLastSeq_ = false;
 		uint64_t lastSeq_ = 0;
 		double elapsedSec_ = 0.0;
