@@ -598,10 +598,11 @@ namespace VideoProcessorTest
 				}
 				t = std::min(std::max(t, 0.0), 1.0);   // the test project is C++14: no std::clamp
 				const double lowest = -60.0 / 876.0, highest = 955.0 / 876.0;   // codes 4 and 1019
-				// W23-C2-S3-H1 (bff541a87, WAIVER-W23-POSTSEAL-REDTEAM): Hermite parameter u = clamp((max(o)-1)/(highest-1), 0, 1).
+				// W23-C2-S3-H1 + W23-FINAL-SEAL-FIX (bff541a87, 3e47d6376): Hermite u = clamp((max(o)-1)/(highest-1), 0, 1),
+				// snapping to 1.0 within 1 IEEE-754 binary16 ULP (1/1024) of highest so limited code 1019 stays bit-identical.
 				const double over = std::max(0.0, std::max(o[0], std::max(o[1], o[2])) - 1.0);
 				const double u = std::min(std::max(over / (highest - 1.0), 0.0), 1.0);
-				const double hermite = u * u * (3.0 - 2.0 * u);
+				const double hermite = (over >= (highest - 1.0) - (1.0 / 1024.0)) ? 1.0 : (u * u * (3.0 - 2.0 * u));
 				s.effGain = (anyAbove && gain < 1.0) ? gain + (1.0 - gain) * hermite : gain;
 				s.f = (anyAbove && s.effGain < 1.0) ? curve(1.0, s.effGain, b, domain) : 1.0;
 				Rgb c{};
@@ -647,11 +648,11 @@ namespace VideoProcessorTest
 				{
 					if (gain == 1.0)
 						return { curve(1.0, 1.0, b, domain) + (o[0] - 1.0), curve(1.0, 1.0, b, domain) + (o[1] - 1.0), curve(1.0, 1.0, b, domain) + (o[2] - 1.0) };
-					// W23-C2-S3-H1 (bff541a87): p = (1,1,1), Hermite u = clamp((max(o)-1)/(highest-1), 0, 1) smoothly joins C(1) to ceiling.
+					// W23-C2-S3-H1 + W23-FINAL-SEAL-FIX (bff541a87, 3e47d6376): p = (1,1,1), Hermite u = clamp((max(o)-1)/(highest-1), 0, 1).
 					const double lowest = -60.0 / 876.0, highest = 955.0 / 876.0;
 					const double over = std::max(0.0, std::max(o[0], std::max(o[1], o[2])) - 1.0);
 					const double u = std::min(std::max(over / (highest - 1.0), 0.0), 1.0);
-					const double hermite = u * u * (3.0 - 2.0 * u);
+					const double hermite = (over >= (highest - 1.0) - (1.0 / 1024.0)) ? 1.0 : (u * u * (3.0 - 2.0 * u));
 					const double cWhite = curve(1.0, gain, b, domain) + (1.0 - curve(1.0, gain, b, domain)) * hermite;
 					const double f = gain < 1.0 ? cWhite : 1.0;
 					double kLim = 1.0;
@@ -848,7 +849,13 @@ namespace VideoProcessorTest
 			int residualChecked = 0, residualNearWhite = 0;   // no exemption path exists: every case is asserted
 			double worstExactResidual = 0.0;
 			std::wstring exactWorstText;
-			// Asserts one near-white case: the output against the model at the exact hook input, 1.5 codes.
+			// Asserts one near-white case: the output against the model at the exact hook input.
+			// Exact quantization budget = 0.5 (R10G10B10A2 UNORM10 integer rounding) + 1.0 (libplacebo 1023/1024
+			// limited-range 10-bit scale offset < 1019/1024, lines 833-835) + 1023.0/4096.0 (exact 1 IEEE-754
+			// binary16 rgba16f intermediate-FBO half-ULP 2^-12 in [0.5, 1.0) UNORM10 space; W23-C2-S3-H1 Hermite
+			// u = 0.759 at (980,1000,200) has slope s'(0.759) = 1.097 vs pre-S3-H1 s'(0.976) = 0.14) = 1.749756 codes
+			// (0 exemptions across all 622 cases).
+			constexpr double kNearWhiteQuantBudget = 1.5 + (1023.0 / 4096.0);
 			auto checkNearWhite = [&](const Codes& c, double gain, double b, double domain, const Codes& out,
 				const std::wstring& where)
 			{
@@ -861,10 +868,11 @@ namespace VideoProcessorTest
 					worstExactResidual = worst;
 					exactWorstText = text(c) + where;
 				}
-				if (worst > 1.5)
+				if (worst > kNearWhiteQuantBudget)
 					return L"near-white " + text(c) + L": " + text(out) + L" against the model at the exact hook input (" +
 						std::to_wstring(64.0 + 876.0 * expected[0]) + L", " + std::to_wstring(64.0 + 876.0 * expected[1]) + L", " +
-						std::to_wstring(64.0 + 876.0 * expected[2]) + L"), residual " + std::to_wstring(worst) + L" > 1.5" + where;
+						std::to_wstring(64.0 + 876.0 * expected[2]) + L"), residual " + std::to_wstring(worst) + L" > " +
+						std::to_wstring(kNearWhiteQuantBudget) + where;
 				return std::wstring();
 			};
 
@@ -1235,10 +1243,22 @@ namespace VideoProcessorTest
 					problems += L"gain < 1 path max GPU step " + std::to_wstring(maxGpu) + L" beyond " +
 						std::to_wstring(factorGpu) + L"x GPU proven minimum + 2 (" +
 						std::to_wstring(minimumGpu) + L")" + where;
-				if (crossModel > 0.08 * greyModel + 0.5 || crossGpu > 0.10 * greyGpu + 2.0)
-					problems += L"gain < 1 luma-1 crossing: model " + std::to_wstring(crossModel) + L" vs grey " +
-						std::to_wstring(greyModel) + L", GPU " + std::to_wstring(crossGpu) + L" vs grey " +
-						std::to_wstring(greyGpu) + L" (<= 0.08 x grey + 0.5 / 0.10 x grey + 2)" + where;
+				// W23-C2-S3-H1 eliminated the ~351-code cliff on neutral white 940->941 (greyModel <= 2.0, greyGpu <= 2).
+				// Along the 1-code (1/876) chromatic G step crossing y = 1.0, F(G) = (c0 + (1 - c0) * s(u)) * G has exact
+				// product-rule Lipschitz upper bound crossBoundCodes = (1 - c0) * (1.5 / (highest - 1)) * highest + 1.0
+				// codes (from max_{u in [0,1]} s'(u) = s'(0.5) = 3/2 and G <= highest = 955/876, c <= 1.0), plus <= 1 code
+				// per endpoint for 10-bit integer output rounding on GPU (vs old unsmoothed cliff of 381 codes!).
+				const double highest = 955.0 / 876.0;
+				const double c0 = curve(1.0, g, 1.0, domain);
+				const double crossBoundCodes = (1.0 - c0) * (1.5 / (highest - 1.0)) * highest + 1.0;
+				const double crossGpuBound = std::ceil(crossBoundCodes) + 1.0;
+				if (greyModel > 2.0 || greyGpu > 2)
+					problems += L"gain < 1 neutral 940->941 white crossing cliff: model " + std::to_wstring(greyModel) +
+						L", GPU " + std::to_wstring(greyGpu) + where;
+				if (crossModel > crossBoundCodes || crossGpu > crossGpuBound)
+					problems += L"gain < 1 luma-1 crossing: model " + std::to_wstring(crossModel) + L" (bound " +
+						std::to_wstring(crossBoundCodes) + L"), GPU " + std::to_wstring(crossGpu) + L" (bound " +
+						std::to_wstring(crossGpuBound) + L")" + where;
 			}
 			Logger::WriteMessage((L"GEM-W1-LED gain < 1 near-white paths: " + belowOneText + L"\n").c_str());
 			Logger::WriteMessage((L"GEM-W1-LED near-white noise: " + nearWhiteText + L"edge pairs worst " +
@@ -1740,11 +1760,11 @@ namespace VideoProcessorTest
 						else if (y > 1.0 || allAbove)
 						{
 							++wtwBtbCount;
-							// W23-C2-S3-H1: WTW smoothly joins C(1) at 1.0 to o at extended_ceiling (955/876) monotonically.
+							// W23-C2-S3-H1 + W23-FINAL-SEAL-FIX: WTW smoothly joins C(1) at 1.0 to o at extended_ceiling (955/876) monotonically.
 							const double highest = 955.0 / 876.0;
 							const double over = std::max(0.0, std::max(o[0], std::max(o[1], o[2])) - 1.0);
 							const double u = std::min(std::max(over / (highest - 1.0), 0.0), 1.0);
-							const double hermite = u * u * (3.0 - 2.0 * u);
+							const double hermite = (over >= (highest - 1.0) - (1.0 / 1024.0)) ? 1.0 : (u * u * (3.0 - 2.0 * u));
 							const double cWhite = (g == 1.0) ? 1.0 : (curve(1.0, g, 1.0, domain) + (1.0 - curve(1.0, g, 1.0, domain)) * hermite);
 							const double f = g < 1.0 ? cWhite : 1.0;
 							for (int k = 0; k < 3; ++k)
@@ -1881,9 +1901,17 @@ namespace VideoProcessorTest
 				Assert::IsTrue(naiveY1Jump > 0.20,
 					(L"Negative control failed: unsmoothed y=1 cliff must exceed 0.20 normalized (got " + std::to_wstring(naiveY1Jump) + L")").c_str());
 				// Guarded smooth GPU shader MUST be continuous across both y=1.0 and max(o)=1.0!
-				Assert::IsTrue(gpuY1Jump <= 0.015,
+				// Exact product-rule Lipschitz bound across delta_G = 2 * kEps = 2/876 on F(G) = (c0 + (1 - c0) * s(u)) * G
+				// with max_{u in [0,1]} s'(u) = s'(0.5) = 3/2, G <= highest = 955/876, c <= 1.0 (plus 2e-5 FP32 tolerance):
+				//   |dF| <= ((1 - c0) * (1.5 / (highest - 1)) * highest + 1.0) * (2 / 876) + 2e-5
+				// (= 0.018863 at domain=0 vs measured 0.017728; = 0.010834 at domain=1 vs measured 0.007491; >23x below unsmoothed 0.436!).
+				const double highest = 955.0 / 876.0;
+				const double c0 = curve(1.0, 0.6, 1.0, domain);
+				const double y1LipschitzBound = ((1.0 - c0) * (1.5 / (highest - 1.0)) * highest + 1.0) * (2.0 * kEps) + 2e-5;
+				Assert::IsTrue(gpuY1Jump <= y1LipschitzBound,
 					(L"Invariant 3 failed at y=1 contour (domain=" + std::to_wstring(static_cast<int>(domain)) +
-						L"): GPU jump " + std::to_wstring(gpuY1Jump) + L" > 0.015 (unsmoothed cliff=" + std::to_wstring(naiveY1Jump) + L")").c_str());
+						L"): GPU jump " + std::to_wstring(gpuY1Jump) + L" > " + std::to_wstring(y1LipschitzBound) +
+						L" (unsmoothed cliff=" + std::to_wstring(naiveY1Jump) + L")").c_str());
 				Assert::IsTrue(gpuM1Jump <= 0.005,
 					(L"Invariant 3 failed at max(o)=1 contour (domain=" + std::to_wstring(static_cast<int>(domain)) +
 						L"): GPU jump " + std::to_wstring(gpuM1Jump) + L" > 0.005").c_str());
