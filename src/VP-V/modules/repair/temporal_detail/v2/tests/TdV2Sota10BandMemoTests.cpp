@@ -385,7 +385,7 @@ namespace TdV2Sota10BandMemoNs
 			Assert::IsTrue(RmsDiff(refPertClean, refMemoClean) > 1.0,
 				FmtMsg("curLowBandTex appears unused: perturbed vs true memo rms=%.6f", RmsDiff(refPertClean, refMemoClean)).c_str());
 
-			// ---- Part B: Preset::RealTime (half-res saves -2 dispatches; mismatched full-res bypasses cleanly!) ----
+			// ---- Part B: Preset::RealTime (half-res saves -1 dispatch vs fused 2-pass compact decomp; mismatched full-res bypasses cleanly!) ----
 			GpuFrameOutput rtBaseOut, rtFullOut, rtFullPertOut, rtHalfOut, rtHalfPertOut;
 			TdV2Plane rtBaseY, rtBaseClean, rtFullY, rtFullClean, rtFullPertY, rtFullPertClean;
 			TdV2Plane rtHalfY, rtHalfClean, rtHalfPertY, rtHalfPertClean;
@@ -419,10 +419,10 @@ namespace TdV2Sota10BandMemoNs
 			Assert::IsTrue(MaxAbsDiff(rtFullPertClean, rtBaseClean) < 2e-4,
 				L"Perturbed full-res curLowBandTex in RealTime must also be bypassed cleanly");
 
-			// Valid half-res wHalf x hHalf curLowBandTex in Preset::RealTime saves -2 dispatches with < 2e-4 parity!
+			// Valid half-res wHalf x hHalf curLowBandTex in Preset::RealTime saves -1 dispatch (1-pass p1_cur_fine_only vs 2-pass p1_cur_fine_down + p1_half_2d) with < 2e-4 parity!
 			Assert::IsTrue(rtHalfOut.usedExternalBandMemo && !rtHalfOut.externalBandMemoRejected);
-			Assert::AreEqual(rtBaseOut.dispatchCount - 2, rtHalfOut.dispatchCount,
-				FmtMsg("RealTime half-res curLowBandTex must save -2 dispatches: base=%.0f memo=%.0f",
+			Assert::AreEqual(rtBaseOut.dispatchCount - 1, rtHalfOut.dispatchCount,
+				FmtMsg("RealTime half-res curLowBandTex must save -1 dispatch: base=%.0f memo=%.0f",
 					static_cast<double>(rtBaseOut.dispatchCount), static_cast<double>(rtHalfOut.dispatchCount)).c_str());
 			Assert::IsTrue(RmsDiff(rtHalfClean, rtBaseClean) < 2e-4 && MaxAbsDiff(rtHalfClean, rtBaseClean) < 2e-3,
 				FmtMsg("RealTime half-res BandMemo mismatch: rms=%.6f", RmsDiff(rtHalfClean, rtBaseClean)).c_str());

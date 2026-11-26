@@ -167,6 +167,9 @@ td_smooth_grain_guard=on
 td_subpixel_debias=off
 td_edge_upsample=off
 td_neighborhood_clamp=off
+td_region_tailoring=off
+td_bokeh_match_delta=off
+td_region_deband=off
 fp[000]=203
 fp[001]=0
 fp[002]=1
@@ -497,7 +500,10 @@ fp[326]=on
 fp[327]=off
 fp[328]=off
 fp[329]=off
-fp[330]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;}
+fp[330]=off
+fp[331]=off
+fp[332]=off
+fp[333]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;}
 ### case sample-VideoProcessor.cfg
 rule=scaling/default, motion/default, display/default, color/rec709, viewport/viewport_16x9, zoom/viewport_16x9, queue/normal, lldv/default, output_display/default, nls/off, standard_shaders/base
 capture_path=gpu
@@ -666,6 +672,9 @@ td_smooth_grain_guard=on
 td_subpixel_debias=off
 td_edge_upsample=off
 td_neighborhood_clamp=off
+td_region_tailoring=off
+td_bokeh_match_delta=off
+td_region_deband=off
 fp[000]=100
 fp[001]=0
 fp[002]=1
@@ -996,7 +1005,10 @@ fp[326]=on
 fp[327]=off
 fp[328]=off
 fp[329]=off
-fp[330]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=10;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=10;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.motion.default{deinterlace=auto;deinterlace_algorithm=bwdif;deinterlace_cadence=field;deinterlace_skip_spatial=false;field_order=auto;frame_mixer=oversample;label=Default;smooth_motion=off;}vprenderer.motion.default{deinterlace=auto;deinterlace_algorithm=bwdif;deinterlace_cadence=field;deinterlace_skip_spatial=false;field_order=auto;frame_mixer=oversample;label=Default;smooth_motion=off;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;sdr_black_nits=0;sdr_target_nits=100;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;sdr_black_nits=0;sdr_target_nits=100;}vprenderer.color.rec709{calibration_lut_bt2020=none;calibration_lut_bt709=none;calibration_lut_enabled=false;calibration_lut_p3_d65=none;diagnostic_allow_limited_g22=false;hdr_tone_map_target_gamma=2.2;output_gamma=2.2;output_presentation=AUTO;output_range=full;output_transport_gamma=2.2;report_bt2020_to_display=false;sdr_adjust_gamma=passthrough;sdr_input_transfer=2.4;sdr_lut_input_gamma=passthrough;shortcut=F5;target_primaries=REC709;}vprenderer.color.rec709{calibration_lut_bt2020=none;calibration_lut_bt709=none;calibration_lut_enabled=false;calibration_lut_p3_d65=none;diagnostic_allow_limited_g22=false;hdr_tone_map_target_gamma=2.2;output_gamma=2.2;output_presentation=AUTO;output_range=full;output_transport_gamma=2.2;report_bt2020_to_display=false;sdr_adjust_gamma=passthrough;sdr_input_transfer=2.4;sdr_lut_input_gamma=passthrough;shortcut=F5;target_primaries=REC709;}vprenderer.viewport.viewport_16x9{label=16x9;screen_aspect=16:9;shortcut=F3;vertical_alignment=center;}vprenderer.viewport.viewport_16x9{label=16x9;screen_aspect=16:9;shortcut=F3;vertical_alignment=center;}vprenderer.zoom.viewport_16x9{automatic_crop=false;hdr_peak_analysis_height_percent=75;hdr_peak_analysis_motion_compensation=false;hdr_peak_analysis_picture_only=false;label=16x9;shortcut=F3;}vprenderer.zoom.viewport_16x9{automatic_crop=false;hdr_peak_analysis_height_percent=75;hdr_peak_analysis_motion_compensation=false;hdr_peak_analysis_picture_only=false;label=16x9;shortcut=F3;}queue.normal{lead_frames=4;queue_size=32;shortcut=Shift+Q;startup_preroll_frames=0;target_frames=5;}queue.normal{lead_frames=4;queue_size=32;shortcut=Shift+Q;startup_preroll_frames=0;target_frames=5;}lldv.default{}lldv.default{}
+fp[330]=off
+fp[331]=off
+fp[332]=off
+fp[333]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=10;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=10;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.motion.default{deinterlace=auto;deinterlace_algorithm=bwdif;deinterlace_cadence=field;deinterlace_skip_spatial=false;field_order=auto;frame_mixer=oversample;label=Default;smooth_motion=off;}vprenderer.motion.default{deinterlace=auto;deinterlace_algorithm=bwdif;deinterlace_cadence=field;deinterlace_skip_spatial=false;field_order=auto;frame_mixer=oversample;label=Default;smooth_motion=off;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;sdr_black_nits=0;sdr_target_nits=100;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;sdr_black_nits=0;sdr_target_nits=100;}vprenderer.color.rec709{calibration_lut_bt2020=none;calibration_lut_bt709=none;calibration_lut_enabled=false;calibration_lut_p3_d65=none;diagnostic_allow_limited_g22=false;hdr_tone_map_target_gamma=2.2;output_gamma=2.2;output_presentation=AUTO;output_range=full;output_transport_gamma=2.2;report_bt2020_to_display=false;sdr_adjust_gamma=passthrough;sdr_input_transfer=2.4;sdr_lut_input_gamma=passthrough;shortcut=F5;target_primaries=REC709;}vprenderer.color.rec709{calibration_lut_bt2020=none;calibration_lut_bt709=none;calibration_lut_enabled=false;calibration_lut_p3_d65=none;diagnostic_allow_limited_g22=false;hdr_tone_map_target_gamma=2.2;output_gamma=2.2;output_presentation=AUTO;output_range=full;output_transport_gamma=2.2;report_bt2020_to_display=false;sdr_adjust_gamma=passthrough;sdr_input_transfer=2.4;sdr_lut_input_gamma=passthrough;shortcut=F5;target_primaries=REC709;}vprenderer.viewport.viewport_16x9{label=16x9;screen_aspect=16:9;shortcut=F3;vertical_alignment=center;}vprenderer.viewport.viewport_16x9{label=16x9;screen_aspect=16:9;shortcut=F3;vertical_alignment=center;}vprenderer.zoom.viewport_16x9{automatic_crop=false;hdr_peak_analysis_height_percent=75;hdr_peak_analysis_motion_compensation=false;hdr_peak_analysis_picture_only=false;label=16x9;shortcut=F3;}vprenderer.zoom.viewport_16x9{automatic_crop=false;hdr_peak_analysis_height_percent=75;hdr_peak_analysis_motion_compensation=false;hdr_peak_analysis_picture_only=false;label=16x9;shortcut=F3;}queue.normal{lead_frames=4;queue_size=32;shortcut=Shift+Q;startup_preroll_frames=0;target_frames=5;}queue.normal{lead_frames=4;queue_size=32;shortcut=Shift+Q;startup_preroll_frames=0;target_frames=5;}lldv.default{}lldv.default{}
 ### case original-pathway-on
 rule=scaling/default, display/default
 capture_path=standard
@@ -1165,6 +1177,9 @@ td_smooth_grain_guard=on
 td_subpixel_debias=off
 td_edge_upsample=off
 td_neighborhood_clamp=off
+td_region_tailoring=off
+td_bokeh_match_delta=off
+td_region_deband=off
 fp[000]=203
 fp[001]=0
 fp[002]=1
@@ -1495,7 +1510,10 @@ fp[326]=on
 fp[327]=off
 fp[328]=off
 fp[329]=off
-fp[330]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;}
+fp[330]=off
+fp[331]=off
+fp[332]=off
+fp[333]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;}vprenderer.default{contrast_recovery=0.3;peak_detection=high_quality;}
 ### case tier-Classic
 rule=scaling/default, display/default
 capture_path=gpu
@@ -1664,6 +1682,9 @@ td_smooth_grain_guard=on
 td_subpixel_debias=off
 td_edge_upsample=off
 td_neighborhood_clamp=off
+td_region_tailoring=off
+td_bokeh_match_delta=off
+td_region_deband=off
 fp[000]=203
 fp[001]=0
 fp[002]=1
@@ -1994,7 +2015,10 @@ fp[326]=on
 fp[327]=off
 fp[328]=off
 fp[329]=off
-fp[330]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{adaptive_downscale=off;contrast_recovery=0.3;deband_vp=off;dejudder_est_qpel=off;detail_pulse_stabilise=off;motion_ahead_frames=0;optical_flow=off;peak_detection=high_quality;source_resolution=native;temporal_dither=libplacebo;texture_restore=off;}vprenderer.default{adaptive_downscale=off;contrast_recovery=0.3;deband_vp=off;dejudder_est_qpel=off;detail_pulse_stabilise=off;motion_ahead_frames=0;optical_flow=off;peak_detection=high_quality;source_resolution=native;temporal_dither=libplacebo;texture_restore=off;}
+fp[330]=off
+fp[331]=off
+fp[332]=off
+fp[333]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{adaptive_downscale=off;contrast_recovery=0.3;deband_vp=off;dejudder_est_qpel=off;detail_pulse_stabilise=off;motion_ahead_frames=0;optical_flow=off;peak_detection=high_quality;source_resolution=native;temporal_dither=libplacebo;texture_restore=off;}vprenderer.default{adaptive_downscale=off;contrast_recovery=0.3;deband_vp=off;dejudder_est_qpel=off;detail_pulse_stabilise=off;motion_ahead_frames=0;optical_flow=off;peak_detection=high_quality;source_resolution=native;temporal_dither=libplacebo;texture_restore=off;}
 ### case tier-Low
 rule=scaling/default, display/default
 capture_path=gpu
@@ -2163,6 +2187,9 @@ td_smooth_grain_guard=on
 td_subpixel_debias=off
 td_edge_upsample=off
 td_neighborhood_clamp=off
+td_region_tailoring=off
+td_bokeh_match_delta=off
+td_region_deband=off
 fp[000]=203
 fp[001]=0
 fp[002]=1
@@ -2493,7 +2520,10 @@ fp[326]=on
 fp[327]=off
 fp[328]=off
 fp[329]=off
-fp[330]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{adaptive_downscale=off;contrast_recovery=0.3;deband_vp=off;dejudder_est_qpel=on;dejudder_est_split=off;detail_pulse_stabilise=off;motion_ahead_frames=0;optical_flow=off;peak_detection=high_quality;source_resolution=auto;temporal_dither=auto;texture_restore=off;}vprenderer.default{adaptive_downscale=off;contrast_recovery=0.3;deband_vp=off;dejudder_est_qpel=on;dejudder_est_split=off;detail_pulse_stabilise=off;motion_ahead_frames=0;optical_flow=off;peak_detection=high_quality;source_resolution=auto;temporal_dither=auto;texture_restore=off;}
+fp[330]=off
+fp[331]=off
+fp[332]=off
+fp[333]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{adaptive_downscale=off;contrast_recovery=0.3;deband_vp=off;dejudder_est_qpel=on;dejudder_est_split=off;detail_pulse_stabilise=off;motion_ahead_frames=0;optical_flow=off;peak_detection=high_quality;source_resolution=auto;temporal_dither=auto;texture_restore=off;}vprenderer.default{adaptive_downscale=off;contrast_recovery=0.3;deband_vp=off;dejudder_est_qpel=on;dejudder_est_split=off;detail_pulse_stabilise=off;motion_ahead_frames=0;optical_flow=off;peak_detection=high_quality;source_resolution=auto;temporal_dither=auto;texture_restore=off;}
 ### case tier-Mid
 rule=scaling/default, display/default
 capture_path=gpu
@@ -2662,6 +2692,9 @@ td_smooth_grain_guard=on
 td_subpixel_debias=off
 td_edge_upsample=off
 td_neighborhood_clamp=off
+td_region_tailoring=off
+td_bokeh_match_delta=off
+td_region_deband=off
 fp[000]=203
 fp[001]=0
 fp[002]=1
@@ -2992,7 +3025,10 @@ fp[326]=on
 fp[327]=off
 fp[328]=off
 fp[329]=off
-fp[330]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{adaptive_downscale=on;adaptive_w_base=0.2;contrast_recovery=0.3;deband_vp=on;dejudder_est_qpel=on;dejudder_est_split=off;detail_pulse_stabilise=off;motion_ahead_frames=4;optical_flow=on;peak_detection=high_quality;source_resolution=auto;temporal_dither=sigma_delta;texture_restore=off;}vprenderer.default{adaptive_downscale=on;adaptive_w_base=0.2;contrast_recovery=0.3;deband_vp=on;dejudder_est_qpel=on;dejudder_est_split=off;detail_pulse_stabilise=off;motion_ahead_frames=4;optical_flow=on;peak_detection=high_quality;source_resolution=auto;temporal_dither=sigma_delta;texture_restore=off;}
+fp[330]=off
+fp[331]=off
+fp[332]=off
+fp[333]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{adaptive_downscale=on;adaptive_w_base=0.2;contrast_recovery=0.3;deband_vp=on;dejudder_est_qpel=on;dejudder_est_split=off;detail_pulse_stabilise=off;motion_ahead_frames=4;optical_flow=on;peak_detection=high_quality;source_resolution=auto;temporal_dither=sigma_delta;texture_restore=off;}vprenderer.default{adaptive_downscale=on;adaptive_w_base=0.2;contrast_recovery=0.3;deband_vp=on;dejudder_est_qpel=on;dejudder_est_split=off;detail_pulse_stabilise=off;motion_ahead_frames=4;optical_flow=on;peak_detection=high_quality;source_resolution=auto;temporal_dither=sigma_delta;texture_restore=off;}
 ### case tier-Upper
 rule=scaling/default, display/default
 capture_path=gpu
@@ -3161,6 +3197,9 @@ td_smooth_grain_guard=on
 td_subpixel_debias=off
 td_edge_upsample=off
 td_neighborhood_clamp=off
+td_region_tailoring=off
+td_bokeh_match_delta=off
+td_region_deband=off
 fp[000]=203
 fp[001]=0
 fp[002]=1
@@ -3491,7 +3530,10 @@ fp[326]=on
 fp[327]=off
 fp[328]=off
 fp[329]=off
-fp[330]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{adaptive_downscale=on;adaptive_w_base=0.2;contrast_recovery=0.3;deband_vp=on;dejudder_est_qpel=on;dejudder_est_split=on;detail_pulse_stabilise=off;motion_ahead_frames=4;optical_flow=on;peak_detection=high_quality;source_resolution=auto;temporal_dither=sigma_delta;texture_restore=off;}vprenderer.default{adaptive_downscale=on;adaptive_w_base=0.2;contrast_recovery=0.3;deband_vp=on;dejudder_est_qpel=on;dejudder_est_split=on;detail_pulse_stabilise=off;motion_ahead_frames=4;optical_flow=on;peak_detection=high_quality;source_resolution=auto;temporal_dither=sigma_delta;texture_restore=off;}
+fp[330]=off
+fp[331]=off
+fp[332]=off
+fp[333]=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{adaptive_downscale=on;adaptive_w_base=0.2;contrast_recovery=0.3;deband_vp=on;dejudder_est_qpel=on;dejudder_est_split=on;detail_pulse_stabilise=off;motion_ahead_frames=4;optical_flow=on;peak_detection=high_quality;source_resolution=auto;temporal_dither=sigma_delta;texture_restore=off;}vprenderer.default{adaptive_downscale=on;adaptive_w_base=0.2;contrast_recovery=0.3;deband_vp=on;dejudder_est_qpel=on;dejudder_est_split=on;detail_pulse_stabilise=off;motion_ahead_frames=4;optical_flow=on;peak_detection=high_quality;source_resolution=auto;temporal_dither=sigma_delta;texture_restore=off;}
 ### tier defaults
 optical_flow=on
 motion_ahead_frames=4
@@ -3540,6 +3582,24 @@ cnn_residual_stabilise=on
 fbo_float32=auto
 ambient_adapt=off
 occlusion_mask=off
+temporal_detail=off
+td_limit_kappa=1.0
+td_mode=cell
+td_overlay=off
+td_solver=active_set
+td_quality_signal=aligned_a2e
+td_stats_pooling=band_shrink
+td_anchored_carry=off
+td_smooth_warp=on
+td_hard_fb_gate=on
+td_chroma_weights=independent
+td_smooth_grain_guard=on
+td_subpixel_debias=off
+td_edge_upsample=off
+td_neighborhood_clamp=off
+td_region_tailoring=off
+td_bokeh_match_delta=off
+td_region_deband=off
 ### original pathway overrides
 capture_path=standard (input.capture)
 capture_upload=render (input.capture)

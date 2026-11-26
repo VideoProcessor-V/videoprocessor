@@ -1696,7 +1696,7 @@ namespace TdV2SchedulerConfigNs
 				Assert::IsTrue(fpOnlyTd != fpOnlyMode && fpOnlyMode != fpOnlyOverlay && fpOnlyTd != fpOnlyOverlay,
 					L"Distinct TD field edits produce distinct Fingerprints");
 
-				const std::string tailToken = "|on|strict|maps|1|active_set|aligned_a2e|band_shrink|off|on|on|independent|on|off|off|off";
+				const std::string tailToken = "|on|strict|maps|1|active_set|aligned_a2e|band_shrink|off|on|on|independent|on|off|off|off|off|off|off";
 				const size_t tailPosNoLive = fpModNoLive.rfind(tailToken);
 				Assert::IsTrue(tailPosNoLive != std::string::npos && tailPosNoLive + tailToken.size() == fpModNoLive.size(),
 					L"TD keys must appear at the end of VpvRendererSettings::Fingerprint(false)");
