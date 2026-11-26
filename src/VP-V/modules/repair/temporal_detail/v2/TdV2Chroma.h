@@ -2100,7 +2100,7 @@ namespace TdV2
 				ResetAnchor();
 				res.anchorReset = true;
 			}
-			else if (effFadeKeep < 1.0 && anchorCanvas_.HasData())
+			else if (effFadeKeep < 1.0 && anchorCanvas_.HasData() && !in.isPulldownRepeat)
 			{
 				anchorCanvas_.ApplyFadeKeep(effFadeKeep);
 			}
@@ -3959,7 +3959,7 @@ namespace TdV2
 					}
 					rawA2e.valid = anyA2e;
 					const EmpiricalOwnErrorPrior effA2e = a2eHist.ApplyCapAndRecord(
-						rawA2e, in.frameRole, cfg_.sourceHz, (effFadeKeep < 1.0), false);
+						rawA2e, in.frameRole, cfg_.sourceHz, (effFadeKeep < 1.0) || in.isPulldownRepeat, false, in.isPulldownRepeat);
 
 					double ebTauSq[3][kA2eActivityClasses] = {};
 					if (cfg_.enableEmpiricalBayesShrinkage && effA2e.valid)
@@ -4543,7 +4543,9 @@ namespace TdV2
 			               in.retainedGrainVarCb, cflRejectCb, a2eHistoryCb_, res.codedDeltaCb, codedDeltaLowCb);
 			fuseCodedPlane(false, codedRecCr, codedCleanCr, ownGrainCr, curBandsCr,
 			               in.retainedGrainVarCr, cflRejectCr, a2eHistoryCr_, res.codedDeltaCr, codedDeltaLowCr);
-			if (effFadeKeep < 1.0)
+			// H1: Avoid double-applying fadeKeep^2 when chromaReuseLumaWeights already imported post-fade Luma weights!
+			const bool chromaReusedLumaFade = cfg_.chromaReuseLumaWeights && (in.lumaCellWeights != nullptr);
+			if (effFadeKeep < 1.0 && !chromaReusedLumaFade)
 			{
 				for (double& v : res.codedDeltaCb.v) v *= effFadeKeep;
 				for (double& v : res.codedDeltaCr.v) v *= effFadeKeep;

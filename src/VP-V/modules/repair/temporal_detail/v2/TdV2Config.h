@@ -423,7 +423,8 @@ namespace TdV2
 		int frameRoleInt,
 		bool isConfirmedPeak,
 		double activeTileFraction,
-		CoverageAdaptiveKState& coverageState)
+		CoverageAdaptiveKState& coverageState,
+		bool a2ePriorWarm = true)
 	{
 		AdaptiveKDecision d;
 		d.activeTileFraction = (std::isfinite(activeTileFraction) && activeTileFraction >= 0.0)
@@ -434,14 +435,15 @@ namespace TdV2
 		if (cfg.enableRoleAdaptiveK)
 		{
 			// FrameRole::Peak == 1 (or explicit isConfirmedPeak) -> K=0 clean peak passthrough;
-			// FrameRole::Reference == 2 -> K=1 shallow dip; FrameRole::NonReference == 3 / Unknown -> K=2 deep valley.
+			// FrameRole::Reference == 2 -> K=1 shallow dip ONLY once empirical A2e prior is warm (or A2 mode),
+			// preventing 3-6 Hz A1 <-> 1-LSB A2 pumping mid-GOP (M2); FrameRole::NonReference == 3 / Unknown -> K=2.
 			if (isConfirmedPeak || frameRoleInt == 1)
 			{
 				d.maxExternalRefs = 0;
 				d.roleAdaptiveReduced = true;
 				return d;
 			}
-			if (frameRoleInt == 2)
+			if (frameRoleInt == 2 && (a2ePriorWarm || cfg.estimator == VarianceEstimator::A2_RoundingCells))
 			{
 				if (d.maxExternalRefs > 1)
 					d.maxExternalRefs = 1;

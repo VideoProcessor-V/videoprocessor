@@ -1457,6 +1457,11 @@ namespace TdV2
 			}
 			else if (numCells > 0)
 			{
+				const CellMotionField* covMf = (in.prevPeak.motion != nullptr && in.prevPeak.motion->IsWellFormed(res.cellsW, res.cellsH))
+					? in.prevPeak.motion
+					: ((in.nextPeak.motion != nullptr && in.nextPeak.motion->IsWellFormed(res.cellsW, res.cellsH))
+						? in.nextPeak.motion
+						: nullptr);
 				size_t activeCells = 0;
 				for (int cy = 0; cy < res.cellsH; ++cy)
 				{
@@ -1473,13 +1478,29 @@ namespace TdV2
 						const size_t ci = static_cast<size_t>(cy) * res.cellsW + cx;
 						if (in.faceMask != nullptr && ci < in.faceMask->size() && (*in.faceMask)[ci] != 0u)
 							continue;
+						// M2: Exclude motion-rejected / Overlay / fast-Object / occluded tiles so 16:9 coverage is not pinned at 1.0!
+						if (covMf != nullptr)
+						{
+							if (covMf->valid[ci] == 0u || covMf->cls[ci] == RegionMotionClass::Overlay)
+								continue;
+							if (cfg_.enableHardFbOcclusionGate && !covMf->fbErrorPx.empty() &&
+							    std::isfinite(covMf->fbErrorPx[ci]) && covMf->fbErrorPx[ci] > kHardFbOcclusionPx)
+								continue;
+							if (covMf->cls[ci] == RegionMotionClass::Object)
+							{
+								const double relSpd = std::hypot(covMf->vx[ci] - covMf->camVx[ci], covMf->vy[ci] - covMf->camVy[ci]);
+								if (!std::isfinite(relSpd) || relSpd >= kFastObjectCutoffPx)
+									continue;
+							}
+						}
 						++activeCells;
 					}
 				}
 				activeTileFrac = static_cast<double>(activeCells) / static_cast<double>(numCells);
 			}
+			const bool a2eWarm = a2eHistory_.HasValidHistory() || in.hasStepPrior;
 			const AdaptiveKDecision adaptiveK = ResolveAdaptiveKCap(
-				cfg_, w, h, static_cast<int>(in.frameRole), in.isConfirmedPeak, activeTileFrac, coverageAdaptiveState_);
+				cfg_, w, h, static_cast<int>(in.frameRole), in.isConfirmedPeak, activeTileFrac, coverageAdaptiveState_, a2eWarm);
 			res.activeTileFraction = adaptiveK.activeTileFraction;
 			res.effectiveKCap = adaptiveK.maxExternalRefs;
 			res.auto4k60SingleRefActive = adaptiveK.auto4k60Active;
@@ -2567,7 +2588,8 @@ namespace TdV2
 			// Requires matching RefRole per slot, source-seconds age <= kA2eHistoryHorizonSec, and low inter-frame cell motion
 			// (|v| < 0.5 * cellPx) so fast-moving cells never mix unrelated spatial content.
 			const double frameHz = (std::isfinite(cfg_.sourceHz) && cfg_.sourceHz > 0.0) ? cfg_.sourceHz : kDefaultSourceHz;
-			elapsedSec_ += (1.0 / frameHz);
+			if (!in.isPulldownRepeat)
+				elapsedSec_ += (1.0 / frameHz);
 			auto roleToPoolIdx = [](QualityPattern::FrameRole r) -> int
 			{
 				switch (r)
@@ -2750,9 +2772,9 @@ namespace TdV2
 						rawA2e.U[b][1] = rawA2e.U[b][0];
 				}
 				rawA2e.valid = anyClassValid;
-				const bool freezeA2e = effectiveCut || (effFadeKeep < 1.0);
+				const bool freezeA2e = effectiveCut || (effFadeKeep < 1.0) || in.isPulldownRepeat;
 				res.empiricalOwnError = a2eHistory_.ApplyCapAndRecord(
-					rawA2e, in.frameRole, cfg_.sourceHz, freezeA2e, effectiveCut);
+					rawA2e, in.frameRole, cfg_.sourceHz, freezeA2e, effectiveCut, in.isPulldownRepeat);
 			}
 
 			// TD-U4 (H-3): Cross-cell spread tau^2 = max(0, Var(c_raw) - mean(se^2)) per band x activity class.
@@ -2973,8 +2995,6 @@ namespace TdV2
 							if (cfg_.enableDpbDetailBankV2 && k == anchoredCarryRefIdx)
 							{
 								gVal *= cellDpbVoterGate;
-								if (effFadeKeep < 1.0)
-									gVal *= effFadeKeep;
 							}
 							if (effBokehMatchDelta > 0.0)
 							{
@@ -3275,8 +3295,8 @@ namespace TdV2
 						}
 					}
 
-					// SOTA-7 (U7 gradual fadeKeep): taper recurrent Carry weight strictly AFTER grain-budget scaling
-					// so grain-budget normalization never cancels fadeKeep (fadeKeep == 1.0 -> bit-identical).
+					// SOTA-7 + H1 (U7 gradual fadeKeep): taper BOTH recurrent Carry AND anchored carry (k == anchoredCarryRefIdx)
+					// strictly AFTER enableRegionDeband & grain-budget scaling so no normalizer can ever cancel fadeKeep!
 					if (effFadeKeep < 1.0)
 					{
 						activeBandBits = 0u;
@@ -3286,7 +3306,7 @@ namespace TdV2
 							double bandWSum = 0.0;
 							for (int k = 0; k < K; ++k)
 							{
-								if (refs[k].role == RefRole::Carry)
+								if (refs[k].role == RefRole::Carry || k == anchoredCarryRefIdx)
 									cellW[b][k][cIdx] *= effFadeKeep;
 								bandWSum += cellW[b][k][cIdx];
 							}
@@ -3458,17 +3478,20 @@ namespace TdV2
 						const TdV2Plane& curBandPlane = bandPlaneOf(curBands, b);
 						const double curV = curBandPlane.at(x, y);
 
-						// SOTA #5 / Pass 3C Layer 3: Optional 3x3 grain-free neighborhood clamp on M/H bands (b >= 1).
-						// - Legacy SOTA #5 (enableNeighborhoodSoftClamp): 3-sigma C^1 soft clamp around 3x3 mean.
-						// - Pass 3C Layer 3 (enableDpbDetailBankV2 && enableDpbNeighborhoodEnvelopeClamp): Salvi TAA
-						//   3x3 min/max + 3-sigma variance envelope strictly inside the quantization-cell bound qFloor.
+						// SOTA #5 / Pass 3C Layer 3 (H5 + Speedup #5):
+						// - Legacy SOTA #5 (enableNeighborhoodSoftClamp): 3-sigma C^1 soft clamp around 3x3 mean on all refs (b >= 1).
+						// - Pass 3C Layer 3 (enableDpbDetailBankV2 && enableDpbNeighborhoodEnvelopeClamp): Salvi TAA 3x3 min/max +
+						//   3-sigma variance envelope strictly on CARRIED contributions (k == anchoredCarryRefIdx, NEVER clamping
+						//   local prevPeak/nextPeak!), gated on own carried weight > 0 and scaled by effKappa!
 						double nbrMean = curV;
 						double nbrSigma = 0.0;
 						double nbrMin = curV;
 						double nbrMax = curV;
-						const bool applyDpbEnvelope = cfg_.enableDpbDetailBankV2 && cfg_.enableDpbNeighborhoodEnvelopeClamp && (b >= 1);
-						const bool applyNbrClamp = (applyDpbEnvelope || cfg_.enableNeighborhoodSoftClamp) && (b >= 1);
-						if (applyNbrClamp)
+						const bool applyDpbEnvelope = cfg_.enableDpbDetailBankV2 && cfg_.enableDpbNeighborhoodEnvelopeClamp &&
+							(b >= 1) && (anchoredCarryRefIdx >= 0) && (cellW[b][anchoredCarryRefIdx][cIdx] > 0.0);
+						const bool applyLegacyNbrClamp = cfg_.enableNeighborhoodSoftClamp && (b >= 1);
+						const bool needNbrStats = applyDpbEnvelope || applyLegacyNbrClamp;
+						if (needNbrStats)
 						{
 							double sumS = 0.0;
 							double sumSq = 0.0;
@@ -3495,7 +3518,7 @@ namespace TdV2
 							nbrSigma = std::sqrt((std::max)(0.0, (sumSq / 9.0) - meanS * meanS));
 						}
 						const double qFloorBand = applyDpbEnvelope
-							? std::sqrt((std::max)(baseQuantVar * bandTransfer[b], (std::max)(0.0, cellOwnErrU[b][cIdx])))
+							? (effKappa * std::sqrt((std::max)(baseQuantVar * bandTransfer[b], (std::max)(0.0, cellOwnErrU[b][cIdx]))))
 							: 0.0;
 
 						double bandDelta = 0.0;
@@ -3513,9 +3536,9 @@ namespace TdV2
 							// - Optional SOTA #4 clean-luma-guided edge-aware bilinear (cfg_.enableEdgeAwareWeightUpsample)
 							// - Default spatial bilinear with optional per-corner 3-sigma Huber taper (cfg_.enablePerCornerHuber).
 							double refV = bandPlaneOf(refs[k].bands, b).at(x, y);
-							if (applyDpbEnvelope)
+							if (applyDpbEnvelope && k == anchoredCarryRefIdx)
 								refV = ClampToSalvi3x3Envelope(refV, nbrMin, nbrMax, nbrMean, nbrSigma, qFloorBand);
-							else if (applyNbrClamp)
+							else if (applyLegacyNbrClamp)
 								refV = SoftClampToNeighborhood3Sigma(refV, nbrMean, nbrSigma);
 							const double diff = curV - refV;
 							double wEff = 0.0;
@@ -3838,18 +3861,22 @@ namespace TdV2
 				if (nf != 0u) ++res.nonFiniteCells;
 
 			// Update legacy recurrent carry-forward buffer strictly with the grain-free estimate `candClean`.
-			if (effFadeKeep < 1.0)
+			// M1 (s3.5): Do NOT overwrite carryClean_ on 3:2 pulldown repeat frames!
+			if (!in.isPulldownRepeat)
 			{
-				carryClean_ = TdV2Plane(w, h, 0.0);
-				const double invKeep = 1.0 - effFadeKeep;
-				for (size_t i = 0; i < candClean.v.size(); ++i)
-					carryClean_.v[i] = effFadeKeep * candClean.v[i] + invKeep * curClean.v[i];
+				if (effFadeKeep < 1.0)
+				{
+					carryClean_ = TdV2Plane(w, h, 0.0);
+					const double invKeep = 1.0 - effFadeKeep;
+					for (size_t i = 0; i < candClean.v.size(); ++i)
+						carryClean_.v[i] = effFadeKeep * candClean.v[i] + invKeep * curClean.v[i];
+				}
+				else
+				{
+					carryClean_ = candClean;
+				}
+				hasCarry_ = true;
 			}
-			else
-			{
-				carryClean_ = candClean;
-			}
-			hasCarry_ = true;
 
 			// TD-U5 (H-4 / Owner D2) + Pass 3C Progressive Multi-Keyframe Grain-Free Kalman Fusion:
 			// Re-anchor / precision-update single-resample Keyframe Detail Bank strictly at confirmed peaks

@@ -88,6 +88,50 @@ vec2 td_ch_pack_l(vec2 val)
     return vec2(td_pack_band_l(val.x), td_pack_band_l(val.y));
 }
 
+vec4 td_ch_pack_mh(vec4 v)
+{
+#if defined(TD_CH_MH_NORM16) && TD_CH_MH_NORM16
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+    return vec4(td_pack_band_l(v.x), td_pack_band_l(v.y), td_pack_band_s(v.z), td_pack_band_s(v.w));
+#else
+    return vec4(td_pack_band_s(v.x), td_pack_band_s(v.y), td_pack_band_s(v.z), td_pack_band_s(v.w));
+#endif
+#else
+    return v;
+#endif
+}
+
+vec4 td_ch_unpack_mh(vec4 raw)
+{
+#if defined(TD_CH_MH_NORM16) && TD_CH_MH_NORM16
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+    return vec4(td_unpack_band_l(raw.x), td_unpack_band_l(raw.y), td_unpack_band_s(raw.z), td_unpack_band_s(raw.w));
+#else
+    return vec4(td_unpack_band_s(raw.x), td_unpack_band_s(raw.y), td_unpack_band_s(raw.z), td_unpack_band_s(raw.w));
+#endif
+#else
+    return raw;
+#endif
+}
+
+vec4 td_ch_pack_tmp(vec4 v)
+{
+#if defined(TD_CH_MH_NORM16) && TD_CH_MH_NORM16
+    return vec4(td_pack_band_l(v.x), td_pack_band_l(v.y), td_pack_band_l(v.z), td_pack_band_l(v.w));
+#else
+    return v;
+#endif
+}
+
+vec4 td_ch_unpack_tmp(vec4 raw)
+{
+#if defined(TD_CH_MH_NORM16) && TD_CH_MH_NORM16
+    return vec4(td_unpack_band_l(raw.x), td_unpack_band_l(raw.y), td_unpack_band_l(raw.z), td_unpack_band_l(raw.w));
+#else
+    return raw;
+#endif
+}
+
 vec2 td_ch_fetch_l(sampler2D lTex, ivec2 p, ivec4 cHalfActive)
 {
 #if defined(TD_CH_HALF_L) && TD_CH_HALF_L
@@ -391,9 +435,8 @@ if (!validRect || (baseX + 15 < cax0) || (baseX >= cax1) || (baseY + 15 < cay0) 
     if (p.x < TD_CH_W && p.y < TD_CH_H)
     {
         uint prevP = flagsClear ? 0u : uint(round(texelFetch(ref_flags_in, p, 0).x * 65535.0));
-        vec2 fb = td_ch_cur_fallback(p);
         uint np = td_pack_ref_flags(prevP, refIdx, 0);
-        imageStore(warped_uv, p, vec4(fb, 0.0, 0.0));
+        imageStore(warped_uv, p, vec4(0.0));
         imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
     }
     return;
@@ -732,6 +775,15 @@ int xMin = cax0;
 int xMax = max(cax0, cax1 - 1);
 int safeY = clamp(baseY + ly, 0, TD_CH_H - 1);
 
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+if (!validRect || (baseX + 15 < cax0) || (baseX >= cax1) || (baseY + 15 < cay0) || (baseY >= cay1))
+{
+    if (p.x < TD_CH_W && p.y < TD_CH_H)
+        imageStore(tmp_cb, p, td_ch_pack_tmp(vec4(0.0)));
+    return;
+}
+#endif
+
 int tileW = 16 + 2 * TD_RAD_BASE;
 for (int col = lx; col < tileW; col += 16)
 {
@@ -748,7 +800,7 @@ if (p.x >= TD_CH_W || p.y >= TD_CH_H)
 
 if (!validRect || p.x < cax0 || p.x >= cax1 || p.y < cay0 || p.y >= cay1)
 {
-    imageStore(tmp_cb, p, vec4(0.0));
+    imageStore(tmp_cb, p, td_ch_pack_tmp(vec4(0.0)));
     return;
 }
 
@@ -763,7 +815,7 @@ for (int k = -TD_RAD_BASE; k <= TD_RAD_BASE; ++k)
         accFine += TD_TAP_FINE[k + TD_RAD_FINE] * v;
 }
 
-imageStore(tmp_cb, p, vec4(accFine.x, accFine.y, accBase.x, accBase.y));
+imageStore(tmp_cb, p, td_ch_pack_tmp(vec4(accFine.x, accFine.y, accBase.x, accBase.y)));
 )GLSL";
 
 		constexpr const char* kPassChromaBandVHeader = R"GLSL(
@@ -786,12 +838,24 @@ int yMin = cay0;
 int yMax = max(cay0, cay1 - 1);
 int safeX = clamp(baseX + lx, 0, TD_CH_W - 1);
 
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+if (!validRect || (baseX + 15 < cax0) || (baseX >= cax1) || (baseY + 15 < cay0) || (baseY >= cay1))
+{
+    if (p.x < TD_CH_W && p.y < TD_CH_H)
+    {
+        imageStore(bands_l, p, vec4(td_ch_pack_l(vec2(0.0)), 0.0, 0.0));
+        imageStore(bands_mh, p, td_ch_pack_mh(vec4(0.0)));
+    }
+    return;
+}
+#endif
+
 int tileH = 16 + 2 * TD_RAD_BASE;
 for (int row = ly; row < tileH; row += 16)
 {
     int gy = baseY - TD_RAD_BASE + row;
     int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_CH_H - 1);
-    td_ch_v[row][lx] = texelFetch(tmp_cb, ivec2(safeX, sy), 0);
+    td_ch_v[row][lx] = td_ch_unpack_tmp(texelFetch(tmp_cb, ivec2(safeX, sy), 0));
 }
 memoryBarrierShared();
 barrier();
@@ -802,7 +866,7 @@ if (p.x >= TD_CH_W || p.y >= TD_CH_H)
 if (!validRect || p.x < cax0 || p.x >= cax1 || p.y < cay0 || p.y >= cay1)
 {
     imageStore(bands_l, p, vec4(td_ch_pack_l(vec2(0.0)), 0.0, 0.0));
-    imageStore(bands_mh, p, vec4(0.0));
+    imageStore(bands_mh, p, td_ch_pack_mh(vec4(0.0)));
     return;
 }
 
@@ -823,7 +887,7 @@ vec2 bL = gBase;
 vec2 bM = gFine - bL;
 vec2 bH = srcVal - gFine;
 imageStore(bands_l, p, vec4(td_ch_pack_l(bL), 0.0, 0.0));
-imageStore(bands_mh, p, vec4(bM.x, bM.y, bH.x, bH.y));
+imageStore(bands_mh, p, td_ch_pack_mh(vec4(bM.x, bM.y, bH.x, bH.y)));
 )GLSL";
 
 		// ---- PASS C1-OPT3 (SC-07): Half-Res Chroma L + Full-Coded-Res M/H (1-pass 2D LDS G_fine + 2x2 downsample -> 1-pass 2D LDS half-L) ----
@@ -868,7 +932,7 @@ if (!validRect || (baseX + 15 < cax0) || (baseX >= cax1) || (baseY + 15 < cay0) 
             imageStore(half_area_out, hp, vec4(td_ch_pack_l(vec2(0.0)), 0.0, 0.0));
     }
     if (p.x < TD_CH_W && p.y < TD_CH_H)
-        imageStore(bands_mh, p, vec4(0.0));
+        imageStore(bands_mh, p, td_ch_pack_mh(vec4(0.0)));
     return;
 }
 #endif
@@ -931,7 +995,7 @@ if (p.x >= TD_CH_W || p.y >= TD_CH_H)
 
 if (!validRect || p.x < cax0 || p.x >= cax1 || p.y < cay0 || p.y >= cay1)
 {
-    imageStore(bands_mh, p, vec4(0.0));
+    imageStore(bands_mh, p, td_ch_pack_mh(vec4(0.0)));
     return;
 }
 
@@ -942,7 +1006,7 @@ for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
 
 vec2 srcVal = td_ch_fd0[cyCenter][lx + TD_RAD_FINE];
 vec2 bH = srcVal - gFine;
-imageStore(bands_mh, p, vec4(gFine.x, gFine.y, bH.x, bH.y));
+imageStore(bands_mh, p, td_ch_pack_mh(vec4(gFine.x, gFine.y, bH.x, bH.y)));
 )GLSL";
 
 		constexpr const char* kPassChromaHalfL2DHeader = R"GLSL(
@@ -1222,7 +1286,7 @@ for (int sy = 0; sy < subY; ++sy)
                     if (!td_is_bad(rv.y) && !td_is_bad(cv.y)) { float d = rv.y - cv.y; ogCr2 += d * d; }
                 }
                 vec2 cLp = td_ch_fetch_l(cur_l, p, cHalfActive);
-                vec4 cMHp = texelFetch(cur_mh, p, 0);
+                vec4 cMHp = td_ch_unpack_mh(texelFetch(cur_mh, p, 0));
 #if defined(TD_CH_HALF_L) && TD_CH_HALF_L
                 cMHp.xy = cMHp.xy - cLp;
 #endif
@@ -1250,7 +1314,7 @@ for (int sy = 0; sy < subY; ++sy)
                         if (needL0) rL0 = td_ch_fetch_l(ref_l_0, p, cHalfActive);
                         if (needAutoFocus || (cellGateMaskMH & 1) != 0)
                         {
-                            rMH0 = texelFetch(ref_mh_0, p, 0);
+                            rMH0 = td_ch_unpack_mh(texelFetch(ref_mh_0, p, 0));
 #if defined(TD_CH_HALF_L) && TD_CH_HALF_L
                             rMH0.xy = rMH0.xy - rL0;
 #endif
@@ -1278,7 +1342,7 @@ for (int sy = 0; sy < subY; ++sy)
                         if (needL1) rL1 = td_ch_fetch_l(ref_l_1, p, cHalfActive);
                         if (needAutoFocus || (cellGateMaskMH & 2) != 0)
                         {
-                            rMH1 = texelFetch(ref_mh_1, p, 0);
+                            rMH1 = td_ch_unpack_mh(texelFetch(ref_mh_1, p, 0));
 #if defined(TD_CH_HALF_L) && TD_CH_HALF_L
                             rMH1.xy = rMH1.xy - rL1;
 #endif
@@ -1306,7 +1370,7 @@ for (int sy = 0; sy < subY; ++sy)
                         if (needL2) rL2 = td_ch_fetch_l(ref_l_2, p, cHalfActive);
                         if (needAutoFocus || (cellGateMaskMH & 4) != 0)
                         {
-                            rMH2 = texelFetch(ref_mh_2, p, 0);
+                            rMH2 = td_ch_unpack_mh(texelFetch(ref_mh_2, p, 0));
 #if defined(TD_CH_HALF_L) && TD_CH_HALF_L
                             rMH2.xy = rMH2.xy - rL2;
 #endif
@@ -2713,13 +2777,13 @@ bool refOk2 = (K > 2) && ((td_unpack_ref_flags(packedFl, 2) & 1) != 0);
 
 ivec4 cHalfActive = ivec4(int(round(u_chax0)), int(round(u_chay0)), int(round(u_chax1)), int(round(u_chay1)));
 vec2 curL  = td_ch_fetch_l(cur_l, p, cHalfActive);
-vec4 curMH = texelFetch(cur_mh, p, 0);
+vec4 curMH = td_ch_unpack_mh(texelFetch(cur_mh, p, 0));
 vec2 refL0 = refOk0 ? td_ch_fetch_l(ref_l_0, p, cHalfActive) : vec2(0.0);
 vec2 refL1 = refOk1 ? td_ch_fetch_l(ref_l_1, p, cHalfActive) : vec2(0.0);
 vec2 refL2 = refOk2 ? td_ch_fetch_l(ref_l_2, p, cHalfActive) : vec2(0.0);
-vec4 refMH0 = refOk0 ? texelFetch(ref_mh_0, p, 0) : vec4(0.0);
-vec4 refMH1 = refOk1 ? texelFetch(ref_mh_1, p, 0) : vec4(0.0);
-vec4 refMH2 = refOk2 ? texelFetch(ref_mh_2, p, 0) : vec4(0.0);
+vec4 refMH0 = refOk0 ? td_ch_unpack_mh(texelFetch(ref_mh_0, p, 0)) : vec4(0.0);
+vec4 refMH1 = refOk1 ? td_ch_unpack_mh(texelFetch(ref_mh_1, p, 0)) : vec4(0.0);
+vec4 refMH2 = refOk2 ? td_ch_unpack_mh(texelFetch(ref_mh_2, p, 0)) : vec4(0.0);
 #if defined(TD_CH_HALF_L) && TD_CH_HALF_L
 curMH.xy = curMH.xy - curL;
 if (refOk0) refMH0.xy = refMH0.xy - refL0;
@@ -3396,6 +3460,102 @@ if (cell.x >= TD_CW || cell.y >= TD_CH)
 imageStore(cell_diag_flags, cell, vec4(0.0));
 imageStore(warp_diag, cell, vec4(0.0));
 )GLSL";
+
+		// ---- Pillar-2 Speedup #2: 100% GPU-Resident 32-Slot Chroma Rolling-Median A2ePriorHistory ----
+		// Dispatch: 1x1x1 WG of 12 threads (tid 0..11 -> chIdx = tid / 6, sub = tid % 6, b = sub / 2, ac = sub & 1).
+		// Preserves savedUnsplitG in (0, chIdx).w and eliminates mid-frame pl_tex_download/upload sync stalls!
+		constexpr const char* kPassChromaEbHistoryUpdate = R"GLSL(
+int tid = int(gl_LocalInvocationID.x);
+if (tid >= 12)
+    return;
+int chIdx = tid / 6;
+int sub = tid % 6;
+int b = sub / 2;
+int ac = sub & 1;
+int row = tid;
+bool resetCut = (u_reset_cut > 0.5);
+bool freezeHist = (u_freeze_hist > 0.5);
+float nowSec = u_elapsed_sec;
+float horizonSec = u_horizon_sec;
+int curRole = int(round(u_frame_role));
+int writeSlot = int(round(u_write_slot)) & 31;
+
+vec4 rawSelf = texelFetch(eb_prior_in, ivec2(b * 2 + ac, chIdx), 0);
+vec4 rawOther = texelFetch(eb_prior_in, ivec2(b * 2 + (1 - ac), chIdx), 0);
+float savedUnsplitG = (b == 0 && ac == 0) ? rawSelf.w : 0.0;
+bool rawSelfValid = (rawSelf.z > 0.5) && !td_is_bad(rawSelf.x) && (rawSelf.x >= 0.0);
+bool rawOtherValid = (rawOther.z > 0.5) && !td_is_bad(rawOther.x) && (rawOther.x >= 0.0);
+float candU = rawSelfValid ? rawSelf.x : (rawOtherValid ? rawOther.x : 0.0);
+float candTau = (rawSelf.z >= 1.5 && !td_is_bad(rawSelf.y) && rawSelf.y > 0.0)
+    ? rawSelf.y : ((rawOther.z >= 1.5 && !td_is_bad(rawOther.y) && rawOther.y > 0.0) ? rawOther.y : 0.0);
+bool candValid = rawSelfValid || rawOtherValid;
+
+float sameVals[32];
+int nSame = 0;
+float anyVals[32];
+int nAny = 0;
+for (int i = 0; i < 32; ++i)
+{
+    vec4 e = resetCut ? vec4(0.0) : texelFetch(eb_hist_in, ivec2(i, row), 0);
+    bool ok = !resetCut && (e.w > 0.5) && !td_is_bad(e.x) && ((nowSec - e.y) <= horizonSec);
+    if (ok)
+    {
+        anyVals[nAny] = e.x;
+        nAny += 1;
+        if (curRole > 0 && int(round(e.z)) == curRole)
+        {
+            sameVals[nSame] = e.x;
+            nSame += 1;
+        }
+    }
+    vec4 storeE = ok ? e : vec4(0.0);
+    if (!resetCut && !freezeHist && candValid && i == writeSlot)
+        storeE = vec4(candU, nowSec, float(curRole), 1.0);
+    imageStore(eb_hist_out, ivec2(i, row), storeE);
+}
+
+int nUse = (nSame > 0) ? nSame : nAny;
+float work[32];
+for (int i = 0; i < nUse; ++i)
+    work[i] = (nSame > 0) ? sameVals[i] : anyVals[i];
+for (int i = 1; i < nUse; ++i)
+{
+    float key = work[i];
+    int j = i - 1;
+    while (j >= 0 && work[j] > key)
+    {
+        work[j + 1] = work[j];
+        j -= 1;
+    }
+    work[j + 1] = key;
+}
+float medU = 0.0;
+bool hasMed = (nUse > 0);
+if (hasMed)
+{
+    int mid = nUse / 2;
+    medU = ((nUse & 1) != 0) ? work[mid] : (0.5 * (work[mid - 1] + work[mid]));
+}
+
+float outU = candU;
+float outTau = candTau;
+bool outOk = candValid;
+if (!resetCut)
+{
+    if (!candValid && hasMed)
+    {
+        outU = medU;
+        outTau = 0.0;
+        outOk = true;
+    }
+    else if (candValid && hasMed && medU > TD_NUM_FLOOR && outU > u_cap_factor * medU)
+    {
+        outU = u_cap_factor * medU;
+    }
+}
+float outCnt = outOk ? max(1.0, rawSelf.z) : 0.0;
+imageStore(eb_prior_out, ivec2(b * 2 + ac, chIdx), vec4(outOk ? max(0.0, outU) : 0.0, outOk ? max(0.0, outTau) : 0.0, outCnt, savedUnsplitG));
+)GLSL";
 	} // namespace ChromaShaders
 
 	// ---- Zero-Copy GPU Chroma Fusion Input / Output ----
@@ -3457,6 +3617,9 @@ imageStore(warp_diag, cell, vec4(0.0));
 		bool isResync = false;                   // s3.5 VpIndicator discontinuity/seek: cold-start flush WITHOUT seeding frame 0
 		bool isPulldownRepeat = false;           // s3.5 3:2 pulldown repeat: do NOT advance anchor age or double-write anchor
 		bool isAnchorFrame = false;              // Confirmed keyframe peak for Pass 3C persistent GPU chroma anchor bank
+		bool hasAnchorMotion = false;            // H2: Optional composed motion from current frame -> persistent GPU chroma anchor bank
+		const CellMotionField* anchorLumaMotion = nullptr;
+		Homography3x3 anchorCameraHomography;
 		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
 
 		// Optional precomputed luma cell weights, diagonal variance, and motion-gate textures (3*cw x ch RGBA32F) for Plan 6.6 + Pass 3A:
@@ -3764,6 +3927,10 @@ imageStore(warp_diag, cell, vec4(0.0));
 			chromaAnchorW_ = 0;
 			chromaAnchorH_ = 0;
 			chromaAnchorAge_ = 0;
+			chElapsedSec_ = 0.0;
+			chEbHistSlot_ = 0;
+			chEbHistWriteIdx_ = 0;
+			chEbHistResetPending_ = true;
 		}
 		bool HasChromaAnchor() const { return hasChromaAnchor_; }
 		int ChromaAnchorAge() const { return chromaAnchorAge_; }
@@ -3778,7 +3945,8 @@ imageStore(warp_diag, cell, vec4(0.0));
 					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_, &chromaAnchorUvTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outCodedDeltaTex_, &outDelivUvTex_, &outDelivRgbTex_, &outDelivDeltaTex_,
-					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebScratchTex_, &chProjIrTex_, &inLumaCellWeightsTex_ })
+					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebPriorRawTex_,
+					&chEbHistTex_[0], &chEbHistTex_[1], &ebScratchTex_, &chProjIrTex_, &inLumaCellWeightsTex_ })
 				{
 					if (*t != nullptr)
 						pl_tex_destroy(gpu, t);
@@ -3796,7 +3964,8 @@ imageStore(warp_diag, cell, vec4(0.0));
 					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_, &chromaAnchorUvTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outCodedDeltaTex_, &outDelivUvTex_, &outDelivRgbTex_, &outDelivDeltaTex_,
-					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebScratchTex_, &chProjIrTex_, &inLumaCellWeightsTex_ })
+					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebPriorRawTex_,
+					&chEbHistTex_[0], &chEbHistTex_[1], &ebScratchTex_, &chProjIrTex_, &inLumaCellWeightsTex_ })
 				{
 					*t = nullptr;
 				}
@@ -3810,7 +3979,8 @@ imageStore(warp_diag, cell, vec4(0.0));
 				inRecUvTex_, inRecRgbTex_, inCleanUvTex_, inRefUvTex_, chromaAnchorUvTex_,
 				inMotionVecTex_, inMotionMetaTex_, inCellPriorTex_, inFaceMaskTex_,
 				outCodedDeltaTex_, outDelivUvTex_, outDelivRgbTex_, outDelivDeltaTex_,
-				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, ebPriorTex_, ebScratchTex_, chProjIrTex_, inLumaCellWeightsTex_ })
+				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, ebPriorTex_, ebPriorRawTex_,
+				chEbHistTex_[0], chEbHistTex_[1], ebScratchTex_, chProjIrTex_, inLumaCellWeightsTex_ })
 			{
 				total += VpSkeleton::TexBytesOf(t);
 			}
@@ -3959,6 +4129,11 @@ imageStore(warp_diag, cell, vec4(0.0));
 			out.usedNorm16ChromaL = false;
 			out.usedLeanLumaReuse = false;
 			out.reusedLumaMotionGate = false;
+			out.anchorReset = false;
+			out.flashAbstained = false;
+			out.resyncReset = false;
+			out.fadeFrozenAnchor = false;
+			out.pulldownRepeatSkipped = false;
 			out.scratchShort = false;
 			out.succeeded = false;
 			out.lastError.clear();
@@ -4199,47 +4374,66 @@ imageStore(warp_diag, cell, vec4(0.0));
 				{
 					tryAddRef(in.prevPeak, 0, 0);
 					tryAddRef(in.nextPeak, 1, 1);
+					// H2: Wire persistent GPU chroma anchor bank cleanly into refSpecs (RefRole::PrevPeak2) BEFORE any snapshot overwrite!
+					const int maxChAnchorAge = cfg_.maxDpbBankAgeFrames > 0 ? cfg_.maxDpbBankAgeFrames : 4 * kContractBackRefs;
+					if (cfg_.enableDpbDetailBankV2 && cfg_.enableAnchoredCarry &&
+					    hasChromaAnchor_ && chromaAnchorUvTex_ != nullptr &&
+					    chromaAnchorW_ == cW && chromaAnchorH_ == cH &&
+					    chromaAnchorAge_ >= 1 && chromaAnchorAge_ <= maxChAnchorAge &&
+					    static_cast<int>(refSpecs.size()) < kMaxChromaGpuRefs &&
+					    (hasPrepackedMotion || in.hasAnchorMotion) &&
+					    chromaAnchorUvTex_ != in.prevPeak.cleanUvTex &&
+					    chromaAnchorUvTex_ != in.nextPeak.cleanUvTex)
+					{
+						ChromaGpuRefInput ancRef;
+						ancRef.cleanUvTex = chromaAnchorUvTex_;
+						ancRef.lumaMotion = in.hasAnchorMotion ? in.anchorLumaMotion : nullptr;
+						ancRef.cameraHomography = in.anchorCameraHomography;
+						tryAddRef(ancRef, 2, static_cast<int>(RefRole::PrevPeak2));
+					}
 				}
 			}
-			// Pass 3C persistent GPU chroma anchor bank lifecycle (strictly grain-free, s3.5 compliant, 0 VRAM when OFF):
-			if (cfg_.enableDpbDetailBankV2 && cfg_.enableAnchoredCarry && !in.isResync && !in.isFlash)
+			// H2: Persistent GPU chroma anchor snapshot helper — runs AFTER ref consumption (or on zero-ref seed), checks Pass return & increments dispCount!
+			auto updateChromaAnchor = [&](int& dispCount) -> bool
 			{
+				if (!cfg_.enableDpbDetailBankV2 || !cfg_.enableAnchoredCarry || in.isResync || in.isFlash)
+					return true;
 				if (in.isAnchorFrame && isFadeActive)
 				{
 					out.fadeFrozenAnchor = true;
 					if (standIns != nullptr)
 						standIns->Engage(StandInKind::CadenceSuspendedFade, "TdV2ChromaGpuEngine U7 fade froze chroma anchor bank");
+					return true;
 				}
-				else if (in.isAnchorFrame && !in.isPulldownRepeat && in.hasCleanSplit && in.cleanUvTex != nullptr &&
-				         in.cleanUvTex->params.w == cW && in.cleanUvTex->params.h == cH)
+				if (in.isAnchorFrame && !in.isPulldownRepeat && !effectiveCut && in.hasCleanSplit && in.cleanUvTex != nullptr &&
+				    in.cleanUvTex->params.w == cW && in.cleanUvTex->params.h == cH)
 				{
-					if (Detail::EnsureTex(gpu, chromaAnchorUvTex_, cW, cH, fmtRG32, true, true, false, false))
-					{
-						const std::string cpyHdr = VpvGpu::DefineInt("TD_CH_W", cW) + VpvGpu::DefineInt("TD_CH_H", cH);
-						constexpr const char* kCopyRgBody = R"GLSL(
+					if (!Detail::EnsureTex(gpu, chromaAnchorUvTex_, cW, cH, fmtRG32, true, true, false, false))
+						return failVisible("TdV2ChromaGpuEngine chromaAnchorUvTex alloc failed", StandInKind::GpuDispatchFailed);
+					const std::string cpyHdr = VpvGpu::DefineInt("TD_CH_W", cW) + VpvGpu::DefineInt("TD_CH_H", cH);
+					constexpr const char* kCopyRgBody = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 if (p.x >= TD_CH_W || p.y >= TD_CH_H) return;
 imageStore(dst_uv, p, vec4(texelFetch(src_uv, p, 0).xy, 0.0, 0.0));
 )GLSL";
-						pl_shader_desc dc[2] = {
-							VpvGpu::Sampled("src_uv", in.cleanUvTex),
-							VpvGpu::Storage("dst_uv", chromaAnchorUvTex_)
-						};
-						if (VpvGpu::Pass(dispatch, "td_v2_chroma_anchor_snapshot", cpyHdr, kCopyRgBody, dc, 2, nullptr, 0,
-						                 Detail::GroupsFor(cW, 16), Detail::GroupsFor(cH, 16), 0, 16, 16))
-						{
-							hasChromaAnchor_ = true;
-							chromaAnchorW_ = cW;
-							chromaAnchorH_ = cH;
-							chromaAnchorAge_ = 1;
-						}
-					}
+					pl_shader_desc dc[2] = {
+						VpvGpu::Sampled("src_uv", in.cleanUvTex),
+						VpvGpu::Storage("dst_uv", chromaAnchorUvTex_)
+					};
+					if (!VpvGpu::Pass(dispatch, "td_v2_chroma_anchor_snapshot", cpyHdr, kCopyRgBody, dc, 2, nullptr, 0,
+					                  Detail::GroupsFor(cW, 16), Detail::GroupsFor(cH, 16), 0, 16, 16))
+						return failVisible("td_v2_chroma_anchor_snapshot dispatch failed", StandInKind::GpuDispatchFailed);
+					++dispCount;
+					hasChromaAnchor_ = true;
+					chromaAnchorW_ = cW;
+					chromaAnchorH_ = cH;
+					chromaAnchorAge_ = 1;
+					return true;
 				}
-				else if (hasChromaAnchor_ && !in.isPulldownRepeat)
-				{
+				if (hasChromaAnchor_ && !in.isPulldownRepeat)
 					++chromaAnchorAge_;
-				}
-			}
+				return true;
+			};
 			out.activeRefCount = refSpecs.size();
 
 			const ActiveRect lumaActive = in.activeRect.Empty()
@@ -4396,6 +4590,8 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				int zDispatches = 1;
 				if (!runZeroCopyApply(true, nullptr, nullptr, 0.0f, 0.0f, zDispatches))
 					return false;
+				if (!updateChromaAnchor(zDispatches))
+					return false;
 				out.dispatchCount = zDispatches;
 				lastDispatchCount_ = zDispatches;
 				out.succeeded = true;
@@ -4510,7 +4706,11 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			{
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::GpuPrivateScratchFallback, "TdV2ChromaGpuEngine arena == nullptr; using owned priv* scratch");
-				if (!EnsurePrivateScratch(gpu, cW, cH, lTexW, lTexH, cw, ch, fmtR16, fmtChromaL, fmtRG32, fmtRGBA32,
+				const pl_fmt fmtRGBA16 = norm16ChromaL
+					? pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE))
+					: nullptr;
+				const pl_fmt fmtChromaMH = (norm16ChromaL && fmtRGBA16 != nullptr) ? fmtRGBA16 : fmtRGBA32;
+				if (!EnsurePrivateScratch(gpu, cW, cH, lTexW, lTexH, cw, ch, fmtR16, fmtChromaL, fmtRG32, fmtChromaMH, fmtRGBA32,
 				                          needReduceRec, needReduceClean, needReduceRef, halfChromaL, sc))
 					return failVisible("TdV2ChromaGpuEngine private scratch allocation failed", StandInKind::GpuDispatchFailed);
 			}
@@ -4706,12 +4906,17 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const bool phaseAEarlyOut = cfg_.enablePhaseATileEarlyOut;
 			const bool checkerboardStats = cfg_.enableCheckerboardCellStats;
 			const bool bilinearWarp = (cfg_.preset == Preset::RealTime) && cfg_.enableBilinearHardwareWarp;
+			const bool norm16ChromaMH = (sc.curMH != nullptr && sc.curMH->params.format != nullptr &&
+			                             sc.curMH->params.format->type == PL_FMT_UNORM &&
+			                             sc.curMH->params.format->component_depth[0] == 16);
 			std::string chOpt3Defines;
 			if (norm16ChromaL)
 			{
 				chOpt3Defines += VpvGpu::DefineInt("TD_BAND_NORM16", 1);
 				chOpt3Defines += VpvGpu::Define("TD_NORM16_PEAK", PeakCodeForBits(cfg_.sourceBits));
 			}
+			if (norm16ChromaMH)
+				chOpt3Defines += VpvGpu::DefineInt("TD_CH_MH_NORM16", 1);
 			if (halfChromaL)
 				chOpt3Defines += VpvGpu::DefineInt("TD_CH_HALF_L", 1);
 			if (phaseAEarlyOut)
@@ -4873,7 +5078,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const float uCoarseRadY = static_cast<float>(coarseRadY);
 			const std::string cCoarseHdr = coarseOnly ? (chromaGeom + Shaders::kCoreHelpers) : std::string();
 			const std::string cBandTaps = coarseOnly ? std::string() : ChromaShaders::BuildChromaBandTapsHeader();
-			const std::string cBandHdrH = (coarseOnly || halfChromaL) ? std::string() : (chromaGeom + chOpt3Defines + cBandTaps + Shaders::kCoreHelpers + ChromaShaders::kPassChromaBandHHeader);
+			const std::string cBandHdrH = (coarseOnly || halfChromaL) ? std::string() : (chromaGeom + chOpt3Defines + cBandTaps + Shaders::kCoreHelpers + ChromaShaders::kChromaLFetchHelper + ChromaShaders::kPassChromaBandHHeader);
 			const std::string cBandHdrV = (coarseOnly || halfChromaL) ? std::string() : (chromaGeom + chOpt3Defines + cBandTaps + Shaders::kCoreHelpers + ChromaShaders::kChromaLFetchHelper + ChromaShaders::kPassChromaBandVHeader);
 			const std::string cFineDownHdr = halfChromaL ? (chromaGeom + chOpt3Defines + Shaders::BuildFineTapHeader() + Shaders::kCoreHelpers + ChromaShaders::kChromaLFetchHelper + ChromaShaders::kPassChromaFineDownHeader) : std::string();
 			const std::string cHalfL2DHdr = halfChromaL ? (chromaGeom + chOpt3Defines + ChromaShaders::BuildChromaHalfBaseTapHeader() + Shaders::kCoreHelpers + ChromaShaders::kChromaLFetchHelper + ChromaShaders::kPassChromaHalfL2DHeader) : std::string();
@@ -5214,71 +5419,138 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
 					return failVisible("td_v2_c2eb_prep dispatch failed", StandInKind::GpuDispatchFailed);
 
+				// Speedup #2 + M1: In live zero-copy RealTime mode, keep Chroma A2ePriorHistory 100% GPU-resident via
+				// kPassChromaEbHistoryUpdate (ZERO mid-frame pl_tex_download/upload sync stall!). Freeze clock on pulldown repeat!
+				const double chHz = (std::isfinite(cfg_.sourceHz) && cfg_.sourceHz > 0.0) ? cfg_.sourceHz : kDefaultSourceHz;
+				if (!in.isPulldownRepeat)
+					chElapsedSec_ += (1.0 / chHz);
+				const bool useGpuChEbHist = !out.readbackCellDiagnostics && (cfg_.preset == Preset::RealTime);
+				bool gpuChHistReady = false;
+				if (useGpuChEbHist)
+				{
+					const bool needClear0 = (chEbHistTex_[0] == nullptr || chEbHistTex_[0]->params.w != 32 || chEbHistTex_[0]->params.h != 12);
+					const bool needClear1 = (chEbHistTex_[1] == nullptr || chEbHistTex_[1]->params.w != 32 || chEbHistTex_[1]->params.h != 12);
+					if (Detail::EnsureTex(gpu, ebPriorRawTex_, 6, 2, fmtRGBA32, true, true, false, false) &&
+					    Detail::EnsureTex(gpu, chEbHistTex_[0], 32, 12, fmtRGBA32, true, true, true, false) &&
+					    Detail::EnsureTex(gpu, chEbHistTex_[1], 32, 12, fmtRGBA32, true, true, true, false))
+					{
+						if (needClear0)
+						{
+							std::vector<float> z(32u * 12u * 4u, 0.0f);
+							Detail::UploadFloats(gpu, chEbHistTex_[0], z.data());
+						}
+						if (needClear1)
+						{
+							std::vector<float> z(32u * 12u * 4u, 0.0f);
+							Detail::UploadFloats(gpu, chEbHistTex_[1], z.data());
+						}
+						gpuChHistReady = true;
+					}
+				}
+
 				std::string c2ebRedHdr = chromaGeom + ChromaShaders::kPassChromaEbPriorHeader;
 				pl_shader_desc d2eb[2] = {
 					VpvGpu::Sampled("eb_scratch", ebScratchTex_),
-					VpvGpu::Storage("eb_prior", ebPriorTex_)
+					VpvGpu::Storage("eb_prior", gpuChHistReady ? ebPriorRawTex_ : ebPriorTex_)
 				};
 				const size_t sh2eb = (256u * 6u + 12u) * sizeof(float);
 				if (!runPass("td_v2_c2eb_prior_reduce", c2ebRedHdr, ChromaShaders::kPassChromaEbPriorReduce, d2eb, 2, nullptr, 0, 6, 2, 16, 16, sh2eb))
 					return failVisible("td_v2_c2eb_prior_reduce dispatch failed", StandInKind::GpuDispatchFailed);
 
-				// Apply CPU-identical empty-class fallback + temporal rolling-median A2e cap & one-sided K=1 hold on host (192 B!).
-				std::vector<float> ebBuf(6u * 2u * 4u, 0.0f);
-				if (!Detail::DownloadFloats(gpu, ebPriorTex_, ebBuf.data()))
-					return failVisible("TdV2ChromaGpuEngine ebPriorTex download failed", StandInKind::GpuDispatchFailed);
-				for (int chIdx = 0; chIdx < 2; ++chIdx)
+				if (gpuChHistReady)
 				{
-					A2ePriorHistory& hist = (chIdx == 0) ? a2eHistoryCb_ : a2eHistoryCr_;
-					const float savedUnsplitG = ebBuf[static_cast<size_t>(chIdx * 6) * 4u + 3u];
-					EmpiricalOwnErrorPrior rawA2e;
-					float tauGrid[3][2] = {};
-					bool anyV = false;
-					for (int b = 0; b < 3; ++b)
+					const int srcH = chEbHistSlot_;
+					const int dstH = 1 - srcH;
+					const bool freezeHist = (effFadeKeep < 1.0) || in.isPulldownRepeat;
+					const float uResetCut = chEbHistResetPending_ ? 1.0f : 0.0f;
+					const float uFreezeHist = freezeHist ? 1.0f : 0.0f;
+					const float uElapsedSec = static_cast<float>(chElapsedSec_);
+					const float uHorizonSec = static_cast<float>(kA2eHistoryHorizonSec);
+					const float uFrameRoleF = static_cast<float>(static_cast<int>(in.frameRole));
+					const float uWriteSlot = static_cast<float>(chEbHistWriteIdx_);
+					const float uCapFactor = static_cast<float>(kA2eOverEstimateCapFactor);
+					pl_shader_desc dchh[4] = {
+						VpvGpu::Sampled("eb_prior_in", ebPriorRawTex_),
+						VpvGpu::Sampled("eb_hist_in", chEbHistTex_[srcH]),
+						VpvGpu::Storage("eb_hist_out", chEbHistTex_[dstH]),
+						VpvGpu::Storage("eb_prior_out", ebPriorTex_)
+					};
+					pl_shader_var vchh[7] = {
+						VpvGpu::Var("u_reset_cut", &uResetCut),
+						VpvGpu::Var("u_freeze_hist", &uFreezeHist),
+						VpvGpu::Var("u_elapsed_sec", &uElapsedSec),
+						VpvGpu::Var("u_horizon_sec", &uHorizonSec),
+						VpvGpu::Var("u_frame_role", &uFrameRoleF),
+						VpvGpu::Var("u_write_slot", &uWriteSlot),
+						VpvGpu::Var("u_cap_factor", &uCapFactor)
+					};
+					if (!runPass("td_v2_c2eb_hist", chromaGeom + Shaders::kCoreHelpers, ChromaShaders::kPassChromaEbHistoryUpdate,
+					             dchh, 4, vchh, 7, 1, 1, 12, 1))
+						return failVisible("td_v2_c2eb_hist dispatch failed", StandInKind::GpuDispatchFailed);
+					chEbHistSlot_ = dstH;
+					chEbHistResetPending_ = false;
+					if (!freezeHist)
+						chEbHistWriteIdx_ = (chEbHistWriteIdx_ + 1) & 31;
+				}
+				else
+				{
+					// Apply CPU-identical empty-class fallback + temporal rolling-median A2e cap & one-sided K=1 hold on host (192 B!).
+					std::vector<float> ebBuf(6u * 2u * 4u, 0.0f);
+					if (!Detail::DownloadFloats(gpu, ebPriorTex_, ebBuf.data()))
+						return failVisible("TdV2ChromaGpuEngine ebPriorTex download failed", StandInKind::GpuDispatchFailed);
+					for (int chIdx = 0; chIdx < 2; ++chIdx)
 					{
-						for (int ac = 0; ac < 2; ++ac)
+						A2ePriorHistory& hist = (chIdx == 0) ? a2eHistoryCb_ : a2eHistoryCr_;
+						const float savedUnsplitG = ebBuf[static_cast<size_t>(chIdx * 6) * 4u + 3u];
+						EmpiricalOwnErrorPrior rawA2e;
+						float tauGrid[3][2] = {};
+						bool anyV = false;
+						for (int b = 0; b < 3; ++b)
 						{
-							const size_t idx = static_cast<size_t>(chIdx * 6 + b * 2 + ac) * 4u;
-							const float uVal = ebBuf[idx + 0u];
-							const float tVal = ebBuf[idx + 1u];
-							const float cVal = ebBuf[idx + 2u];
-							if (cVal > 0.5f && std::isfinite(uVal) && uVal >= 0.0f)
+							for (int ac = 0; ac < 2; ++ac)
 							{
-								rawA2e.U[b][ac] = static_cast<double>(uVal);
-								rawA2e.cellCount[b][ac] = static_cast<uint32_t>(Detail::NonNegRoundToSize(cVal));
-								tauGrid[b][ac] = (std::isfinite(tVal) && tVal > 0.0f) ? tVal : 0.0f;
-								anyV = true;
+								const size_t idx = static_cast<size_t>(chIdx * 6 + b * 2 + ac) * 4u;
+								const float uVal = ebBuf[idx + 0u];
+								const float tVal = ebBuf[idx + 1u];
+								const float cVal = ebBuf[idx + 2u];
+								if (cVal > 0.5f && std::isfinite(uVal) && uVal >= 0.0f)
+								{
+									rawA2e.U[b][ac] = static_cast<double>(uVal);
+									rawA2e.cellCount[b][ac] = static_cast<uint32_t>(Detail::NonNegRoundToSize(cVal));
+									tauGrid[b][ac] = (std::isfinite(tVal) && tVal > 0.0f) ? tVal : 0.0f;
+									anyV = true;
+								}
+							}
+							if (rawA2e.cellCount[b][0] == 0 && rawA2e.cellCount[b][1] > 0)
+								rawA2e.U[b][0] = rawA2e.U[b][1];
+							else if (rawA2e.cellCount[b][1] == 0 && rawA2e.cellCount[b][0] > 0)
+								rawA2e.U[b][1] = rawA2e.U[b][0];
+							if (rawA2e.cellCount[b][0] < 2 && rawA2e.cellCount[b][1] >= 2)
+								tauGrid[b][0] = tauGrid[b][1];
+							else if (rawA2e.cellCount[b][1] < 2 && rawA2e.cellCount[b][0] >= 2)
+								tauGrid[b][1] = tauGrid[b][0];
+						}
+						rawA2e.valid = anyV;
+						const EmpiricalOwnErrorPrior effA2e = hist.ApplyCapAndRecord(
+							rawA2e, in.frameRole, cfg_.sourceHz, (effFadeKeep < 1.0) || in.isPulldownRepeat, false, in.isPulldownRepeat);
+						for (int b = 0; b < 3; ++b)
+						{
+							for (int ac = 0; ac < 2; ++ac)
+							{
+								const size_t idx = static_cast<size_t>(chIdx * 6 + b * 2 + ac) * 4u;
+								const double effU = effA2e.valid ? effA2e.ForBandClass(b, ac) : 0.0;
+								const bool cellOk = effA2e.valid && std::isfinite(effU) && effU >= 0.0;
+								ebBuf[idx + 0u] = cellOk ? static_cast<float>(effU) : 0.0f;
+								ebBuf[idx + 1u] = (cellOk && !effA2e.heldFromHistory && std::isfinite(tauGrid[b][ac]) && tauGrid[b][ac] > 0.0f)
+									? tauGrid[b][ac] : 0.0f;
+								ebBuf[idx + 2u] = cellOk ? static_cast<float>((std::max<uint32_t>)(1u, effA2e.cellCount[b][ac])) : 0.0f;
+								ebBuf[idx + 3u] = (b == 0 && ac == 0) ? savedUnsplitG : 0.0f;
 							}
 						}
-						if (rawA2e.cellCount[b][0] == 0 && rawA2e.cellCount[b][1] > 0)
-							rawA2e.U[b][0] = rawA2e.U[b][1];
-						else if (rawA2e.cellCount[b][1] == 0 && rawA2e.cellCount[b][0] > 0)
-							rawA2e.U[b][1] = rawA2e.U[b][0];
-						if (rawA2e.cellCount[b][0] < 2 && rawA2e.cellCount[b][1] >= 2)
-							tauGrid[b][0] = tauGrid[b][1];
-						else if (rawA2e.cellCount[b][1] < 2 && rawA2e.cellCount[b][0] >= 2)
-							tauGrid[b][1] = tauGrid[b][0];
 					}
-					rawA2e.valid = anyV;
-					const EmpiricalOwnErrorPrior effA2e = hist.ApplyCapAndRecord(
-						rawA2e, in.frameRole, cfg_.sourceHz, (effFadeKeep < 1.0), false);
-					for (int b = 0; b < 3; ++b)
-					{
-						for (int ac = 0; ac < 2; ++ac)
-						{
-							const size_t idx = static_cast<size_t>(chIdx * 6 + b * 2 + ac) * 4u;
-							const double effU = effA2e.valid ? effA2e.ForBandClass(b, ac) : 0.0;
-							const bool cellOk = effA2e.valid && std::isfinite(effU) && effU >= 0.0;
-							ebBuf[idx + 0u] = cellOk ? static_cast<float>(effU) : 0.0f;
-							ebBuf[idx + 1u] = (cellOk && !effA2e.heldFromHistory && std::isfinite(tauGrid[b][ac]) && tauGrid[b][ac] > 0.0f)
-								? tauGrid[b][ac] : 0.0f;
-							ebBuf[idx + 2u] = cellOk ? static_cast<float>((std::max<uint32_t>)(1u, effA2e.cellCount[b][ac])) : 0.0f;
-							ebBuf[idx + 3u] = (b == 0 && ac == 0) ? savedUnsplitG : 0.0f;
-						}
-					}
+					if (!Detail::UploadFloats(gpu, ebPriorTex_, ebBuf.data()))
+						return failVisible("TdV2ChromaGpuEngine ebPriorTex capped upload failed", StandInKind::GpuDispatchFailed);
 				}
-				if (!Detail::UploadFloats(gpu, ebPriorTex_, ebBuf.data()))
-					return failVisible("TdV2ChromaGpuEngine ebPriorTex capped upload failed", StandInKind::GpuDispatchFailed);
 			}
 
 			// ---- PASS C2B: Chan-Pebay Merge + Chroma cellDiagC/blockOwnU + Active-Set Solve (skipped when reuseLumaWeightsGpu) ----
@@ -5470,6 +5742,8 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Storage("out_coded_delta", smoothGuard ? sc.warpedUv : out.outCodedDeltaTex),
 					VpvGpu::Storage("guard_cell", dstGuardCell)
 				};
+				// H1: Avoid double-applying fadeKeep^2 when chroma reuses Luma weights that already carry post-normalizer fadeKeep!
+				const float uFadeKeepChroma = reuseLumaWeightsGpu ? 1.0f : uFadeKeep;
 				pl_shader_var v4[14] = {
 					VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 					VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
@@ -5477,7 +5751,7 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Var("u_has_clean_split", &uHasSplit), VpvGpu::Var("u_same_clean_rec", &uSameCleanRec),
 					VpvGpu::Var("u_bokeh_mode", &uBokehMode), VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
 					VpvGpu::Var("u_cell_prior_has_cr_grain", &uPriorHasCrGrain),
-					VpvGpu::Var("u_fade_keep", &uFadeKeep),
+					VpvGpu::Var("u_fade_keep", &uFadeKeepChroma),
 					VpvGpu::Var("u_store_fine_diff", &uStoreFineDiff),
 					VpvGpu::Var("u_lean_luma_reuse", &uLeanLumaReuse)
 				};
@@ -5502,7 +5776,7 @@ float td_huber_taper(float diffSq, float diagC)
 						VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
 						VpvGpu::Var("u_cshift_x", &uCShiftX), VpvGpu::Var("u_cshift_y", &uCShiftY),
 						VpvGpu::Var("u_bokeh_mode", &uBokehMode), VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
-						VpvGpu::Var("u_fade_keep", &uFadeKeep),
+						VpvGpu::Var("u_fade_keep", &uFadeKeepChroma),
 						VpvGpu::Var("u_lean_luma_reuse", &uLeanLumaReuse)
 					};
 					if (!runPass("td_v2_c4b_smooth_guard", c4bHdr, ChromaShaders::kPassChromaSmoothGuard, d4b, 7, v4b, 10, cGx, cGy))
@@ -5514,6 +5788,8 @@ float td_huber_taper(float diffSq, float diagC)
 
 			// ---- Optional Zero-Copy GPU Chroma Delta Apply (ZERO CPU roundtrip; post-upsample face/focus/bokeh veto parity!) ----
 			if (!runZeroCopyApply(false, cellPriorTex, faceMaskBind, 1.0f, uHasFaceMask, dispatches))
+				return false;
+			if (!updateChromaAnchor(dispatches))
 				return false;
 
 			out.dispatchCount = dispatches;
@@ -5959,7 +6235,7 @@ float td_huber_taper(float diffSq, float diagC)
 		};
 
 		bool EnsurePrivateScratch(pl_gpu gpu, int cW, int cH, int lTexW, int lTexH, int cw, int ch,
-		                          pl_fmt fmtR16, pl_fmt fmtChromaL, pl_fmt fmtRG32, pl_fmt fmtRGBA32,
+		                          pl_fmt fmtR16, pl_fmt fmtChromaL, pl_fmt fmtRG32, pl_fmt fmtChromaMH, pl_fmt fmtRGBA32,
 		                          bool needReduceRec, bool needReduceClean, bool needReduceRef,
 		                          bool needHalfArea, ChromaScratchSet& out)
 		{
@@ -5970,8 +6246,8 @@ float td_huber_taper(float diffSq, float diagC)
 			          (!needReduceRec || Detail::EnsureTex(gpu, privReducedRec_, cW, cH, fmtRG32, true, true, false, false)) &&
 			          (!needReduceClean || Detail::EnsureTex(gpu, privReducedClean_, cW, cH, fmtRG32, true, true, false, false)) &&
 			          (!needReduceRef || Detail::EnsureTex(gpu, privReducedRef_, cW, cH, fmtRG32, true, true, false, false)) &&
-			          Detail::EnsureTex(gpu, privCurMH_, cW, cH, fmtRGBA32, true, true, false, false) &&
-			          Detail::EnsureTex(gpu, privBandTmpCb_, cW, cH, fmtRGBA32, true, true, false, false) &&
+			          Detail::EnsureTex(gpu, privCurMH_, cW, cH, fmtChromaMH, true, true, false, false) &&
+			          Detail::EnsureTex(gpu, privBandTmpCb_, cW, cH, fmtChromaMH, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privRefFlags_[0], cW, cH, fmtR16, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privRefFlags_[1], cW, cH, fmtR16, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privMotionGate_, 3 * cw, ch, fmtRGBA32, true, true, false, false) &&
@@ -5988,7 +6264,7 @@ float td_huber_taper(float diffSq, float diagC)
 			for (int i = 0; i < kMaxChromaGpuRefs && ok; ++i)
 			{
 				ok = Detail::EnsureTex(gpu, privRefL_[i], lTexW, lTexH, fmtChromaL, true, true, false, false) &&
-				     Detail::EnsureTex(gpu, privRefMH_[i], cW, cH, fmtRGBA32, true, true, false, false);
+				     Detail::EnsureTex(gpu, privRefMH_[i], cW, cH, fmtChromaMH, true, true, false, false);
 			}
 			if (!ok) return false;
 			out.curL = privCurL_;
@@ -6082,6 +6358,12 @@ float td_huber_taper(float diffSq, float diagC)
 		pl_tex outGuardCellTex_ = nullptr;
 		pl_tex outWarpDiagTex_ = nullptr;
 		pl_tex ebPriorTex_ = nullptr;
+		pl_tex ebPriorRawTex_ = nullptr;
+		pl_tex chEbHistTex_[2] = {};
+		int chEbHistSlot_ = 0;
+		int chEbHistWriteIdx_ = 0;
+		bool chEbHistResetPending_ = true;
+		double chElapsedSec_ = 0.0;
 		pl_tex ebScratchTex_ = nullptr;
 		pl_tex chProjIrTex_ = nullptr;
 		pl_tex inLumaCellWeightsTex_ = nullptr;
