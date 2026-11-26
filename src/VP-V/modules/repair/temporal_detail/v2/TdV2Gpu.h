@@ -3279,16 +3279,30 @@ namespace Gpu
 
 			const std::string refBandHdrH = compactBands ? std::string() : (staticGeom + Shaders::BuildBandTapsHeader() + Shaders::kCoreHelpers + Shaders::kPass1BandHHeader);
 			const std::string refBandHdrV = compactBands ? std::string() : (staticGeom + Shaders::BuildBandTapsHeader() + Shaders::kPass1BandVHeader);
-			const std::string rtHalfHdrH = compactBands ? (staticGeom + Shaders::BuildHalfBandTapsHeader() + Shaders::kCoreHelpers + Shaders::kPass1HalfHHeader) : std::string();
-			const std::string rtHalfHdrV = compactBands ? (staticGeom + Shaders::BuildHalfBandTapsHeader() + Shaders::kPass1HalfVHeader) : std::string();
-			const std::string rtFullMhHdr = compactBands ? (staticGeom + Shaders::BuildFineTapHeader() + Shaders::kCoreHelpers + Shaders::kHalfBandSamplerHelper + Shaders::kPass1FullMHHeader) : std::string();
+			const std::string rtCurFineHdr = compactBands ? (staticGeom + Shaders::BuildFineTapHeader() + Shaders::kCoreHelpers + Shaders::kPass1FullMHHeader) : std::string();
+			const std::string rtHalf2DHdr = compactBands ? (staticGeom + Shaders::BuildHalfBandTapsHeader() + Shaders::kPass1Half2DHeader) : std::string();
 
 			const size_t shmemBandH = static_cast<size_t>(16 * (16 + 2 * rLow)) * sizeof(float);
 			const size_t shmemBandV = static_cast<size_t>((16 + 2 * rLow) * 16) * 4u * sizeof(float);
-			const size_t shmemHalfH = static_cast<size_t>(16 * (16 + 2 * rHLow)) * sizeof(float);
-			const size_t shmemHalfV = static_cast<size_t>((16 + 2 * rHLow) * 16) * 2u * sizeof(float);
 			const size_t fineTileDim = static_cast<size_t>(16 + 2 * rFine);
-			const size_t shmemFullMH = (fineTileDim * fineTileDim + fineTileDim * 16u + 100u) * sizeof(float);
+			const size_t shmemCurFineDown = (fineTileDim * (fineTileDim + 1u) + fineTileDim * 17u) * sizeof(float);
+			const size_t halfTileDim = static_cast<size_t>(16 + 2 * rHLow);
+			const size_t shmemHalf2D = (halfTileDim * (halfTileDim + 1u) + halfTileDim * 17u * 2u) * sizeof(float);
+
+			auto runHalf2D = [&](pl_tex halfAreaIn, pl_tex dstRtLD3) -> bool
+			{
+				pl_shader_var halfRectV[4] = {
+					VpvGpu::Var("u_hax0", &uHAx0),
+					VpvGpu::Var("u_hay0", &uHAy0),
+					VpvGpu::Var("u_hax1", &uHAx1),
+					VpvGpu::Var("u_hay1", &uHAy1)
+				};
+				pl_shader_desc dh2d[2] = {
+					VpvGpu::Sampled("half_area_in", halfAreaIn),
+					VpvGpu::Storage("bands_ld3_out", dstRtLD3)
+				};
+				return runPass("td_v2_p1_half_2d", rtHalf2DHdr, Shaders::kPass1Half2D, dh2d, 2, halfRectV, 4, halfGx, halfGy, 16, 16, shmemHalf2D);
+			};
 
 			auto runBandDecomp = [&](pl_tex srcTex, pl_tex dstRefFull, pl_tex dstRtMH, pl_tex dstRtLD3) -> bool
 			{
@@ -3313,7 +3327,8 @@ namespace Gpu
 					return runPass("td_v2_p1_band_v", refBandHdrV, Shaders::kPass1BandV, dv, 2, rectV, 4, fullGx, fullGy, 16, 16, shmemBandV);
 				}
 
-				// Compact RealTime path (SC-05): half-res FP32 RG32F (L, D3) + 1-pass 2D LDS full-res FP32 RG32F (M, H).
+				// Luma Fusion 2 (TD-GPU-OPT-2): 1-pass full-res G_fine + 2x2 area downsample -> 1-pass 2D half-res (L, D3).
+				// Stores (gFine, H) in FP32 RG32F dstRtMH; M = gFine - L computed in 1 ALU op at read time (eliminates p1_full_mh!).
 				pl_shader_var rectAllV[8] = {
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
@@ -3324,32 +3339,14 @@ namespace Gpu
 					VpvGpu::Var("u_hax1", &uHAx1),
 					VpvGpu::Var("u_hay1", &uHAy1)
 				};
-				pl_shader_desc dhh[2] = {
+				pl_shader_desc dcf[3] = {
 					VpvGpu::Sampled("src_tex", srcTex),
-					VpvGpu::Storage("band_half_tmp", sc.bandHalfTmp)
+					VpvGpu::Storage("bands_mh_out", dstRtMH),
+					VpvGpu::Storage("half_area_out", sc.bandHalfTmp)
 				};
-				if (!runPass("td_v2_p1_half_h", rtHalfHdrH, Shaders::kPass1HalfH, dhh, 2, rectAllV, 8, halfGx, halfGy, 16, 16, shmemHalfH))
+				if (!runPass("td_v2_p1_cur_fine_down", rtCurFineHdr, Shaders::kPass1CurFineDown, dcf, 3, rectAllV, 8, fullGx, fullGy, 16, 16, shmemCurFineDown))
 					return false;
-
-				pl_shader_var halfRectV[4] = {
-					VpvGpu::Var("u_hax0", &uHAx0),
-					VpvGpu::Var("u_hay0", &uHAy0),
-					VpvGpu::Var("u_hax1", &uHAx1),
-					VpvGpu::Var("u_hay1", &uHAy1)
-				};
-				pl_shader_desc dhv[2] = {
-					VpvGpu::Sampled("band_half_tmp", sc.bandHalfTmp),
-					VpvGpu::Storage("bands_ld3_out", dstRtLD3)
-				};
-				if (!runPass("td_v2_p1_half_v", rtHalfHdrV, Shaders::kPass1HalfV, dhv, 2, halfRectV, 4, halfGx, halfGy, 16, 16, shmemHalfV))
-					return false;
-
-				pl_shader_desc dmh[3] = {
-					VpvGpu::Sampled("src_tex", srcTex),
-					VpvGpu::Sampled("bands_ld3_in", dstRtLD3),
-					VpvGpu::Storage("bands_mh_out", dstRtMH)
-				};
-				return runPass("td_v2_p1_full_mh", rtFullMhHdr, Shaders::kPass1FullMH, dmh, 3, rectAllV, 8, fullGx, fullGy, 16, 16, shmemFullMH);
+				return runHalf2D(sc.bandHalfTmp, dstRtLD3);
 			};
 
 			// Decompose current frame grain-free clean into curBands.
@@ -3437,12 +3434,17 @@ namespace Gpu
 			}
 
 			// ---- PASS 1B + 1C: Reverse-Order Warp (k = K-1 .. 0) + Band Decomp ----
-			// Looping k = K-1 down to 0 reuses ONE sc.warpedVal (R32F) and leaves k == 0 (refs[0].clean = P_B)
-			// bit-exact in sc.warpedVal for Pass 3B (kPass3bDctPocs) with ZERO extra VRAM!
-			const std::string warpHdr = staticGeom +
+			// In RealTime compact mode with canonical 16x16 cells, fuse warp + 22x22 G_fine + 2x2 area downsample into ONE pass
+			// (eliminates sc.warpedVal full-4K write + 2x full-4K reads and p1_full_mh for every reference k!).
+			const bool fuseWarpFine = compactBands && (p.cellPx == kCanonicalBlockPx);
+			const std::string warpHdr = fuseWarpFine ? std::string() : (staticGeom +
 				VpvGpu::DefineInt("TD_CLS_CAMERA", static_cast<int>(RegionMotionClass::Camera)) +
-				Shaders::kCoreHelpers + Shaders::kPass1WarpHeader;
+				Shaders::kCoreHelpers + Shaders::kPass1WarpHeader);
+			const std::string warpFineHdr = fuseWarpFine ? (staticGeom +
+				VpvGpu::DefineInt("TD_CLS_CAMERA", static_cast<int>(RegionMotionClass::Camera)) +
+				Shaders::BuildFineTapHeader() + Shaders::kCoreHelpers + Shaders::kPass1WarpFineHeader) : std::string();
 			const size_t shmemWarp = (24u * 24u * 2u + 30u) * sizeof(float);
+			const size_t shmemWarpFine = (28u * 29u * 2u + fineTileDim * (fineTileDim + 1u) + fineTileDim * 17u + 40u) * sizeof(float);
 			int curFlagsSlot = 0;
 
 			for (int k = K - 1; k >= 0; --k)
@@ -3481,41 +3483,83 @@ namespace Gpu
 					static_cast<float>(rSpec.cameraHomography.h[8])
 				};
 
-				pl_shader_desc dw[7] = {
-					VpvGpu::Sampled("ref_clean", refSrcTex),
-					VpvGpu::Sampled("cur_clean", sameRefCur ? sc.cellFocus : p.curCleanTex),
-					VpvGpu::Sampled("motion_vec", motionVecTex),
-					VpvGpu::Sampled("motion_meta", motionMetaTex),
-					VpvGpu::Sampled("ref_flags_in", sc.refFlags[srcFlagsSlot]),
-					VpvGpu::Storage("warped_val", sc.warpedVal),
-					VpvGpu::Storage("ref_flags_out", sc.refFlags[dstFlagsSlot])
-				};
-				pl_shader_var wv[19] = {
-					VpvGpu::Var("u_ax0", &uAx0),
-					VpvGpu::Var("u_ay0", &uAy0),
-					VpvGpu::Var("u_ax1", &uAx1),
-					VpvGpu::Var("u_ay1", &uAy1),
-					VpvGpu::Var("u_ref_idx", &uRefIdx),
-					VpvGpu::Var("u_motion_slot", &uMotionSlot),
-					VpvGpu::Var("u_flags_clear", &uFlagsClear),
-					VpvGpu::Var("u_same_ref_cur", &uSameRefCur),
-					VpvGpu::Var("u_use_homography", &uUseH),
-					VpvGpu::Var("u_enable_smooth_warp", &uEnableSmoothWarp),
-					VpvGpu::Var("u_h0", &uH[0]), VpvGpu::Var("u_h1", &uH[1]), VpvGpu::Var("u_h2", &uH[2]),
-					VpvGpu::Var("u_h3", &uH[3]), VpvGpu::Var("u_h4", &uH[4]), VpvGpu::Var("u_h5", &uH[5]),
-					VpvGpu::Var("u_h6", &uH[6]), VpvGpu::Var("u_h7", &uH[7]), VpvGpu::Var("u_h8", &uH[8])
-				};
-				if (!runPass("td_v2_p1_warp", warpHdr, Shaders::kPass1WarpAndGate, dw, 7, wv, 19, fullGx, fullGy, 16, 16, shmemWarp))
+				if (fuseWarpFine)
 				{
-					resetCarryIfActive();
-					return failCore("td_v2_p1_warp dispatch failed", StandInKind::GpuDispatchFailed);
+					pl_shader_desc dwf[8] = {
+						VpvGpu::Sampled("ref_clean", refSrcTex),
+						VpvGpu::Sampled("cur_clean", sameRefCur ? sc.cellFocus : p.curCleanTex),
+						VpvGpu::Sampled("motion_vec", motionVecTex),
+						VpvGpu::Sampled("motion_meta", motionMetaTex),
+						VpvGpu::Sampled("ref_flags_in", sc.refFlags[srcFlagsSlot]),
+						VpvGpu::Storage("bands_mh_out", sc.refBandsMH[k]),
+						VpvGpu::Storage("half_area_out", sc.bandHalfTmp),
+						VpvGpu::Storage("ref_flags_out", sc.refFlags[dstFlagsSlot])
+					};
+					pl_shader_var wvf[23] = {
+						VpvGpu::Var("u_ax0", &uAx0), VpvGpu::Var("u_ay0", &uAy0),
+						VpvGpu::Var("u_ax1", &uAx1), VpvGpu::Var("u_ay1", &uAy1),
+						VpvGpu::Var("u_hax0", &uHAx0), VpvGpu::Var("u_hay0", &uHAy0),
+						VpvGpu::Var("u_hax1", &uHAx1), VpvGpu::Var("u_hay1", &uHAy1),
+						VpvGpu::Var("u_ref_idx", &uRefIdx),
+						VpvGpu::Var("u_motion_slot", &uMotionSlot),
+						VpvGpu::Var("u_flags_clear", &uFlagsClear),
+						VpvGpu::Var("u_same_ref_cur", &uSameRefCur),
+						VpvGpu::Var("u_use_homography", &uUseH),
+						VpvGpu::Var("u_enable_smooth_warp", &uEnableSmoothWarp),
+						VpvGpu::Var("u_h0", &uH[0]), VpvGpu::Var("u_h1", &uH[1]), VpvGpu::Var("u_h2", &uH[2]),
+						VpvGpu::Var("u_h3", &uH[3]), VpvGpu::Var("u_h4", &uH[4]), VpvGpu::Var("u_h5", &uH[5]),
+						VpvGpu::Var("u_h6", &uH[6]), VpvGpu::Var("u_h7", &uH[7]), VpvGpu::Var("u_h8", &uH[8])
+					};
+					if (!runPass("td_v2_p1_warp_fine", warpFineHdr, Shaders::kPass1WarpFineBody, dwf, 8, wvf, 23, fullGx, fullGy, 16, 16, shmemWarpFine))
+					{
+						resetCarryIfActive();
+						return failCore("td_v2_p1_warp_fine dispatch failed", StandInKind::GpuDispatchFailed);
+					}
+					curFlagsSlot = dstFlagsSlot;
+					if (!runHalf2D(sc.bandHalfTmp, sc.refBandsLD3[k]))
+					{
+						resetCarryIfActive();
+						return failCore("td_v2_p1_half_2d ref dispatch failed", StandInKind::GpuDispatchFailed);
+					}
 				}
-				curFlagsSlot = dstFlagsSlot;
-
-				if (!runBandDecomp(sc.warpedVal, sc.refBands[k], sc.refBandsMH[k], sc.refBandsLD3[k]))
+				else
 				{
-					resetCarryIfActive();
-					return failCore("td_v2_p1_band ref dispatch failed", StandInKind::GpuDispatchFailed);
+					pl_shader_desc dw[7] = {
+						VpvGpu::Sampled("ref_clean", refSrcTex),
+						VpvGpu::Sampled("cur_clean", sameRefCur ? sc.cellFocus : p.curCleanTex),
+						VpvGpu::Sampled("motion_vec", motionVecTex),
+						VpvGpu::Sampled("motion_meta", motionMetaTex),
+						VpvGpu::Sampled("ref_flags_in", sc.refFlags[srcFlagsSlot]),
+						VpvGpu::Storage("warped_val", sc.warpedVal),
+						VpvGpu::Storage("ref_flags_out", sc.refFlags[dstFlagsSlot])
+					};
+					pl_shader_var wv[19] = {
+						VpvGpu::Var("u_ax0", &uAx0),
+						VpvGpu::Var("u_ay0", &uAy0),
+						VpvGpu::Var("u_ax1", &uAx1),
+						VpvGpu::Var("u_ay1", &uAy1),
+						VpvGpu::Var("u_ref_idx", &uRefIdx),
+						VpvGpu::Var("u_motion_slot", &uMotionSlot),
+						VpvGpu::Var("u_flags_clear", &uFlagsClear),
+						VpvGpu::Var("u_same_ref_cur", &uSameRefCur),
+						VpvGpu::Var("u_use_homography", &uUseH),
+						VpvGpu::Var("u_enable_smooth_warp", &uEnableSmoothWarp),
+						VpvGpu::Var("u_h0", &uH[0]), VpvGpu::Var("u_h1", &uH[1]), VpvGpu::Var("u_h2", &uH[2]),
+						VpvGpu::Var("u_h3", &uH[3]), VpvGpu::Var("u_h4", &uH[4]), VpvGpu::Var("u_h5", &uH[5]),
+						VpvGpu::Var("u_h6", &uH[6]), VpvGpu::Var("u_h7", &uH[7]), VpvGpu::Var("u_h8", &uH[8])
+					};
+					if (!runPass("td_v2_p1_warp", warpHdr, Shaders::kPass1WarpAndGate, dw, 7, wv, 19, fullGx, fullGy, 16, 16, shmemWarp))
+					{
+						resetCarryIfActive();
+						return failCore("td_v2_p1_warp dispatch failed", StandInKind::GpuDispatchFailed);
+					}
+					curFlagsSlot = dstFlagsSlot;
+
+					if (!runBandDecomp(sc.warpedVal, sc.refBands[k], sc.refBandsMH[k], sc.refBandsLD3[k]))
+					{
+						resetCarryIfActive();
+						return failCore("td_v2_p1_band ref dispatch failed", StandInKind::GpuDispatchFailed);
+					}
 				}
 			}
 			pl_tex finalRefFlagsTex = sc.refFlags[curFlagsSlot];
@@ -3752,7 +3796,7 @@ namespace Gpu
 					VpvGpu::Var("u_has_cell_drift", &uHasCellDrift),
 					VpvGpu::Var("u_anchor_ref_idx", &uAnchorRefIdx)
 				};
-				const size_t shmemP2a = (1920u + 64u + 4u) * sizeof(float);
+				const size_t shmemP2a = (1950u + 64u + 4u) * sizeof(float);
 				// Distinct dummy texture (sc.cellWeights is unused in Pass 2A) when curCleanTex aliases recYTex.
 				pl_tex p2aCurCleanBind = sameCleanRec ? sc.cellWeights : p.curCleanTex;
 
@@ -4124,6 +4168,117 @@ namespace Gpu
 				}
 			}
 
+			// ---- PASS 3 + PASS 4: Fused Blend+Bound+Recompose+Layer-4 Guard (Luma Fusion 1, TD-GPU-OPT-2) ----
+			// Used whenever (!runDctPocs && cellPx == 16 && !enableNeighborhoodSoftClamp && !enableRegionTailoring):
+			// keeps 22x22 blended deltas in LDS registers and eliminates full-4K delta_out write+read round-trip!
+			const bool runSmoothGuard = cfg_.enableSmoothLayer4Guard && cfg_.ModifiesPixels();
+			const bool fuseP34 = (!runDctPocs && p.cellPx == kCanonicalBlockPx &&
+			                      !cfg_.enableNeighborhoodSoftClamp && !cfg_.enableRegionTailoring);
+			if (fuseP34)
+			{
+				const float uSmoothGuard = runSmoothGuard ? 1.0f : 0.0f;
+				const float uWriteDelta = (p.outDeltaTex != nullptr || p.readbackCellDiag) ? 1.0f : 0.0f;
+				const float uWriteOutClean = (p.outCleanTex != nullptr || p.readbackCellDiag ||
+				                              (p.isConfirmedPeak && cfg_.enableAnchoredCarry)) ? 1.0f : 0.0f;
+				pl_tex p4OutY = runSmoothGuard ? sc.deltaScratch : dstOutY;
+
+				std::string p34Hdr = staticGeom;
+				p34Hdr += VpvGpu::DefineInt("TD_COMPACT_BANDS", compactBands ? 1 : 0);
+				p34Hdr += Shaders::BuildFineTapHeader();
+				p34Hdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
+				p34Hdr += VpvGpu::Define("TD_MIN_VAR_RETENTION", TdGuardPort::kMinVarianceRetention);
+				p34Hdr += VpvGpu::Define("TD_HUBER_KNEE_SQ", kHuberKneeSq);
+				p34Hdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
+				p34Hdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
+				p34Hdr += Shaders::kCoreHelpers;
+				if (compactBands)
+					p34Hdr += Shaders::kHalfBandSamplerHelper;
+				p34Hdr += Shaders::kPass34FusedBlendGuardHeader;
+
+				pl_shader_var v34[24] = {
+					VpvGpu::Var("u_k", &uK),
+					VpvGpu::Var("u_ax0", &uAx0), VpvGpu::Var("u_ay0", &uAy0),
+					VpvGpu::Var("u_ax1", &uAx1), VpvGpu::Var("u_ay1", &uAy1),
+					VpvGpu::Var("u_hax0", &uHAx0), VpvGpu::Var("u_hay0", &uHAy0),
+					VpvGpu::Var("u_hax1", &uHAx1), VpvGpu::Var("u_hay1", &uHAy1),
+					VpvGpu::Var("u_a2_valid", &uA2Valid),
+					VpvGpu::Var("u_a2_total_var", &uA2TotalVar),
+					VpvGpu::Var("u_enable_per_corner_huber", &uEnableHuber),
+					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale),
+					VpvGpu::Var("u_enable_edge_aware_upsample", &uEnableEdgeAwareUpsample),
+					VpvGpu::Var("u_pixel_bound_kappa", &uPixelBoundKappa),
+					VpvGpu::Var("u_enable_joint_bound", &uEnableJointBound),
+					VpvGpu::Var("u_enable_region_deband", &uEnableRegionDeband),
+					VpvGpu::Var("u_has_clean_split", &uHasCleanSplit),
+					VpvGpu::Var("u_same_clean_rec", &uSameCleanRec),
+					VpvGpu::Var("u_shadow_mode", &uShadowMode),
+					VpvGpu::Var("u_fade_keep", &uFadeKeep),
+					VpvGpu::Var("u_smooth_guard", &uSmoothGuard),
+					VpvGpu::Var("u_write_delta", &uWriteDelta),
+					VpvGpu::Var("u_write_out_clean", &uWriteOutClean)
+				};
+
+				const size_t shmemP34 = (27u * 8u + 9u + (compactBands ? 576u : 0u) +
+				                         3u * fineTileDim * fineTileDim + 3u * fineTileDim * 16u +
+				                         2u * 256u + 512u + 2u) * sizeof(float);
+				const std::string p34Body = Shaders::BuildPass34FusedBlendGuardBody();
+				bool ok34 = false;
+				if (!compactBands)
+				{
+					pl_shader_desc d34[16] = {
+						VpvGpu::Sampled("cur_bands", sc.curBands),
+						VpvGpu::Sampled("ref_bands_0", sc.refBands[0]),
+						VpvGpu::Sampled("ref_bands_1", sc.refBands[1]),
+						VpvGpu::Sampled("ref_bands_2", sc.refBands[2]),
+						VpvGpu::Sampled("ref_flags", finalRefFlagsTex),
+						VpvGpu::Sampled("cell_weights", sc.cellWeights),
+						VpvGpu::Sampled("cell_diag_c", sc.cellDiagC),
+						VpvGpu::Sampled("cell_prior", cellPriorTex),
+						VpvGpu::Sampled("rec_y", p.recYTex),
+						VpvGpu::Sampled("cur_clean", sameCleanRec ? sc.motionGate : p.curCleanTex),
+						VpvGpu::Sampled("cell_focus", sc.cellFocus),
+						VpvGpu::Storage("out_clean", dstOutClean),
+						VpvGpu::Storage("carry_clean", carryCleanTex_),
+						VpvGpu::Storage("guard_cell", dstGuardCell),
+						VpvGpu::Storage("out_y", p4OutY),
+						VpvGpu::Storage("delta_out", dstOutDelta)
+					};
+					ok34 = runPass("td_v2_p34_fused_blend_guard", p34Hdr, p34Body.c_str(), d34, 16, v34, 24, cw, ch, 16, 16, shmemP34);
+				}
+				else
+				{
+					pl_shader_desc d34[20] = {
+						VpvGpu::Sampled("cur_bands_mh", sc.curBandsMH),
+						VpvGpu::Sampled("cur_bands_ld3", sc.curBandsLD3),
+						VpvGpu::Sampled("ref_bands_mh_0", sc.refBandsMH[0]),
+						VpvGpu::Sampled("ref_bands_mh_1", sc.refBandsMH[1]),
+						VpvGpu::Sampled("ref_bands_mh_2", sc.refBandsMH[2]),
+						VpvGpu::Sampled("ref_bands_ld3_0", sc.refBandsLD3[0]),
+						VpvGpu::Sampled("ref_bands_ld3_1", sc.refBandsLD3[1]),
+						VpvGpu::Sampled("ref_bands_ld3_2", sc.refBandsLD3[2]),
+						VpvGpu::Sampled("ref_flags", finalRefFlagsTex),
+						VpvGpu::Sampled("cell_weights", sc.cellWeights),
+						VpvGpu::Sampled("cell_diag_c", sc.cellDiagC),
+						VpvGpu::Sampled("cell_prior", cellPriorTex),
+						VpvGpu::Sampled("rec_y", p.recYTex),
+						VpvGpu::Sampled("cur_clean", sameCleanRec ? sc.motionGate : p.curCleanTex),
+						VpvGpu::Sampled("cell_focus", sc.cellFocus),
+						VpvGpu::Storage("out_clean", dstOutClean),
+						VpvGpu::Storage("carry_clean", carryCleanTex_),
+						VpvGpu::Storage("guard_cell", dstGuardCell),
+						VpvGpu::Storage("out_y", p4OutY),
+						VpvGpu::Storage("delta_out", dstOutDelta)
+					};
+					ok34 = runPass("td_v2_p34_fused_blend_guard", p34Hdr, p34Body.c_str(), d34, 20, v34, 24, cw, ch, 16, 16, shmemP34);
+				}
+				if (!ok34)
+				{
+					resetCarryIfActive();
+					return failCore("td_v2_p34_fused_blend_guard dispatch failed", StandInKind::GpuDispatchFailed);
+				}
+			}
+			else
+			{
 			// ---- PASS 3A: Spatial-Only Weight Interpolation + 3-Sigma Huber Taper + Honest Output Limit (TD-U3) ----
 			{
 				std::string bHdr = staticGeom;
@@ -4265,7 +4420,6 @@ namespace Gpu
 
 			// ---- PASS 4 (Speedup 4 + Fable L-3): Fused Recompose + Layer-4 TdGuardPort + Optional Smooth Guard Apply ----
 			{
-				const bool runSmoothGuard = cfg_.enableSmoothLayer4Guard && cfg_.ModifiesPixels();
 				const float uSmoothGuard = runSmoothGuard ? 1.0f : 0.0f;
 				pl_tex p4OutY = runSmoothGuard ? sc.deltaScratch : dstOutY;
 
@@ -4306,29 +4460,30 @@ namespace Gpu
 					resetCarryIfActive();
 					return failCore("td_v2_p4_fused_apply_guard dispatch failed", StandInKind::GpuDispatchFailed);
 				}
+			}
+			} // end !fuseP34
 
-				if (runSmoothGuard)
+			if (runSmoothGuard)
+			{
+				std::string sgHdr = staticGeom + Shaders::kCoreHelpers + Shaders::kPass4SmoothGuardHeader;
+				pl_shader_desc dsg[4] = {
+					VpvGpu::Sampled("cand_fdiff", sc.deltaScratch),
+					VpvGpu::Sampled("guard_cell", dstGuardCell),
+					VpvGpu::Sampled("cell_focus", sc.cellFocus),
+					VpvGpu::Storage("out_y", dstOutY)
+				};
+				pl_shader_var vsg[4] = {
+					VpvGpu::Var("u_ax0", &uAx0),
+					VpvGpu::Var("u_ay0", &uAy0),
+					VpvGpu::Var("u_ax1", &uAx1),
+					VpvGpu::Var("u_ay1", &uAy1)
+				};
+				const size_t shmemSg = 10u * sizeof(float);
+				if (!runPass("td_v2_p4b_smooth_guard", sgHdr, Shaders::kPass4SmoothGuardApply,
+				             dsg, 4, vsg, 4, fullGx, fullGy, 16, 16, shmemSg))
 				{
-					std::string sgHdr = staticGeom + Shaders::kCoreHelpers + Shaders::kPass4SmoothGuardHeader;
-					pl_shader_desc dsg[4] = {
-						VpvGpu::Sampled("cand_fdiff", sc.deltaScratch),
-						VpvGpu::Sampled("guard_cell", dstGuardCell),
-						VpvGpu::Sampled("cell_focus", sc.cellFocus),
-						VpvGpu::Storage("out_y", dstOutY)
-					};
-					pl_shader_var vsg[4] = {
-						VpvGpu::Var("u_ax0", &uAx0),
-						VpvGpu::Var("u_ay0", &uAy0),
-						VpvGpu::Var("u_ax1", &uAx1),
-						VpvGpu::Var("u_ay1", &uAy1)
-					};
-					const size_t shmemSg = 10u * sizeof(float);
-					if (!runPass("td_v2_p4b_smooth_guard", sgHdr, Shaders::kPass4SmoothGuardApply,
-					             dsg, 4, vsg, 4, fullGx, fullGy, 16, 16, shmemSg))
-					{
-						resetCarryIfActive();
-						return failCore("td_v2_p4b_smooth_guard dispatch failed", StandInKind::GpuDispatchFailed);
-					}
+					resetCarryIfActive();
+					return failCore("td_v2_p4b_smooth_guard dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
 

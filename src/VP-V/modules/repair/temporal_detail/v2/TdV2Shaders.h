@@ -1107,11 +1107,10 @@ for (int k = -TD_RAD_HLOW; k <= TD_RAD_HLOW; ++k)
 imageStore(bands_ld3_out, hp, vec4(gBase, gBase - gLow, 0.0, 0.0));
 )GLSL";
 
-	// kPass1FullMH: 1-pass fused 2D LDS G_fine (22x22 halo + 10x10 half-res L cache) -> full-res FP32 RG32F (M, H).
+	// kPass1FullMH: 1-pass fused 2D LDS G_fine (22x22 halo) -> full-res FP32 RG32F (gFine, H); M = gFine - bL in 1 sub!
 	constexpr const char* kPass1FullMHHeader = R"GLSL(
-shared float td_sh_f0[16 + 2 * TD_RAD_FINE][16 + 2 * TD_RAD_FINE];
-shared float td_sh_f1[16 + 2 * TD_RAD_FINE][16];
-shared float td_sh_hl[10][10];
+shared float td_sh_f0[16 + 2 * TD_RAD_FINE][16 + 2 * TD_RAD_FINE + 1];
+shared float td_sh_f1[16 + 2 * TD_RAD_FINE][17];
 )GLSL";
 
 	constexpr const char* kPass1FullMH = R"GLSL(
@@ -1126,16 +1125,11 @@ int ax0 = int(round(u_ax0));
 int ay0 = int(round(u_ay0));
 int ax1 = int(round(u_ax1));
 int ay1 = int(round(u_ay1));
-ivec4 halfActive = ivec4(int(round(u_hax0)), int(round(u_hay0)), int(round(u_hax1)), int(round(u_hay1)));
 bool validRect = (ax1 > ax0) && (ay1 > ay0);
 int xMin = ax0;
 int xMax = max(ax0, ax1 - 1);
 int yMin = ay0;
 int yMax = max(ay0, ay1 - 1);
-int hBaseX = int(gl_WorkGroupID.x) * 8 - 1;
-int hBaseY = int(gl_WorkGroupID.y) * 8 - 1;
-ivec2 hLo = halfActive.xy;
-ivec2 hHi = max(halfActive.xy, halfActive.zw - ivec2(1));
 
 int tileDim = 16 + 2 * TD_RAD_FINE;
 int tileN = tileDim * tileDim;
@@ -1149,13 +1143,6 @@ for (int idx = tid; idx < tileN; idx += 256)
     int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
     float sv = texelFetch(src_tex, ivec2(sx, sy), 0).x;
     td_sh_f0[ty][tx] = td_is_bad(sv) ? 0.0 : sv;
-}
-if (tid < 100)
-{
-    int hy = tid / 10;
-    int hx = tid % 10;
-    ivec2 hq = clamp(ivec2(hBaseX + hx, hBaseY + hy), hLo, hHi);
-    td_sh_hl[hy][hx] = texelFetch(bands_ld3_in, hq, 0).x;
 }
 memoryBarrierShared();
 barrier();
@@ -1189,26 +1176,717 @@ for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
     gFine += TD_TAP_FINE[k + TD_RAD_FINE] * td_sh_f1[cyCenter + k][lx];
 
 float srcVal = td_sh_f0[cyCenter][lx + TD_RAD_FINE];
-vec2 hc = clamp((vec2(p) - vec2(0.5)) / 2.0, vec2(hLo), vec2(hHi));
-ivec2 hi0 = ivec2(floor(hc));
-ivec2 hi1 = min(hHi, hi0 + ivec2(1));
-float bL = 0.0;
-if (hi0.x >= hBaseX && hi1.x < hBaseX + 10 && hi0.y >= hBaseY && hi1.y < hBaseY + 10)
+imageStore(bands_mh_out, p, vec4(gFine, srcVal - gFine, 0.0, 0.0));
+)GLSL";
+
+	// ---- PASS 1C-OPT2 (Luma Fusion 2): Fused Cur Fine + 2x2 Area Downsample + 1-Pass 2D Half-Res (L, D3) ----
+	// Eliminates 2nd full-res read of curCleanTex, eliminates p1_full_mh dispatch, and fuses p1_half_h + p1_half_v into 1 pass!
+	constexpr const char* kPass1CurFineDown = R"GLSL(
+int wgX = int(gl_WorkGroupID.x);
+int wgY = int(gl_WorkGroupID.y);
+int baseX = wgX * 16;
+int baseY = wgY * 16;
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+int tid = ly * 16 + lx;
+ivec2 p = ivec2(baseX + lx, baseY + ly);
+
+int ax0 = int(round(u_ax0));
+int ay0 = int(round(u_ay0));
+int ax1 = int(round(u_ax1));
+int ay1 = int(round(u_ay1));
+int hax0 = int(round(u_hax0));
+int hay0 = int(round(u_hay0));
+int hax1 = int(round(u_hax1));
+int hay1 = int(round(u_hay1));
+bool validRect = (ax1 > ax0) && (ay1 > ay0);
+bool validHalf = (hax1 > hax0) && (hay1 > hay0);
+int xMin = ax0;
+int xMax = max(ax0, ax1 - 1);
+int yMin = ay0;
+int yMax = max(ay0, ay1 - 1);
+
+int tileDim = 16 + 2 * TD_RAD_FINE;
+int tileN = tileDim * tileDim;
+for (int idx = tid; idx < tileN; idx += 256)
 {
-    vec2 hf = hc - vec2(hi0);
-    int rx0 = hi0.x - hBaseX; int rx1 = hi1.x - hBaseX;
-    int ry0 = hi0.y - hBaseY; int ry1 = hi1.y - hBaseY;
-    float top = td_sh_hl[ry0][rx0] + (td_sh_hl[ry0][rx1] - td_sh_hl[ry0][rx0]) * hf.x;
-    float bot = td_sh_hl[ry1][rx0] + (td_sh_hl[ry1][rx1] - td_sh_hl[ry1][rx0]) * hf.x;
-    bL = top * (1.0 - hf.y) + bot * hf.y;
+    int ty = idx / tileDim;
+    int tx = idx % tileDim;
+    int gx = baseX - TD_RAD_FINE + tx;
+    int gy = baseY - TD_RAD_FINE + ty;
+    int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
+    int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
+    float sv = texelFetch(src_tex, ivec2(sx, sy), 0).x;
+    td_sh_f0[ty][tx] = td_is_bad(sv) ? 0.0 : sv;
+}
+memoryBarrierShared();
+barrier();
+
+if (lx < 8 && ly < 8)
+{
+    ivec2 hp = ivec2(wgX * 8 + lx, wgY * 8 + ly);
+    if (hp.x < TD_HALF_W && hp.y < TD_HALF_H)
+    {
+        if (!validRect || !validHalf || hp.x < hax0 || hp.x >= hax1 || hp.y < hay0 || hp.y >= hay1)
+        {
+            imageStore(half_area_out, hp, vec4(0.0));
+        }
+        else
+        {
+            int bx = TD_RAD_FINE + 2 * lx;
+            int by = TD_RAD_FINE + 2 * ly;
+            float s00 = td_sh_f0[by][bx];
+            float s10 = td_sh_f0[by][bx + 1];
+            float s01 = td_sh_f0[by + 1][bx];
+            float s11 = td_sh_f0[by + 1][bx + 1];
+            imageStore(half_area_out, hp, vec4((s00 + s10 + s01 + s11) / 4.0, 0.0, 0.0, 0.0));
+        }
+    }
+}
+
+int hN = tileDim * 16;
+for (int idx = tid; idx < hN; idx += 256)
+{
+    int ty = idx / 16;
+    int tx = idx % 16;
+    int c = tx + TD_RAD_FINE;
+    float acc = 0.0;
+    for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+        acc += TD_TAP_FINE[k + TD_RAD_FINE] * td_sh_f0[ty][c + k];
+    td_sh_f1[ty][tx] = acc;
+}
+memoryBarrierShared();
+barrier();
+
+if (p.x >= TD_W || p.y >= TD_H)
+    return;
+
+if (!validRect || p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
+{
+    imageStore(bands_mh_out, p, vec4(0.0));
+    return;
+}
+
+int cyCenter = ly + TD_RAD_FINE;
+float gFine = 0.0;
+for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+    gFine += TD_TAP_FINE[k + TD_RAD_FINE] * td_sh_f1[cyCenter + k][lx];
+
+float srcVal = td_sh_f0[cyCenter][lx + TD_RAD_FINE];
+imageStore(bands_mh_out, p, vec4(gFine, srcVal - gFine, 0.0, 0.0));
+)GLSL";
+
+	// kPass1Half2D: 1-pass 2D LDS half-res Gaussian (L, D3) from half_area_in.x (9.2 KB LDS, eliminates H+V split!).
+	constexpr const char* kPass1Half2DHeader = R"GLSL(
+shared float td_sh_h2d0[16 + 2 * TD_RAD_HLOW][16 + 2 * TD_RAD_HLOW + 1];
+shared vec2 td_sh_h2d1[16 + 2 * TD_RAD_HLOW][17];
+)GLSL";
+
+	constexpr const char* kPass1Half2D = R"GLSL(
+int baseX = int(gl_WorkGroupID.x) * 16;
+int baseY = int(gl_WorkGroupID.y) * 16;
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+int tid = ly * 16 + lx;
+ivec2 hp = ivec2(baseX + lx, baseY + ly);
+
+int hax0 = int(round(u_hax0));
+int hay0 = int(round(u_hay0));
+int hax1 = int(round(u_hax1));
+int hay1 = int(round(u_hay1));
+bool validHalf = (hax1 > hax0) && (hay1 > hay0);
+int hxMin = hax0;
+int hxMax = max(hax0, hax1 - 1);
+int hyMin = hay0;
+int hyMax = max(hay0, hay1 - 1);
+
+int tileDim = 16 + 2 * TD_RAD_HLOW;
+int tileN = tileDim * tileDim;
+for (int idx = tid; idx < tileN; idx += 256)
+{
+    int ty = idx / tileDim;
+    int tx = idx % tileDim;
+    int ghx = baseX - TD_RAD_HLOW + tx;
+    int ghy = baseY - TD_RAD_HLOW + ty;
+    int sx = validHalf ? clamp(ghx, hxMin, hxMax) : clamp(ghx, 0, TD_HALF_W - 1);
+    int sy = validHalf ? clamp(ghy, hyMin, hyMax) : clamp(ghy, 0, TD_HALF_H - 1);
+    td_sh_h2d0[ty][tx] = texelFetch(half_area_in, ivec2(sx, sy), 0).x;
+}
+memoryBarrierShared();
+barrier();
+
+int hN = tileDim * 16;
+for (int idx = tid; idx < hN; idx += 256)
+{
+    int ty = idx / 16;
+    int tx = idx % 16;
+    int c = tx + TD_RAD_HLOW;
+    float accBase = 0.0;
+    float accLow = 0.0;
+    for (int k = -TD_RAD_HLOW; k <= TD_RAD_HLOW; ++k)
+    {
+        float v = td_sh_h2d0[ty][c + k];
+        accLow += TD_TAP_HLOW[k + TD_RAD_HLOW] * v;
+        if (abs(k) <= TD_RAD_HBASE)
+            accBase += TD_TAP_HBASE[k + TD_RAD_HBASE] * v;
+    }
+    td_sh_h2d1[ty][tx] = vec2(accBase, accLow);
+}
+memoryBarrierShared();
+barrier();
+
+if (hp.x >= TD_HALF_W || hp.y >= TD_HALF_H)
+    return;
+
+if (!validHalf || hp.x < hax0 || hp.x >= hax1 || hp.y < hay0 || hp.y >= hay1)
+{
+    imageStore(bands_ld3_out, hp, vec4(0.0));
+    return;
+}
+
+int cyCenter = ly + TD_RAD_HLOW;
+float gBase = 0.0;
+float gLow = 0.0;
+for (int k = -TD_RAD_HLOW; k <= TD_RAD_HLOW; ++k)
+{
+    vec2 v = td_sh_h2d1[cyCenter + k][lx];
+    gLow += TD_TAP_HLOW[k + TD_RAD_HLOW] * v.y;
+    if (abs(k) <= TD_RAD_HBASE)
+        gBase += TD_TAP_HBASE[k + TD_RAD_HBASE] * v.x;
+}
+
+imageStore(bands_ld3_out, hp, vec4(gBase, gBase - gLow, 0.0, 0.0));
+)GLSL";
+
+	// ---- PASS 1B-OPT2 (Luma Fusion 2): Fused Warp + 22x22 G_fine + 2x2 Area Downsample (RealTime, TD_CELL_PX == 16) ----
+	// Eliminates sc.warpedVal full-4K write + 2x full-4K reads AND p1_full_mh dispatch for every reference k!
+	// Uses 10.0 KB LDS (28x29 warp tile + 22x23 f0 + 22x17 f1 + 3x3 cell MV cache). Strictly <= 5 SRVs, 3 UAVs.
+	constexpr const char* kPass1WarpFineHeader = R"GLSL(
+shared float td_wf_w[28][29];
+shared uint td_wf_bad[28][29];
+shared float td_wf_f0[16 + 2 * TD_RAD_FINE][16 + 2 * TD_RAD_FINE + 1];
+shared float td_wf_f1[16 + 2 * TD_RAD_FINE][17];
+shared float td_wf_mvx[9];
+shared float td_wf_mvy[9];
+shared uint td_wf_mvok[9];
+shared int td_wf_mvcls[9];
+shared int td_wf_tbase[2];
+shared uint td_wf_lds_flags;
+
+float td_wf_fetch_active_safe(ivec2 localP, ivec4 activeRect, out bool isBad)
+{
+    ivec2 sz = activeRect.zw - activeRect.xy;
+    ivec2 cl = clamp(localP, ivec2(0), sz - ivec2(1));
+    float v = texelFetch(ref_clean, activeRect.xy + cl, 0).x;
+    isBad = td_is_bad(v);
+    return isBad ? 0.0 : v;
+}
+
+float td_wf_cur_fallback(ivec2 p)
+{
+    float cv = (u_same_ref_cur > 0.5) ? texelFetch(ref_clean, p, 0).x : texelFetch(cur_clean, p, 0).x;
+    return td_is_bad(cv) ? 0.0 : cv;
+}
+
+float td_wf_sample_bilinear(vec2 sLocal, ivec4 activeRect, out bool anyBad)
+{
+    ivec2 sz = activeRect.zw - activeRect.xy;
+    vec2 cl = clamp(sLocal, vec2(0.0), vec2(float(sz.x - 1), float(sz.y - 1)));
+    ivec2 i0 = ivec2(floor(cl));
+    ivec2 i1 = min(sz - ivec2(1), i0 + ivec2(1));
+    vec2 f = cl - vec2(i0);
+    bool b00 = false, b10 = false, b01 = false, b11 = false;
+    float v00 = td_wf_fetch_active_safe(ivec2(i0.x, i0.y), activeRect, b00);
+    float v10 = td_wf_fetch_active_safe(ivec2(i1.x, i0.y), activeRect, b10);
+    float v01 = td_wf_fetch_active_safe(ivec2(i0.x, i1.y), activeRect, b01);
+    float v11 = td_wf_fetch_active_safe(ivec2(i1.x, i1.y), activeRect, b11);
+    anyBad = b00 || b10 || b01 || b11;
+    float top = v00 + (v10 - v00) * f.x;
+    float bot = v01 + (v11 - v01) * f.x;
+    return top * (1.0 - f.y) + bot * f.y;
+}
+
+void td_wf_sample_direct(vec2 sLocal, ivec4 activeRect, ivec2 p, out float outVal, out int outFlags)
+{
+    ivec2 sz = activeRect.zw - activeRect.xy;
+    outFlags = 0;
+    if (sLocal.x >= 1.0 && sLocal.y >= 1.0 &&
+        sLocal.x < float(sz.x) - 2.0 && sLocal.y < float(sz.y) - 2.0)
+    {
+        ivec2 i0 = ivec2(floor(sLocal));
+        vec4 wx = td_cubic_weights(sLocal.x - float(i0.x));
+        vec4 wy = td_cubic_weights(sLocal.y - float(i0.y));
+        bool anyBad = false;
+        float acc = 0.0;
+        for (int j = 0; j < 4; ++j)
+        {
+            float row = 0.0;
+            for (int i = 0; i < 4; ++i)
+            {
+                bool badTap = false;
+                float tap = td_wf_fetch_active_safe(ivec2(i0.x - 1 + i, i0.y - 1 + j), activeRect, badTap);
+                anyBad = anyBad || badTap;
+                row += wx[i] * tap;
+            }
+            acc += wy[j] * row;
+        }
+        if (td_is_bad(acc)) { outVal = td_wf_cur_fallback(p); outFlags = 4; }
+        else { outVal = acc; outFlags = anyBad ? 4 : 1; }
+    }
+    else if (sLocal.x >= 0.0 && sLocal.y >= 0.0 &&
+             sLocal.x <= float(sz.x - 1) && sLocal.y <= float(sz.y - 1))
+    {
+        bool anyBad = false;
+        float bVal = td_wf_sample_bilinear(sLocal, activeRect, anyBad);
+        if (td_is_bad(bVal)) { outVal = td_wf_cur_fallback(p); outFlags = 2 | 4; }
+        else { outVal = bVal; outFlags = 2 | (anyBad ? 4 : 1); }
+    }
+    else
+    {
+        bool anyBad = false;
+        float bVal = td_wf_sample_bilinear(sLocal, activeRect, anyBad);
+        outVal = td_is_bad(bVal) ? td_wf_cur_fallback(p) : bVal;
+        outFlags = (anyBad || td_is_bad(bVal)) ? 4 : 0;
+    }
+}
+
+void td_wf_warp_pixel(ivec2 sp, ivec4 activeRect, int wgCx, int wgCy, int motionSlot,
+                      bool useH, bool smoothWarp, bool useLds, bool allSameMv, int tileBaseX, int tileBaseY,
+                      bool needFlags, out float outVal, out int outFlags, out int outExtraBad)
+{
+    outFlags = 0;
+    outExtraBad = 0;
+    int cx = min(TD_CW - 1, sp.x / 16);
+    int cy = min(TD_CH - 1, sp.y / 16);
+    bool in3x3 = (cx >= wgCx - 1 && cx <= wgCx + 1 && cy >= wgCy - 1 && cy <= wgCy + 1);
+    vec2 mv = vec2(0.0);
+    int mvCls = 0;
+    bool mvValid = false;
+    bool mvBad = false;
+    if (in3x3)
+    {
+        int q = (cy - wgCy + 1) * 3 + (cx - wgCx + 1);
+        mv = vec2(td_wf_mvx[q], td_wf_mvy[q]);
+        mvCls = td_wf_mvcls[q];
+        uint f = td_wf_mvok[q];
+        mvValid = ((f & 1u) != 0u);
+        mvBad = ((f & 2u) != 0u);
+    }
+    else
+    {
+        ivec2 mc = ivec2(motionSlot * TD_CW + cx, cy);
+        mv = texelFetch(motion_vec, mc, 0).xy;
+        vec2 pm = texelFetch(motion_meta, mc, 0).xy;
+        mvCls = int(round(pm.x));
+        mvValid = (pm.y >= 0.5);
+        mvBad = td_is_bad(mv.x) || td_is_bad(mv.y);
+    }
+
+    int plx = sp.x - activeRect.x;
+    int ply = sp.y - activeRect.y;
+    if (needFlags)
+    {
+        if (useLds && plx >= tileBaseX && plx < tileBaseX + 28 && ply >= tileBaseY && ply < tileBaseY + 28)
+            outExtraBad = (td_wf_bad[ply - tileBaseY][plx - tileBaseX] != 0u) ? 4 : 0;
+        else
+            outExtraBad = td_is_bad(texelFetch(ref_clean, sp, 0).x) ? 4 : 0;
+    }
+
+    if (!mvValid)
+    {
+        outVal = td_wf_cur_fallback(sp);
+        outFlags = 0;
+        return;
+    }
+
+    ivec2 sz = activeRect.zw - activeRect.xy;
+    vec2 sLocal = vec2(0.0);
+    if (useH && mvCls == TD_CLS_CAMERA)
+    {
+        float px = float(sp.x);
+        float py = float(sp.y);
+        float hw = u_h6 * px + u_h7 * py + u_h8;
+        float hsx = (abs(hw) > TD_NUM_FLOOR) ? ((u_h0 * px + u_h1 * py + u_h2) / hw) : 0.0;
+        float hsy = (abs(hw) > TD_NUM_FLOOR) ? ((u_h3 * px + u_h4 * py + u_h5) / hw) : 0.0;
+        bool hBad = td_is_bad(u_h0) || td_is_bad(u_h1) || td_is_bad(u_h2) ||
+                    td_is_bad(u_h3) || td_is_bad(u_h4) || td_is_bad(u_h5) ||
+                    td_is_bad(u_h6) || td_is_bad(u_h7) || td_is_bad(u_h8) ||
+                    td_is_bad(hw) || !(abs(hw) > TD_NUM_FLOOR) || td_is_bad(hsx) || td_is_bad(hsy);
+        if (hBad)
+        {
+            outVal = td_wf_cur_fallback(sp);
+            outFlags = 4;
+            outExtraBad = 4;
+            return;
+        }
+        sLocal = vec2(hsx - float(activeRect.x), hsy - float(activeRect.y));
+    }
+    else
+    {
+        if (mvBad)
+        {
+            outVal = td_wf_cur_fallback(sp);
+            outFlags = 4;
+            return;
+        }
+        vec2 effMv = mv;
+        if (smoothWarp && !allSameMv)
+        {
+            float gx = (float(sp.x) + 0.5) / 16.0 - 0.5;
+            float gy = (float(sp.y) + 0.5) / 16.0 - 0.5;
+            int x0 = clamp(int(floor(gx)), 0, TD_CW - 1);
+            int y0 = clamp(int(floor(gy)), 0, TD_CH - 1);
+            int x1 = min(TD_CW - 1, x0 + 1);
+            int y1 = min(TD_CH - 1, y0 + 1);
+            float tx = clamp(gx - float(x0), 0.0, 1.0);
+            float ty = clamp(gy - float(y0), 0.0, 1.0);
+            ivec2 cs[4];
+            cs[0] = ivec2(x0, y0); cs[1] = ivec2(x1, y0);
+            cs[2] = ivec2(x0, y1); cs[3] = ivec2(x1, y1);
+            float ws[4];
+            ws[0] = (1.0 - tx) * (1.0 - ty); ws[1] = tx * (1.0 - ty);
+            ws[2] = (1.0 - tx) * ty;         ws[3] = tx * ty;
+            float wSum = 0.0;
+            vec2 accMv = vec2(0.0);
+            bool cIn = (x0 >= wgCx - 1 && x1 <= wgCx + 1 && y0 >= wgCy - 1 && y1 <= wgCy + 1);
+            if (cIn)
+            {
+                for (int q = 0; q < 4; ++q)
+                {
+                    int lIdx = (cs[q].y - wgCy + 1) * 3 + (cs[q].x - wgCx + 1);
+                    if ((td_wf_mvok[lIdx] & 4u) != 0u)
+                    {
+                        wSum += ws[q];
+                        accMv += ws[q] * vec2(td_wf_mvx[lIdx], td_wf_mvy[lIdx]);
+                    }
+                }
+            }
+            else
+            {
+                for (int q = 0; q < 4; ++q)
+                {
+                    ivec2 tc = ivec2(motionSlot * TD_CW + cs[q].x, cs[q].y);
+                    if (texelFetch(motion_meta, tc, 0).y < 0.5) continue;
+                    vec2 qv = texelFetch(motion_vec, tc, 0).xy;
+                    if (td_is_bad(qv.x) || td_is_bad(qv.y)) continue;
+                    wSum += ws[q];
+                    accMv += ws[q] * qv;
+                }
+            }
+            if (wSum > TD_NUM_FLOOR)
+                effMv = accMv / wSum;
+        }
+        sLocal = vec2(float(plx), float(ply)) + effMv;
+    }
+
+    bool ldsBicubicOk = false;
+    ivec2 ldsI0 = ivec2(0);
+    int ldsRx = 0;
+    int ldsRy = 0;
+    if (useLds &&
+        sLocal.x >= 1.0 && sLocal.y >= 1.0 &&
+        sLocal.x < float(sz.x) - 2.0 && sLocal.y < float(sz.y) - 2.0)
+    {
+        ldsI0 = ivec2(floor(sLocal));
+        ldsRx = (ldsI0.x - 1) - tileBaseX;
+        ldsRy = (ldsI0.y - 1) - tileBaseY;
+        ldsBicubicOk = (ldsRx >= 0 && ldsRx + 3 < 28 && ldsRy >= 0 && ldsRy + 3 < 28);
+    }
+    if (ldsBicubicOk)
+    {
+        vec4 wx = td_cubic_weights(sLocal.x - float(ldsI0.x));
+        vec4 wy = td_cubic_weights(sLocal.y - float(ldsI0.y));
+        uint badOr = 0u;
+        float acc = 0.0;
+        for (int j = 0; j < 4; ++j)
+        {
+            float row = 0.0;
+            for (int i = 0; i < 4; ++i)
+            {
+                badOr |= td_wf_bad[ldsRy + j][ldsRx + i];
+                row += wx[i] * td_wf_w[ldsRy + j][ldsRx + i];
+            }
+            acc += wy[j] * row;
+        }
+        if (td_is_bad(acc)) { outVal = td_wf_cur_fallback(sp); outFlags = 4; }
+        else { outVal = acc; outFlags = (badOr != 0u) ? 4 : 1; }
+    }
+    else if (useLds &&
+             sLocal.x >= 0.0 && sLocal.y >= 0.0 &&
+             sLocal.x <= float(sz.x - 1) && sLocal.y <= float(sz.y - 1))
+    {
+        vec2 cl = clamp(sLocal, vec2(0.0), vec2(float(sz.x - 1), float(sz.y - 1)));
+        ivec2 i0 = ivec2(floor(cl));
+        ivec2 i1 = min(sz - ivec2(1), i0 + ivec2(1));
+        int r0x = i0.x - tileBaseX; int r0y = i0.y - tileBaseY;
+        int r1x = i1.x - tileBaseX; int r1y = i1.y - tileBaseY;
+        if (r0x >= 0 && r1x < 28 && r0y >= 0 && r1y < 28)
+        {
+            vec2 f = cl - vec2(i0);
+            float v00 = td_wf_w[r0y][r0x]; float v10 = td_wf_w[r0y][r1x];
+            float v01 = td_wf_w[r1y][r0x]; float v11 = td_wf_w[r1y][r1x];
+            uint badOr = td_wf_bad[r0y][r0x] | td_wf_bad[r0y][r1x] | td_wf_bad[r1y][r0x] | td_wf_bad[r1y][r1x];
+            float top = v00 + (v10 - v00) * f.x;
+            float bot = v01 + (v11 - v01) * f.x;
+            float bVal = top * (1.0 - f.y) + bot * f.y;
+            if (td_is_bad(bVal)) { outVal = td_wf_cur_fallback(sp); outFlags = 2 | 4; }
+            else { outVal = bVal; outFlags = 2 | ((badOr != 0u) ? 4 : 1); }
+        }
+        else
+        {
+            td_wf_sample_direct(sLocal, activeRect, sp, outVal, outFlags);
+        }
+    }
+    else
+    {
+        td_wf_sample_direct(sLocal, activeRect, sp, outVal, outFlags);
+    }
+}
+)GLSL";
+
+	constexpr const char* kPass1WarpFineBody = R"GLSL(
+int wgX = int(gl_WorkGroupID.x);
+int wgY = int(gl_WorkGroupID.y);
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+int tid = ly * 16 + lx;
+int baseX = wgX * 16;
+int baseY = wgY * 16;
+ivec2 p = ivec2(baseX + lx, baseY + ly);
+
+int ax0 = int(round(u_ax0));
+int ay0 = int(round(u_ay0));
+int ax1 = int(round(u_ax1));
+int ay1 = int(round(u_ay1));
+int hax0 = int(round(u_hax0));
+int hay0 = int(round(u_hay0));
+int hax1 = int(round(u_hax1));
+int hay1 = int(round(u_hay1));
+ivec4 activeRect = ivec4(ax0, ay0, ax1, ay1);
+bool validRect = (ax1 > ax0) && (ay1 > ay0);
+bool validHalf = (hax1 > hax0) && (hay1 > hay0);
+int xMin = ax0;
+int xMax = max(ax0, ax1 - 1);
+int yMin = ay0;
+int yMax = max(ay0, ay1 - 1);
+
+int refIdx = int(round(u_ref_idx));
+int motionSlot = clamp(int(round(u_motion_slot)), 0, 2);
+bool flagsClear = (u_flags_clear > 0.5);
+bool useH = (u_use_homography > 0.5);
+bool smoothWarp = (u_enable_smooth_warp > 0.5);
+
+int wgCx = min(TD_CW - 1, wgX);
+int wgCy = min(TD_CH - 1, wgY);
+if (tid < 9)
+{
+    int ddy = (tid / 3) - 1;
+    int ddx = (tid % 3) - 1;
+    int ncx = clamp(wgCx + ddx, 0, TD_CW - 1);
+    int ncy = clamp(wgCy + ddy, 0, TD_CH - 1);
+    ivec2 mc = ivec2(motionSlot * TD_CW + ncx, ncy);
+    vec2 nmv = texelFetch(motion_vec, mc, 0).xy;
+    vec2 nmeta = texelFetch(motion_meta, mc, 0).xy;
+    bool nValid = (nmeta.y >= 0.5);
+    bool nBad = td_is_bad(nmv.x) || td_is_bad(nmv.y);
+    td_wf_mvx[tid] = nBad ? 0.0 : nmv.x;
+    td_wf_mvy[tid] = nBad ? 0.0 : nmv.y;
+    td_wf_mvcls[tid] = int(round(nmeta.x));
+    td_wf_mvok[tid] = (nValid ? 1u : 0u) | (nBad ? 2u : 0u) | ((nValid && !nBad) ? 4u : 0u);
+}
+memoryBarrierShared();
+barrier();
+
+if (tid == 0)
+{
+    uint ldsFl = 0u;
+    int tbX = 0;
+    int tbY = 0;
+    if (validRect)
+    {
+        float minVx = 1e30, minVy = 1e30, maxVx = -1e30, maxVy = -1e30;
+        int okCnt = 0;
+        bool anyCamH = false;
+        for (int q = 0; q < 9; ++q)
+        {
+            if (useH && td_wf_mvcls[q] == TD_CLS_CAMERA)
+                anyCamH = true;
+            if ((td_wf_mvok[q] & 4u) != 0u)
+            {
+                float vx = td_wf_mvx[q];
+                float vy = td_wf_mvy[q];
+                minVx = min(minVx, vx); minVy = min(minVy, vy);
+                maxVx = max(maxVx, vx); maxVy = max(maxVy, vy);
+                okCnt += 1;
+            }
+        }
+        if (!anyCamH && okCnt > 0 && abs(minVx) <= float(TD_W) && abs(maxVx) <= float(TD_W) &&
+            abs(minVy) <= float(TD_H) && abs(maxVy) <= float(TD_H))
+        {
+            tbX = int(floor(float(baseX - TD_RAD_FINE - ax0) + minVx)) - 1;
+            tbY = int(floor(float(baseY - TD_RAD_FINE - ay0) + minVy)) - 1;
+            int mxX = int(floor(float(baseX + 15 + TD_RAD_FINE - ax0) + maxVx)) + 2;
+            int mxY = int(floor(float(baseY + 15 + TD_RAD_FINE - ay0) + maxVy)) + 2;
+            if ((mxX - tbX < 28) && (mxY - tbY < 28))
+                ldsFl |= 1u;
+            if (okCnt == 9 && minVx == maxVx && minVy == maxVy)
+                ldsFl |= 2u;
+        }
+    }
+    td_wf_tbase[0] = tbX;
+    td_wf_tbase[1] = tbY;
+    td_wf_lds_flags = ldsFl;
+}
+memoryBarrierShared();
+barrier();
+
+uint ldsFlags = td_wf_lds_flags;
+bool useLds = ((ldsFlags & 1u) != 0u);
+bool allSameMv = ((ldsFlags & 2u) != 0u);
+int tileBaseX = td_wf_tbase[0];
+int tileBaseY = td_wf_tbase[1];
+if (useLds)
+{
+    for (int idx = tid; idx < 784; idx += 256)
+    {
+        int ty = idx / 28;
+        int tx = idx - ty * 28;
+        bool bad = false;
+        td_wf_w[ty][tx] = td_wf_fetch_active_safe(ivec2(tileBaseX + tx, tileBaseY + ty), activeRect, bad);
+        td_wf_bad[ty][tx] = bad ? 1u : 0u;
+    }
+}
+memoryBarrierShared();
+barrier();
+
+// 1. Interior 16x16 warp (all 256 threads): writes ref_flags_out directly + populates td_wf_f0[ly+3][lx+3].
+if (validRect)
+{
+    bool pInFrame = (p.x < TD_W && p.y < TD_H);
+    bool pInActive = pInFrame && (p.x >= ax0 && p.x < ax1 && p.y >= ay0 && p.y < ay1);
+    ivec2 sp = ivec2(clamp(p.x, xMin, xMax), clamp(p.y, yMin, yMax));
+    float wVal = 0.0;
+    int wFlags = 0;
+    int wExtraBad = 0;
+    td_wf_warp_pixel(sp, activeRect, wgCx, wgCy, motionSlot, useH, smoothWarp, useLds, allSameMv,
+                     tileBaseX, tileBaseY, pInActive, wVal, wFlags, wExtraBad);
+    td_wf_f0[ly + TD_RAD_FINE][lx + TD_RAD_FINE] = td_is_bad(wVal) ? 0.0 : wVal;
+    if (pInFrame)
+    {
+        uint prevPacked = flagsClear ? 0u : uint(round(texelFetch(ref_flags_in, p, 0).x * 65535.0));
+        uint np = pInActive ? td_pack_ref_flags(prevPacked, refIdx, wFlags | wExtraBad)
+                            : td_pack_ref_flags(prevPacked, refIdx, 0);
+        if (pInActive && wExtraBad != 0)
+            np |= 512u;
+        imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
+    }
+
+    // 2. Border ring of 22x22 tile (228 threads = 484 - 256): warps active-clamped halo pixels into td_wf_f0.
+    if (tid < 228)
+    {
+        int htx = 0;
+        int hty = 0;
+        if (tid < 66)
+        {
+            hty = tid / 22;
+            htx = tid - hty * 22;
+        }
+        else if (tid < 132)
+        {
+            int r = tid - 66;
+            hty = 19 + r / 22;
+            htx = r - (r / 22) * 22;
+        }
+        else if (tid < 180)
+        {
+            int r = tid - 132;
+            hty = 3 + r / 3;
+            htx = r - (r / 3) * 3;
+        }
+        else
+        {
+            int r = tid - 180;
+            hty = 3 + r / 3;
+            htx = 19 + (r - (r / 3) * 3);
+        }
+        ivec2 hsp = ivec2(clamp(baseX - TD_RAD_FINE + htx, xMin, xMax),
+                          clamp(baseY - TD_RAD_FINE + hty, yMin, yMax));
+        float hv = 0.0;
+        int hfl = 0;
+        int hxb = 0;
+        td_wf_warp_pixel(hsp, activeRect, wgCx, wgCy, motionSlot, useH, smoothWarp, useLds, allSameMv,
+                         tileBaseX, tileBaseY, false, hv, hfl, hxb);
+        td_wf_f0[hty][htx] = td_is_bad(hv) ? 0.0 : hv;
+    }
 }
 else
 {
-    bL = td_sample_half_ld3(bands_ld3_in, p, halfActive).x;
+    if (p.x < TD_W && p.y < TD_H)
+    {
+        uint prevPacked = flagsClear ? 0u : uint(round(texelFetch(ref_flags_in, p, 0).x * 65535.0));
+        uint np = td_pack_ref_flags(prevPacked, refIdx, 0);
+        imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
+    }
+    td_wf_f0[ly + TD_RAD_FINE][lx + TD_RAD_FINE] = 0.0;
 }
-float bM = gFine - bL;
-float bH = srcVal - gFine;
-imageStore(bands_mh_out, p, vec4(bM, bH, 0.0, 0.0));
+memoryBarrierShared();
+barrier();
+
+// 3. Emit half-res 2x2 area average directly from LDS (first 8x8 threads, zero global reads!).
+if (lx < 8 && ly < 8)
+{
+    ivec2 hp = ivec2(wgX * 8 + lx, wgY * 8 + ly);
+    if (hp.x < TD_HALF_W && hp.y < TD_HALF_H)
+    {
+        if (!validRect || !validHalf || hp.x < hax0 || hp.x >= hax1 || hp.y < hay0 || hp.y >= hay1)
+        {
+            imageStore(half_area_out, hp, vec4(0.0));
+        }
+        else
+        {
+            int bx = TD_RAD_FINE + 2 * lx;
+            int by = TD_RAD_FINE + 2 * ly;
+            float s00 = td_wf_f0[by][bx];
+            float s10 = td_wf_f0[by][bx + 1];
+            float s01 = td_wf_f0[by + 1][bx];
+            float s11 = td_wf_f0[by + 1][bx + 1];
+            imageStore(half_area_out, hp, vec4((s00 + s10 + s01 + s11) / 4.0, 0.0, 0.0, 0.0));
+        }
+    }
+}
+
+// 4. Horizontal G_fine (22x16) in LDS.
+int tileDim = 16 + 2 * TD_RAD_FINE;
+int hN = tileDim * 16;
+for (int idx = tid; idx < hN; idx += 256)
+{
+    int ty = idx / 16;
+    int tx = idx % 16;
+    int c = tx + TD_RAD_FINE;
+    float acc = 0.0;
+    for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+        acc += TD_TAP_FINE[k + TD_RAD_FINE] * td_wf_f0[ty][c + k];
+    td_wf_f1[ty][tx] = acc;
+}
+memoryBarrierShared();
+barrier();
+
+if (p.x >= TD_W || p.y >= TD_H)
+    return;
+
+if (!validRect || p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
+{
+    imageStore(bands_mh_out, p, vec4(0.0));
+    return;
+}
+
+int cyCenter = ly + TD_RAD_FINE;
+float gFine = 0.0;
+for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+    gFine += TD_TAP_FINE[k + TD_RAD_FINE] * td_wf_f1[cyCenter + k][lx];
+
+float srcVal = td_wf_f0[cyCenter][lx + TD_RAD_FINE];
+imageStore(bands_mh_out, p, vec4(gFine, srcVal - gFine, 0.0, 0.0));
 )GLSL";
 
 	// ---- PASS 1C (SOTA #10 — kBandMemo Shared Current-Frame Low-Band Zero-Duplicate Reuse) ----
@@ -1418,7 +2096,7 @@ float bM = gFine - bL;
 float bH = srcVal - gFine;
 
 #if TD_MEMO_COMPACT
-imageStore(bands_mh_out, p, vec4(bM, bH, 0.0, 0.0));
+imageStore(bands_mh_out, p, vec4(gFine, bH, 0.0, 0.0));
 #elif TD_MEMO_FULL_D3
 int fdCenter = ly + TD_RAD_FDIFF;
 float gLow = 0.0;
@@ -1456,7 +2134,7 @@ vec4 td_fetch_cur_band(ivec2 p, ivec4 halfActive)
 #if TD_COMPACT_BANDS
     vec2 mh = texelFetch(cur_bands_mh, p, 0).xy;
     vec2 ld3 = td_sample_half_ld3(cur_bands_ld3, p, halfActive);
-    return vec4(ld3.x, mh.x, mh.y, ld3.y);
+    return vec4(ld3.x, mh.x - ld3.x, mh.y, ld3.y);
 #else
     return texelFetch(cur_bands, p, 0);
 #endif
@@ -1470,7 +2148,7 @@ vec4 td_fetch_ref_band(int k, ivec2 p, ivec4 halfActive)
     if (k == 0) { mh = texelFetch(ref_bands_mh_0, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_0, p, halfActive); }
     else if (k == 1) { mh = texelFetch(ref_bands_mh_1, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_1, p, halfActive); }
     else { mh = texelFetch(ref_bands_mh_2, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_2, p, halfActive); }
-    return vec4(ld3.x, mh.x, mh.y, ld3.y);
+    return vec4(ld3.x, mh.x - ld3.x, mh.y, ld3.y);
 #else
     if (k == 0) return texelFetch(ref_bands_0, p, 0);
     if (k == 1) return texelFetch(ref_bands_1, p, 0);
@@ -1486,8 +2164,9 @@ float td_band_comp(vec4 v, int b)
 }
 )GLSL";
 
+	// Carbon LOW-2: Stride-65 padding (30 * 65 = 1950 floats, +120 B LDS) eliminates 24-way/32-way LDS bank conflicts!
 	constexpr const char* kPass2CellStatsHeader = R"GLSL(
-shared float td_p2a_sh[1920];
+shared float td_p2a_sh[1950];
 shared uint td_p2a_m[64];
 shared float td_p2a_meta[4];
 
@@ -1625,7 +2304,7 @@ for (int oy = ly; oy < TD_CELL_PX; oy += 4)
         vec2 cMh = texelFetch(cur_bands_mh, p, 0).xy;
         vec2 cLd3 = ldsHalfOk ? td_p2a_ld3_lds_base(0, p, hBase, hLo, hHi)
                               : td_sample_half_ld3(cur_bands_ld3, p, halfActive);
-        vec4 cb = vec4(cLd3.x, cMh.x, cMh.y, cLd3.y);
+        vec4 cb = vec4(cLd3.x, cMh.x - cLd3.x, cMh.y, cLd3.y);
 #else
         vec4 cb = td_fetch_cur_band(p, halfActive);
 #endif
@@ -1657,7 +2336,7 @@ for (int oy = ly; oy < TD_CELL_PX; oy += 4)
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
             vec2 rMh = texelFetch(ref_bands_mh_0, p, 0).xy;
             vec2 rLd = ldsHalfOk ? td_p2a_ld3_lds_base(100, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_0, p, halfActive);
-            rb0 = vec4(rLd.x, rMh.x, rMh.y, rLd.y);
+            rb0 = vec4(rLd.x, rMh.x - rLd.x, rMh.y, rLd.y);
 #else
             rb0 = td_fetch_ref_band(0, p, halfActive);
 #endif
@@ -1672,7 +2351,7 @@ for (int oy = ly; oy < TD_CELL_PX; oy += 4)
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
             vec2 rMh = texelFetch(ref_bands_mh_1, p, 0).xy;
             vec2 rLd = ldsHalfOk ? td_p2a_ld3_lds_base(200, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_1, p, halfActive);
-            rb1 = vec4(rLd.x, rMh.x, rMh.y, rLd.y);
+            rb1 = vec4(rLd.x, rMh.x - rLd.x, rMh.y, rLd.y);
 #else
             rb1 = td_fetch_ref_band(1, p, halfActive);
 #endif
@@ -1687,7 +2366,7 @@ for (int oy = ly; oy < TD_CELL_PX; oy += 4)
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
             vec2 rMh = texelFetch(ref_bands_mh_2, p, 0).xy;
             vec2 rLd = ldsHalfOk ? td_p2a_ld3_lds_base(300, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_2, p, halfActive);
-            rb2 = vec4(rLd.x, rMh.x, rMh.y, rLd.y);
+            rb2 = vec4(rLd.x, rMh.x - rLd.x, rMh.y, rLd.y);
 #else
             rb2 = td_fetch_ref_band(2, p, halfActive);
 #endif
@@ -1730,23 +2409,23 @@ memoryBarrierShared();
 barrier();
 #endif
 
-// Phase 2: 24-thread parallel reduction of ALL 12 diag/focus sums (1 reduction barrier!).
-td_p2a_sh[0 * 64 + tid] = curM2;
-td_p2a_sh[1 * 64 + tid] = curD3_2;
-td_p2a_sh[2 * 64 + tid] = curH2;
-td_p2a_sh[3 * 64 + tid] = activeCnt;
-td_p2a_sh[4 * 64 + tid] = refM2_0;
-td_p2a_sh[5 * 64 + tid] = refD3_0;
-td_p2a_sh[6 * 64 + tid] = refM2_1;
-td_p2a_sh[7 * 64 + tid] = refD3_1;
-td_p2a_sh[8 * 64 + tid] = refM2_2;
-td_p2a_sh[9 * 64 + tid] = refD3_2;
-td_p2a_sh[10 * 64 + tid] = borderCnt;
-td_p2a_sh[11 * 64 + tid] = curOg2;
+// Phase 2: 24-thread parallel reduction of ALL 12 diag/focus sums (1 reduction barrier; stride-65 bank-conflict-free!).
+td_p2a_sh[0 * 65 + tid] = curM2;
+td_p2a_sh[1 * 65 + tid] = curD3_2;
+td_p2a_sh[2 * 65 + tid] = curH2;
+td_p2a_sh[3 * 65 + tid] = activeCnt;
+td_p2a_sh[4 * 65 + tid] = refM2_0;
+td_p2a_sh[5 * 65 + tid] = refD3_0;
+td_p2a_sh[6 * 65 + tid] = refM2_1;
+td_p2a_sh[7 * 65 + tid] = refD3_1;
+td_p2a_sh[8 * 65 + tid] = refM2_2;
+td_p2a_sh[9 * 65 + tid] = refD3_2;
+td_p2a_sh[10 * 65 + tid] = borderCnt;
+td_p2a_sh[11 * 65 + tid] = curOg2;
 #if TD_NEED_LUMA_STATS
-td_p2a_sh[12 * 64 + tid] = activeCnt;
-td_p2a_sh[13 * 64 + tid] = muY;
-td_p2a_sh[14 * 64 + tid] = sY;
+td_p2a_sh[12 * 65 + tid] = activeCnt;
+td_p2a_sh[13 * 65 + tid] = muY;
+td_p2a_sh[14 * 65 + tid] = sY;
 #endif
 td_p2a_m[tid] = badMask;
 memoryBarrierShared();
@@ -1756,7 +2435,7 @@ if (tid < 24)
 {
     int s = tid % 12;
     int halfIdx = tid / 12;
-    int bo = s * 64 + halfIdx * 32;
+    int bo = s * 65 + halfIdx * 32;
     float acc = 0.0;
     for (int i = 0; i < 32; ++i)
         acc += td_p2a_sh[bo + i];
@@ -1777,18 +2456,18 @@ else if (tid < 34)
     float rNY = 0.0, rMuY = 0.0, rSY = 0.0;
     for (int i = 0; i < 8; ++i)
     {
-        float nb = td_p2a_sh[12 * 64 + go + i];
+        float nb = td_p2a_sh[12 * 65 + go + i];
         if (nb > 0.5)
         {
-            float mb = td_p2a_sh[13 * 64 + go + i];
-            float sb = td_p2a_sh[14 * 64 + go + i];
+            float mb = td_p2a_sh[13 * 65 + go + i];
+            float sb = td_p2a_sh[14 * 65 + go + i];
             if (rNY <= 0.5) { rNY = nb; rMuY = mb; rSY = sb; }
             else { float nn = rNY + nb; float d = mb - rMuY; rMuY += d * (nb / nn); rSY += sb + d * d * (rNY * nb / nn); rNY = nn; }
         }
     }
-    td_p2a_sh[12 * 64 + go] = rNY;
-    td_p2a_sh[13 * 64 + go] = rMuY;
-    td_p2a_sh[14 * 64 + go] = rSY;
+    td_p2a_sh[12 * 65 + go] = rNY;
+    td_p2a_sh[13 * 65 + go] = rMuY;
+    td_p2a_sh[14 * 65 + go] = rSY;
 }
 #endif
 memoryBarrierShared();
@@ -1796,18 +2475,18 @@ barrier();
 
 if (tid == 0)
 {
-    float t0  = td_p2a_sh[0 * 64]  + td_p2a_sh[0 * 64 + 32];
-    float t1  = td_p2a_sh[1 * 64]  + td_p2a_sh[1 * 64 + 32];
-    float t2  = td_p2a_sh[2 * 64]  + td_p2a_sh[2 * 64 + 32];
-    float t3  = td_p2a_sh[3 * 64]  + td_p2a_sh[3 * 64 + 32];
-    float t4  = td_p2a_sh[4 * 64]  + td_p2a_sh[4 * 64 + 32];
-    float t5  = td_p2a_sh[5 * 64]  + td_p2a_sh[5 * 64 + 32];
-    float t6  = td_p2a_sh[6 * 64]  + td_p2a_sh[6 * 64 + 32];
-    float t7  = td_p2a_sh[7 * 64]  + td_p2a_sh[7 * 64 + 32];
-    float t8  = td_p2a_sh[8 * 64]  + td_p2a_sh[8 * 64 + 32];
-    float t9  = td_p2a_sh[9 * 64]  + td_p2a_sh[9 * 64 + 32];
-    float t10 = td_p2a_sh[10 * 64] + td_p2a_sh[10 * 64 + 32];
-    float t11 = td_p2a_sh[11 * 64] + td_p2a_sh[11 * 64 + 32];
+    float t0  = td_p2a_sh[0 * 65]  + td_p2a_sh[0 * 65 + 32];
+    float t1  = td_p2a_sh[1 * 65]  + td_p2a_sh[1 * 65 + 32];
+    float t2  = td_p2a_sh[2 * 65]  + td_p2a_sh[2 * 65 + 32];
+    float t3  = td_p2a_sh[3 * 65]  + td_p2a_sh[3 * 65 + 32];
+    float t4  = td_p2a_sh[4 * 65]  + td_p2a_sh[4 * 65 + 32];
+    float t5  = td_p2a_sh[5 * 65]  + td_p2a_sh[5 * 65 + 32];
+    float t6  = td_p2a_sh[6 * 65]  + td_p2a_sh[6 * 65 + 32];
+    float t7  = td_p2a_sh[7 * 65]  + td_p2a_sh[7 * 65 + 32];
+    float t8  = td_p2a_sh[8 * 65]  + td_p2a_sh[8 * 65 + 32];
+    float t9  = td_p2a_sh[9 * 65]  + td_p2a_sh[9 * 65 + 32];
+    float t10 = td_p2a_sh[10 * 65] + td_p2a_sh[10 * 65 + 32];
+    float t11 = td_p2a_sh[11 * 65] + td_p2a_sh[11 * 65 + 32];
     uint totBadMask = td_p2a_m[0] | td_p2a_m[32];
 
     float cellMeanCleanY = 0.0;
@@ -1818,11 +2497,11 @@ if (tid == 0)
         for (int g = 0; g < 8; ++g)
         {
             int go = g * 8;
-            float nb = td_p2a_sh[12 * 64 + go];
+            float nb = td_p2a_sh[12 * 65 + go];
             if (nb > 0.5)
             {
-                float mb = td_p2a_sh[13 * 64 + go];
-                float sb = td_p2a_sh[14 * 64 + go];
+                float mb = td_p2a_sh[13 * 65 + go];
+                float sb = td_p2a_sh[14 * 65 + go];
                 if (tNY <= 0.5) { tNY = nb; tMuY = mb; tSY = sb; }
                 else { float nn = tNY + nb; float d = mb - tMuY; tMuY += d * (nb / nn); tSY += sb + d * d * (tNY * nb / nn); tNY = nn; }
             }
@@ -1905,16 +2584,16 @@ if (tid == 0)
 memoryBarrierShared();
 barrier();
 
-// Phase 3: 24-thread warp-0 parallel 3-band Chan-Pebay reduction (2 barriers total!).
-td_p2a_sh[0 * 64 + tid] = n0;   td_p2a_sh[1 * 64 + tid] = mu0.x; td_p2a_sh[2 * 64 + tid] = mu0.y; td_p2a_sh[3 * 64 + tid] = mu0.z;
-td_p2a_sh[4 * 64 + tid] = sA0.x; td_p2a_sh[5 * 64 + tid] = sA0.y; td_p2a_sh[6 * 64 + tid] = sA0.z; td_p2a_sh[7 * 64 + tid] = sA0.w;
-td_p2a_sh[8 * 64 + tid] = sB0.x; td_p2a_sh[9 * 64 + tid] = sB0.y;
-td_p2a_sh[10 * 64 + tid] = n1;   td_p2a_sh[11 * 64 + tid] = mu1.x; td_p2a_sh[12 * 64 + tid] = mu1.y; td_p2a_sh[13 * 64 + tid] = mu1.z;
-td_p2a_sh[14 * 64 + tid] = sA1.x; td_p2a_sh[15 * 64 + tid] = sA1.y; td_p2a_sh[16 * 64 + tid] = sA1.z; td_p2a_sh[17 * 64 + tid] = sA1.w;
-td_p2a_sh[18 * 64 + tid] = sB1.x; td_p2a_sh[19 * 64 + tid] = sB1.y;
-td_p2a_sh[20 * 64 + tid] = n2;   td_p2a_sh[21 * 64 + tid] = mu2.x; td_p2a_sh[22 * 64 + tid] = mu2.y; td_p2a_sh[23 * 64 + tid] = mu2.z;
-td_p2a_sh[24 * 64 + tid] = sA2.x; td_p2a_sh[25 * 64 + tid] = sA2.y; td_p2a_sh[26 * 64 + tid] = sA2.z; td_p2a_sh[27 * 64 + tid] = sA2.w;
-td_p2a_sh[28 * 64 + tid] = sB2.x; td_p2a_sh[29 * 64 + tid] = sB2.y;
+// Phase 3: 24-thread warp-0 parallel 3-band Chan-Pebay reduction (2 barriers total; stride-65 bank-conflict-free!).
+td_p2a_sh[0 * 65 + tid] = n0;   td_p2a_sh[1 * 65 + tid] = mu0.x; td_p2a_sh[2 * 65 + tid] = mu0.y; td_p2a_sh[3 * 65 + tid] = mu0.z;
+td_p2a_sh[4 * 65 + tid] = sA0.x; td_p2a_sh[5 * 65 + tid] = sA0.y; td_p2a_sh[6 * 65 + tid] = sA0.z; td_p2a_sh[7 * 65 + tid] = sA0.w;
+td_p2a_sh[8 * 65 + tid] = sB0.x; td_p2a_sh[9 * 65 + tid] = sB0.y;
+td_p2a_sh[10 * 65 + tid] = n1;   td_p2a_sh[11 * 65 + tid] = mu1.x; td_p2a_sh[12 * 65 + tid] = mu1.y; td_p2a_sh[13 * 65 + tid] = mu1.z;
+td_p2a_sh[14 * 65 + tid] = sA1.x; td_p2a_sh[15 * 65 + tid] = sA1.y; td_p2a_sh[16 * 65 + tid] = sA1.z; td_p2a_sh[17 * 65 + tid] = sA1.w;
+td_p2a_sh[18 * 65 + tid] = sB1.x; td_p2a_sh[19 * 65 + tid] = sB1.y;
+td_p2a_sh[20 * 65 + tid] = n2;   td_p2a_sh[21 * 65 + tid] = mu2.x; td_p2a_sh[22 * 65 + tid] = mu2.y; td_p2a_sh[23 * 65 + tid] = mu2.z;
+td_p2a_sh[24 * 65 + tid] = sA2.x; td_p2a_sh[25 * 65 + tid] = sA2.y; td_p2a_sh[26 * 65 + tid] = sA2.z; td_p2a_sh[27 * 65 + tid] = sA2.w;
+td_p2a_sh[28 * 65 + tid] = sB2.x; td_p2a_sh[29 * 65 + tid] = sB2.y;
 memoryBarrierShared();
 barrier();
 
@@ -1929,15 +2608,15 @@ if (tid < 24)
     {
         int pIdx = go + i;
         td_cp_merge(rN, rMu, rSA, rSB,
-            td_p2a_sh[(bs + 0) * 64 + pIdx],
-            vec3(td_p2a_sh[(bs + 1) * 64 + pIdx], td_p2a_sh[(bs + 2) * 64 + pIdx], td_p2a_sh[(bs + 3) * 64 + pIdx]),
-            vec4(td_p2a_sh[(bs + 4) * 64 + pIdx], td_p2a_sh[(bs + 5) * 64 + pIdx], td_p2a_sh[(bs + 6) * 64 + pIdx], td_p2a_sh[(bs + 7) * 64 + pIdx]),
-            vec2(td_p2a_sh[(bs + 8) * 64 + pIdx], td_p2a_sh[(bs + 9) * 64 + pIdx]));
+            td_p2a_sh[(bs + 0) * 65 + pIdx],
+            vec3(td_p2a_sh[(bs + 1) * 65 + pIdx], td_p2a_sh[(bs + 2) * 65 + pIdx], td_p2a_sh[(bs + 3) * 65 + pIdx]),
+            vec4(td_p2a_sh[(bs + 4) * 65 + pIdx], td_p2a_sh[(bs + 5) * 65 + pIdx], td_p2a_sh[(bs + 6) * 65 + pIdx], td_p2a_sh[(bs + 7) * 65 + pIdx]),
+            vec2(td_p2a_sh[(bs + 8) * 65 + pIdx], td_p2a_sh[(bs + 9) * 65 + pIdx]));
     }
-    td_p2a_sh[(bs + 0) * 64 + go] = rN;
-    td_p2a_sh[(bs + 1) * 64 + go] = rMu.x; td_p2a_sh[(bs + 2) * 64 + go] = rMu.y; td_p2a_sh[(bs + 3) * 64 + go] = rMu.z;
-    td_p2a_sh[(bs + 4) * 64 + go] = rSA.x; td_p2a_sh[(bs + 5) * 64 + go] = rSA.y; td_p2a_sh[(bs + 6) * 64 + go] = rSA.z; td_p2a_sh[(bs + 7) * 64 + go] = rSA.w;
-    td_p2a_sh[(bs + 8) * 64 + go] = rSB.x; td_p2a_sh[(bs + 9) * 64 + go] = rSB.y;
+    td_p2a_sh[(bs + 0) * 65 + go] = rN;
+    td_p2a_sh[(bs + 1) * 65 + go] = rMu.x; td_p2a_sh[(bs + 2) * 65 + go] = rMu.y; td_p2a_sh[(bs + 3) * 65 + go] = rMu.z;
+    td_p2a_sh[(bs + 4) * 65 + go] = rSA.x; td_p2a_sh[(bs + 5) * 65 + go] = rSA.y; td_p2a_sh[(bs + 6) * 65 + go] = rSA.z; td_p2a_sh[(bs + 7) * 65 + go] = rSA.w;
+    td_p2a_sh[(bs + 8) * 65 + go] = rSB.x; td_p2a_sh[(bs + 9) * 65 + go] = rSB.y;
 }
 memoryBarrierShared();
 barrier();
@@ -1970,10 +2649,10 @@ if (tid < 3)
         {
             int pIdx = g * 8;
             td_cp_merge(tN, tMu, tSA, tSB,
-                td_p2a_sh[(bs + 0) * 64 + pIdx],
-                vec3(td_p2a_sh[(bs + 1) * 64 + pIdx], td_p2a_sh[(bs + 2) * 64 + pIdx], td_p2a_sh[(bs + 3) * 64 + pIdx]),
-                vec4(td_p2a_sh[(bs + 4) * 64 + pIdx], td_p2a_sh[(bs + 5) * 64 + pIdx], td_p2a_sh[(bs + 6) * 64 + pIdx], td_p2a_sh[(bs + 7) * 64 + pIdx]),
-                vec2(td_p2a_sh[(bs + 8) * 64 + pIdx], td_p2a_sh[(bs + 9) * 64 + pIdx]));
+                td_p2a_sh[(bs + 0) * 65 + pIdx],
+                vec3(td_p2a_sh[(bs + 1) * 65 + pIdx], td_p2a_sh[(bs + 2) * 65 + pIdx], td_p2a_sh[(bs + 3) * 65 + pIdx]),
+                vec4(td_p2a_sh[(bs + 4) * 65 + pIdx], td_p2a_sh[(bs + 5) * 65 + pIdx], td_p2a_sh[(bs + 6) * 65 + pIdx], td_p2a_sh[(bs + 7) * 65 + pIdx]),
+                vec2(td_p2a_sh[(bs + 8) * 65 + pIdx], td_p2a_sh[(bs + 9) * 65 + pIdx]));
         }
     }
 
@@ -4035,7 +4714,7 @@ vec4 td_fetch_cur_band(ivec2 p, ivec4 halfActive)
 #if TD_COMPACT_BANDS
     vec2 mh = texelFetch(cur_bands_mh, p, 0).xy;
     vec2 ld3 = td_sample_half_ld3(cur_bands_ld3, p, halfActive);
-    return vec4(ld3.x, mh.x, mh.y, ld3.y);
+    return vec4(ld3.x, mh.x - ld3.x, mh.y, ld3.y);
 #else
     return texelFetch(cur_bands, p, 0);
 #endif
@@ -4049,7 +4728,7 @@ vec4 td_fetch_ref_band(int k, ivec2 p, ivec4 halfActive)
     if (k == 0) { mh = texelFetch(ref_bands_mh_0, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_0, p, halfActive); }
     else if (k == 1) { mh = texelFetch(ref_bands_mh_1, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_1, p, halfActive); }
     else { mh = texelFetch(ref_bands_mh_2, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_2, p, halfActive); }
-    return vec4(ld3.x, mh.x, mh.y, ld3.y);
+    return vec4(ld3.x, mh.x - ld3.x, mh.y, ld3.y);
 #else
     if (k == 0) return texelFetch(ref_bands_0, p, 0);
     if (k == 1) return texelFetch(ref_bands_1, p, 0);
@@ -4196,11 +4875,13 @@ if (enableNbrClamp || needDerivedPxEdge)
 #if TD_COMPACT_BANDS
         vec2 mhS = texelFetch(cur_bands_mh, ivec2(sx, sy), 0).xy;
         if (enableNbrClamp)
-            td_sh_mh[ty][tx] = mhS;
-        if (needDerivedPxEdge)
         {
             float lS = td_sample_half_ld3(cur_bands_ld3, ivec2(sx, sy), halfActive).x;
-            td_p3_clean_y[ty][tx] = lS + mhS.x + mhS.y;
+            td_sh_mh[ty][tx] = vec2(mhS.x - lS, mhS.y);
+        }
+        if (needDerivedPxEdge)
+        {
+            td_p3_clean_y[ty][tx] = mhS.x + mhS.y;
         }
 #else
         vec4 cbS = texelFetch(cur_bands, ivec2(sx, sy), 0);
@@ -4299,9 +4980,9 @@ vec4 anyOwnW = max(ownW0, max(ownW1, ownW2));
 #endif
 
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
-vec2 curMh = enableNbrClamp ? td_sh_mh[ly + 1][lx + 1] : texelFetch(cur_bands_mh, p, 0).xy;
 float curL = ldsHalfOk ? td_p3_sample_l_lds(0, p, hBase, hLo, hHi) : td_sample_half_ld3(cur_bands_ld3, p, halfActive).x;
-vec4 curB = vec4(curL, curMh.x, curMh.y, 0.0);
+vec2 curMh = enableNbrClamp ? td_sh_mh[ly + 1][lx + 1] : texelFetch(cur_bands_mh, p, 0).xy;
+vec4 curB = enableNbrClamp ? vec4(curL, curMh.x, curMh.y, 0.0) : vec4(curL, curMh.x - curL, curMh.y, 0.0);
 #else
 vec4 curB = td_fetch_cur_band(p, halfActive);
 #endif
@@ -4320,7 +5001,7 @@ if (refOk0)
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
     vec2 rMh = texelFetch(ref_bands_mh_0, p, 0).xy;
     float rL = ldsHalfOk ? td_p3_sample_l_lds(100, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_0, p, halfActive).x;
-    refB0 = vec4(rL, rMh.x, rMh.y, 0.0);
+    refB0 = vec4(rL, rMh.x - rL, rMh.y, 0.0);
 #else
     refB0 = td_fetch_ref_band(0, p, halfActive);
 #endif
@@ -4334,7 +5015,7 @@ if (refOk1)
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
     vec2 rMh = texelFetch(ref_bands_mh_1, p, 0).xy;
     float rL = ldsHalfOk ? td_p3_sample_l_lds(200, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_1, p, halfActive).x;
-    refB1 = vec4(rL, rMh.x, rMh.y, 0.0);
+    refB1 = vec4(rL, rMh.x - rL, rMh.y, 0.0);
 #else
     refB1 = td_fetch_ref_band(1, p, halfActive);
 #endif
@@ -4348,7 +5029,7 @@ if (refOk2)
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
     vec2 rMh = texelFetch(ref_bands_mh_2, p, 0).xy;
     float rL = ldsHalfOk ? td_p3_sample_l_lds(300, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_2, p, halfActive).x;
-    refB2 = vec4(rL, rMh.x, rMh.y, 0.0);
+    refB2 = vec4(rL, rMh.x - rL, rMh.y, 0.0);
 #else
     refB2 = td_fetch_ref_band(2, p, halfActive);
 #endif
@@ -5360,6 +6041,632 @@ else
 	inline std::string BuildPass4FusedApplyGuardBody()
 	{
 		return std::string(kPass4FusedApplyGuardPart1) + kPass4FusedApplyGuardPart2;
+	}
+
+	// ---- PASS 3+4 FUSED (Luma Fusion 1 — TD-GPU-OPT-2): Fused Blend + Bound + Recompose + Layer-4 TdGuardPort ----
+	// Used whenever (!runDctPocs && TD_CELL_PX == 16 && !enableNeighborhoodSoftClamp && !enableRegionTailoring).
+	// Computes 22x22 blended deltas directly in LDS registers and feeds G_fine halo + TdGuardPort in ONE dispatch,
+	// eliminating the full-4K delta_out write + 22x22 halo read round-trip! Strictly <= 15 SRVs, 5 UAVs, 15.3 KB LDS.
+	constexpr const char* kPass34FusedBlendGuardHeader = R"GLSL(
+shared vec4 td_p34_cw[27];
+shared vec4 td_p34_cd[27];
+shared float td_p34_step[9];
+#if TD_COMPACT_BANDS
+shared float td_p34_l[576];
+#endif
+shared float td_sh_r[(16 + 2 * TD_RAD_FINE) * (16 + 2 * TD_RAD_FINE)];
+shared float td_sh_d[(16 + 2 * TD_RAD_FINE) * (16 + 2 * TD_RAD_FINE)];
+shared float td_sh_g[(16 + 2 * TD_RAD_FINE) * (16 + 2 * TD_RAD_FINE)];
+shared float td_sh_rh[(16 + 2 * TD_RAD_FINE) * 16];
+shared float td_sh_dh[(16 + 2 * TD_RAD_FINE) * 16];
+shared float td_sh_gh[(16 + 2 * TD_RAD_FINE) * 16];
+shared float td_sh_raw_r[256];
+shared float td_sh_raw_c[256];
+shared float td_sh_cov2[256];
+shared uint td_sh_gbits[256];
+shared float td_sh_gout[2];
+
+float td_p34_huber_taper(float diffSq, float diagC)
+{
+    float denom = max(diagC, TD_NUM_FLOOR);
+    float r = diffSq / denom;
+    return (r <= TD_HUBER_KNEE_SQ) ? 1.0 : (TD_HUBER_KNEE_SQ / r);
+}
+
+float td_p34_accum_ref(bool activeRef, float ownWk, float curV, float refV,
+                       float c00, float c10, float c01, float c11,
+                       float q00v, float q10v, float q01v, float q11v,
+                       float a00, float a10, float a01, float a11, bool enableHuber)
+{
+    if (!activeRef || ownWk <= 0.0)
+        return 0.0;
+    float diff = curV - refV;
+    if (td_is_bad(diff))
+        return 0.0;
+    if (td_is_bad(c00) || td_is_bad(c10) || td_is_bad(c01) || td_is_bad(c11))
+        return 0.0;
+    if (enableHuber && (td_is_bad(q00v) || td_is_bad(q10v) || td_is_bad(q01v) || td_is_bad(q11v)))
+        return 0.0;
+    float t00 = c00, t10 = c10, t01 = c01, t11 = c11;
+    if (enableHuber)
+    {
+        float diffSq = diff * diff;
+        t00 *= td_p34_huber_taper(diffSq, q00v);
+        t10 *= td_p34_huber_taper(diffSq, q10v);
+        t01 *= td_p34_huber_taper(diffSq, q01v);
+        t11 *= td_p34_huber_taper(diffSq, q11v);
+    }
+    float wEff = a00 * t00 + a10 * t10 + a01 * t01 + a11 * t11;
+    return (wEff > 0.0) ? (-wEff * diff) : 0.0;
+}
+
+#if TD_COMPACT_BANDS
+float td_p34_sample_l_lds(int baseOff, ivec2 p, ivec2 hBase, ivec2 hLo, ivec2 hHi)
+{
+    vec2 hc = clamp((vec2(p) - vec2(0.5)) / 2.0, vec2(hLo), vec2(hHi));
+    ivec2 i0 = ivec2(floor(hc));
+    ivec2 i1 = min(hHi, i0 + ivec2(1));
+    int rx0 = clamp(i0.x - hBase.x, 0, 11); int rx1 = clamp(i1.x - hBase.x, 0, 11);
+    int ry0 = clamp(i0.y - hBase.y, 0, 11); int ry1 = clamp(i1.y - hBase.y, 0, 11);
+    vec2 f = hc - vec2(i0);
+    float v00 = td_p34_l[baseOff + ry0 * 12 + rx0];
+    float v10 = td_p34_l[baseOff + ry0 * 12 + rx1];
+    float v01 = td_p34_l[baseOff + ry1 * 12 + rx0];
+    float v11 = td_p34_l[baseOff + ry1 * 12 + rx1];
+    float top = v00 + (v10 - v00) * f.x;
+    float bot = v01 + (v11 - v01) * f.x;
+    return top * (1.0 - f.y) + bot * f.y;
+}
+#endif
+
+void td_p34_eval_delta(ivec2 sp, int baseX, int baseY, int wgCx, int wgCy, int K,
+                       ivec4 halfActive, ivec2 hBase, ivec2 hLo, ivec2 hHi, bool ldsHalfOk,
+                       bool enableHuber, bool enableEdgeAware, bool enableDeband, bool enableJointBound,
+                       out float outDelta, out float outBoundEng)
+{
+    outDelta = 0.0;
+    outBoundEng = 0.0;
+    int ncx = min(TD_CW - 1, sp.x / 16);
+    int ncy = min(TD_CH - 1, sp.y / 16);
+    float gx = (float(sp.x) + 0.5) / 16.0 - 0.5;
+    float gy = (float(sp.y) + 0.5) / 16.0 - 0.5;
+    int x0 = clamp(int(floor(gx)), 0, TD_CW - 1);
+    int y0 = clamp(int(floor(gy)), 0, TD_CH - 1);
+    int x1 = min(TD_CW - 1, x0 + 1);
+    int y1 = min(TD_CH - 1, y0 + 1);
+    float tx = clamp(gx - float(x0), 0.0, 1.0);
+    float ty = clamp(gy - float(y0), 0.0, 1.0);
+
+    bool in3x3 = (ncx >= wgCx - 1 && ncx <= wgCx + 1 && ncy >= wgCy - 1 && ncy <= wgCy + 1 &&
+                  x0 >= wgCx - 1 && x1 <= wgCx + 1 && y0 >= wgCy - 1 && y1 <= wgCy + 1);
+    int qOwn = in3x3 ? ((ncy - wgCy + 1) * 3 + (ncx - wgCx + 1)) : 4;
+    int q00 = in3x3 ? ((y0 - wgCy + 1) * 3 + (x0 - wgCx + 1)) : 0;
+    int q10 = in3x3 ? ((y0 - wgCy + 1) * 3 + (x1 - wgCx + 1)) : 0;
+    int q01 = in3x3 ? ((y1 - wgCy + 1) * 3 + (x0 - wgCx + 1)) : 0;
+    int q11 = in3x3 ? ((y1 - wgCy + 1) * 3 + (x1 - wgCx + 1)) : 0;
+
+    vec4 ownW0 = in3x3 ? td_p34_cw[qOwn]      : texelFetch(cell_weights, ivec2(ncx, ncy), 0);
+    vec4 ownW1 = in3x3 ? td_p34_cw[9 + qOwn]  : texelFetch(cell_weights, ivec2(TD_CW + ncx, ncy), 0);
+    vec4 ownW2 = in3x3 ? td_p34_cw[18 + qOwn] : texelFetch(cell_weights, ivec2(2 * TD_CW + ncx, ncy), 0);
+    vec4 anyOwnW = max(ownW0, max(ownW1, ownW2));
+    if (!(anyOwnW.x > 0.0 || anyOwnW.y > 0.0 || anyOwnW.z > 0.0))
+        return;
+
+    uint packedFl = uint(round(texelFetch(ref_flags, sp, 0).x * 65535.0));
+    bool refOk0 = (K > 0) && ((td_unpack_ref_flags(packedFl, 0) & 1) != 0) && (anyOwnW.x > 0.0);
+    bool refOk1 = (K > 1) && ((td_unpack_ref_flags(packedFl, 1) & 1) != 0) && (anyOwnW.y > 0.0);
+    bool refOk2 = (K > 2) && ((td_unpack_ref_flags(packedFl, 2) & 1) != 0) && (anyOwnW.z > 0.0);
+    if (!refOk0 && !refOk1 && !refOk2)
+        return;
+
+#if TD_COMPACT_BANDS
+    bool useHalfLds = ldsHalfOk &&
+                      (sp.x >= baseX - TD_RAD_FINE && sp.x <= baseX + 15 + TD_RAD_FINE &&
+                       sp.y >= baseY - TD_RAD_FINE && sp.y <= baseY + 15 + TD_RAD_FINE);
+    vec2 curMh = texelFetch(cur_bands_mh, sp, 0).xy;
+    float curL = useHalfLds ? td_p34_sample_l_lds(0, sp, hBase, hLo, hHi)
+                            : td_sample_half_ld3(cur_bands_ld3, sp, halfActive).x;
+    vec4 curB = vec4(curL, curMh.x - curL, curMh.y, 0.0);
+    vec4 refB0 = vec4(0.0), refB1 = vec4(0.0), refB2 = vec4(0.0);
+    if (refOk0)
+    {
+        vec2 rMh = texelFetch(ref_bands_mh_0, sp, 0).xy;
+        float rL = useHalfLds ? td_p34_sample_l_lds(144, sp, hBase, hLo, hHi)
+                              : td_sample_half_ld3(ref_bands_ld3_0, sp, halfActive).x;
+        refB0 = vec4(rL, rMh.x - rL, rMh.y, 0.0);
+    }
+    if (refOk1)
+    {
+        vec2 rMh = texelFetch(ref_bands_mh_1, sp, 0).xy;
+        float rL = useHalfLds ? td_p34_sample_l_lds(288, sp, hBase, hLo, hHi)
+                              : td_sample_half_ld3(ref_bands_ld3_1, sp, halfActive).x;
+        refB1 = vec4(rL, rMh.x - rL, rMh.y, 0.0);
+    }
+    if (refOk2)
+    {
+        vec2 rMh = texelFetch(ref_bands_mh_2, sp, 0).xy;
+        float rL = useHalfLds ? td_p34_sample_l_lds(432, sp, hBase, hLo, hHi)
+                              : td_sample_half_ld3(ref_bands_ld3_2, sp, halfActive).x;
+        refB2 = vec4(rL, rMh.x - rL, rMh.y, 0.0);
+    }
+#else
+    vec4 curB = texelFetch(cur_bands, sp, 0);
+    vec4 refB0 = refOk0 ? texelFetch(ref_bands_0, sp, 0) : vec4(0.0);
+    vec4 refB1 = refOk1 ? texelFetch(ref_bands_1, sp, 0) : vec4(0.0);
+    vec4 refB2 = refOk2 ? texelFetch(ref_bands_2, sp, 0) : vec4(0.0);
+#endif
+
+    float a00 = (1.0 - tx) * (1.0 - ty);
+    float a10 = tx * (1.0 - ty);
+    float a01 = (1.0 - tx) * ty;
+    float a11 = tx * ty;
+    if (enableEdgeAware)
+    {
+        float cellStepScale = in3x3 ? td_p34_step[qOwn] : 1.0;
+        if (!in3x3 && u_cell_prior_has_step_scale > 0.5)
+        {
+            float rs = texelFetch(cell_prior, ivec2(ncx, ncy), 0).z;
+            cellStepScale = (td_is_bad(rs) || !(rs > 0.0)) ? 0.0 : clamp(rs, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX);
+        }
+        float curCleanY = curB.x + curB.y + curB.z;
+        float a2PxVar = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScale * cellStepScale) : 0.0;
+        float effNoiseFloor = sqrt(max(1.0 / 12.0, a2PxVar));
+        float m00 = in3x3 ? td_p34_cw[q00].w : texelFetch(cell_weights, ivec2(x0, y0), 0).w;
+        float m10 = in3x3 ? td_p34_cw[q10].w : texelFetch(cell_weights, ivec2(x1, y0), 0).w;
+        float m01 = in3x3 ? td_p34_cw[q01].w : texelFetch(cell_weights, ivec2(x0, y1), 0).w;
+        float m11 = in3x3 ? td_p34_cw[q11].w : texelFetch(cell_weights, ivec2(x1, y1), 0).w;
+        float s00 = max(in3x3 ? td_p34_cd[q00].w : texelFetch(cell_diag_c, ivec2(x0, y0), 0).w, effNoiseFloor);
+        float s10 = max(in3x3 ? td_p34_cd[q10].w : texelFetch(cell_diag_c, ivec2(x1, y0), 0).w, effNoiseFloor);
+        float s01 = max(in3x3 ? td_p34_cd[q01].w : texelFetch(cell_diag_c, ivec2(x0, y1), 0).w, effNoiseFloor);
+        float s11 = max(in3x3 ? td_p34_cd[q11].w : texelFetch(cell_diag_c, ivec2(x1, y1), 0).w, effNoiseFloor);
+        float dL00 = curCleanY - m00, dL10 = curCleanY - m10, dL01 = curCleanY - m01, dL11 = curCleanY - m11;
+        float inv2S00 = 0.5 / (s00 * s00), inv2S10 = 0.5 / (s10 * s10), inv2S01 = 0.5 / (s01 * s01), inv2S11 = 0.5 / (s11 * s11);
+        float sw00 = a00 * exp(-dL00 * dL00 * inv2S00);
+        float sw10 = a10 * exp(-dL10 * dL10 * inv2S10);
+        float sw01 = a01 * exp(-dL01 * dL01 * inv2S01);
+        float sw11 = a11 * exp(-dL11 * dL11 * inv2S11);
+        float swSum = sw00 + sw10 + sw01 + sw11;
+        if (swSum > TD_NUM_FLOOR)
+        {
+            float invSw = 1.0 / swSum;
+            a00 = sw00 * invSw; a10 = sw10 * invSw; a01 = sw01 * invSw; a11 = sw11 * invSw;
+        }
+    }
+
+    float cellU0 = max(0.0, ownW1.w);
+    float cellU1 = max(0.0, ownW2.w);
+    float cellU2 = max(0.0, in3x3 ? td_p34_cd[18 + qOwn].w : texelFetch(cell_diag_c, ivec2(2 * TD_CW + ncx, ncy), 0).w);
+    float cellDebandBoundL = max(0.0, in3x3 ? td_p34_cd[9 + qOwn].w : texelFetch(cell_diag_c, ivec2(TD_CW + ncx, ncy), 0).w);
+    if (enableDeband && cellDebandBoundL > 0.0 && u_pixel_bound_kappa > TD_NUM_FLOOR)
+    {
+        float debRatio = cellDebandBoundL / u_pixel_bound_kappa;
+        cellU0 = max(cellU0, debRatio * debRatio);
+    }
+
+    float totalDelta = 0.0;
+    float sumBandVar = cellU0 + cellU1 + cellU2;
+    float boundEngaged = 0.0;
+    for (int b = 0; b < 3; ++b)
+    {
+        vec4 ownW = (b == 0) ? ownW0 : ((b == 1) ? ownW1 : ownW2);
+        if (!(ownW.x > 0.0 || ownW.y > 0.0 || ownW.z > 0.0))
+            continue;
+        float curV = (b == 0) ? curB.x : ((b == 1) ? curB.y : curB.z);
+        float r0v  = (b == 0) ? refB0.x : ((b == 1) ? refB0.y : refB0.z);
+        float r1v  = (b == 0) ? refB1.x : ((b == 1) ? refB1.y : refB1.z);
+        float r2v  = (b == 0) ? refB2.x : ((b == 1) ? refB2.y : refB2.z);
+        int bOff = b * 9;
+        vec4 w00 = in3x3 ? td_p34_cw[bOff + q00] : texelFetch(cell_weights, ivec2(b * TD_CW + x0, y0), 0);
+        vec4 w10 = in3x3 ? td_p34_cw[bOff + q10] : texelFetch(cell_weights, ivec2(b * TD_CW + x1, y0), 0);
+        vec4 w01 = in3x3 ? td_p34_cw[bOff + q01] : texelFetch(cell_weights, ivec2(b * TD_CW + x0, y1), 0);
+        vec4 w11 = in3x3 ? td_p34_cw[bOff + q11] : texelFetch(cell_weights, ivec2(b * TD_CW + x1, y1), 0);
+        vec4 d00 = in3x3 ? td_p34_cd[bOff + q00] : texelFetch(cell_diag_c, ivec2(b * TD_CW + x0, y0), 0);
+        vec4 d10 = in3x3 ? td_p34_cd[bOff + q10] : texelFetch(cell_diag_c, ivec2(b * TD_CW + x1, y0), 0);
+        vec4 d01 = in3x3 ? td_p34_cd[bOff + q01] : texelFetch(cell_diag_c, ivec2(b * TD_CW + x0, y1), 0);
+        vec4 d11 = in3x3 ? td_p34_cd[bOff + q11] : texelFetch(cell_diag_c, ivec2(b * TD_CW + x1, y1), 0);
+
+        float bandDelta = 0.0;
+        bandDelta += td_p34_accum_ref(refOk0, ownW.x, curV, r0v, w00.x, w10.x, w01.x, w11.x,
+                                      d00.x, d10.x, d01.x, d11.x, a00, a10, a01, a11, enableHuber);
+        bandDelta += td_p34_accum_ref(refOk1, ownW.y, curV, r1v, w00.y, w10.y, w01.y, w11.y,
+                                      d00.y, d10.y, d01.y, d11.y, a00, a10, a01, a11, enableHuber);
+        bandDelta += td_p34_accum_ref(refOk2, ownW.z, curV, r2v, w00.z, w10.z, w01.z, w11.z,
+                                      d00.z, d10.z, d01.z, d11.z, a00, a10, a01, a11, enableHuber);
+        if (abs(bandDelta) > 0.0)
+        {
+            float bandVar = (b == 0) ? cellU0 : ((b == 1) ? cellU1 : cellU2);
+            float bound = u_pixel_bound_kappa * sqrt(max(0.0, bandVar));
+            boundEngaged = 1.0;
+            bandDelta = clamp(bandDelta, -bound, bound);
+        }
+        totalDelta += bandDelta;
+    }
+
+    if (enableJointBound && abs(totalDelta) > 0.0)
+    {
+        float jointBound = u_pixel_bound_kappa * sqrt(max(0.0, sumBandVar));
+        boundEngaged = 1.0;
+        totalDelta = clamp(totalDelta, -jointBound, jointBound);
+    }
+
+    outDelta = td_is_bad(totalDelta) ? 0.0 : totalDelta;
+    outBoundEng = boundEngaged;
+}
+)GLSL";
+
+	constexpr const char* kPass34FusedBlendGuardPart1 = R"GLSL(
+ivec2 cell = ivec2(gl_WorkGroupID.xy);
+if (cell.x >= TD_CW || cell.y >= TD_CH)
+    return;
+
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+int tid = ly * 16 + lx;
+int wgCx = cell.x;
+int wgCy = cell.y;
+int baseX = wgCx * 16;
+int baseY = wgCy * 16;
+ivec2 p = ivec2(baseX + lx, baseY + ly);
+
+int K = int(round(u_k));
+int ax0 = int(round(u_ax0));
+int ay0 = int(round(u_ay0));
+int ax1 = int(round(u_ax1));
+int ay1 = int(round(u_ay1));
+ivec4 halfActive = ivec4(int(round(u_hax0)), int(round(u_hay0)), int(round(u_hax1)), int(round(u_hay1)));
+bool validRect = (ax1 > ax0) && (ay1 > ay0);
+int xMin = ax0;
+int xMax = max(ax0, ax1 - 1);
+int yMin = ay0;
+int yMax = max(ay0, ay1 - 1);
+bool hasCleanSplit = (u_has_clean_split > 0.5);
+bool sameCleanRec = (u_same_clean_rec > 0.5);
+bool shadowMode = (u_shadow_mode > 0.5);
+bool deferSmoothGuard = (u_smooth_guard > 0.5);
+bool enableHuber = (u_enable_per_corner_huber > 0.5);
+bool enableEdgeAware = (u_enable_edge_aware_upsample > 0.5);
+bool enableDeband = (u_enable_region_deband > 0.5);
+bool enableJointBound = (u_enable_joint_bound > 0.5);
+bool writeDelta = (u_write_delta > 0.5);
+bool writeOutClean = (u_write_out_clean > 0.5);
+bool cellIsFace = (texelFetch(cell_focus, cell, 0).w > 0.5);
+
+// Cooperative load of 3x3 cell weights, diag_c, stepScale + compact 12x12 half-res L tile covering 22x22 halo.
+if (tid < 27)
+{
+    int bIdx = tid / 9;
+    int q = tid - bIdx * 9;
+    int dx = (q % 3) - 1;
+    int dy = (q / 3) - 1;
+    int ncx = clamp(wgCx + dx, 0, TD_CW - 1);
+    int ncy = clamp(wgCy + dy, 0, TD_CH - 1);
+    td_p34_cw[tid] = texelFetch(cell_weights, ivec2(bIdx * TD_CW + ncx, ncy), 0);
+    td_p34_cd[tid] = texelFetch(cell_diag_c, ivec2(bIdx * TD_CW + ncx, ncy), 0);
+    if (bIdx == 0)
+    {
+        float rawSc = (u_cell_prior_has_step_scale > 0.5) ? texelFetch(cell_prior, ivec2(ncx, ncy), 0).z : 1.0;
+        td_p34_step[q] = (td_is_bad(rawSc) || !(rawSc > 0.0)) ? 0.0 : clamp(rawSc, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX);
+    }
+}
+
+ivec2 hLo = halfActive.xy;
+ivec2 hHi = max(halfActive.xy, halfActive.zw - ivec2(1));
+ivec2 hBase = ivec2(wgCx * 8 - 2, wgCy * 8 - 2);
+bool ldsHalfOk = false;
+#if TD_COMPACT_BANDS
+ldsHalfOk = (hBase.x <= hHi.x && hBase.x + 11 >= hLo.x && hBase.y <= hHi.y && hBase.y + 11 >= hLo.y);
+if (ldsHalfOk && tid < 144)
+{
+    int hy = tid / 12;
+    int hx = tid - hy * 12;
+    ivec2 hq = clamp(ivec2(hBase.x + hx, hBase.y + hy), hLo, hHi);
+    td_p34_l[tid] = texelFetch(cur_bands_ld3, hq, 0).x;
+    if (K > 0) td_p34_l[144 + tid] = texelFetch(ref_bands_ld3_0, hq, 0).x;
+    if (K > 1) td_p34_l[288 + tid] = texelFetch(ref_bands_ld3_1, hq, 0).x;
+    if (K > 2) td_p34_l[432 + tid] = texelFetch(ref_bands_ld3_2, hq, 0).x;
+}
+#endif
+memoryBarrierShared();
+barrier();
+
+int tileDim = 16 + 2 * TD_RAD_FINE;
+int tileN = tileDim * tileDim;
+int hN = tileDim * 16;
+
+int dcSx = validRect ? clamp(baseX, xMin, xMax) : clamp(baseX, 0, TD_W - 1);
+int dcSy = validRect ? clamp(baseY, yMin, yMax) : clamp(baseY, 0, TD_H - 1);
+float rawDcAnchor = texelFetch(rec_y, ivec2(dcSx, dcSy), 0).x;
+float dcAnchor = td_is_bad(rawDcAnchor) ? 0.0 : rawDcAnchor;
+
+// Step 1: Cooperative 22x22 fused blend + (recY, candOut, ownGrain) load directly into LDS!
+for (int idx = tid; idx < tileN; idx += 256)
+{
+    int ty = idx / tileDim;
+    int tx = idx - ty * tileDim;
+    int gx = baseX - TD_RAD_FINE + tx;
+    int gy = baseY - TD_RAD_FINE + ty;
+    int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
+    int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
+    ivec2 sp = ivec2(sx, sy);
+    float rawRv = texelFetch(rec_y, sp, 0).x;
+    float rawCv = sameCleanRec ? rawRv : texelFetch(cur_clean, sp, 0).x;
+    float rawDv = 0.0;
+    float rawDEng = 0.0;
+    if (validRect)
+    {
+        td_p34_eval_delta(sp, baseX, baseY, wgCx, wgCy, K, halfActive, hBase, hLo, hHi, ldsHalfOk,
+                          enableHuber, enableEdgeAware, enableDeband, enableJointBound, rawDv, rawDEng);
+    }
+    bool badAny = td_is_bad(rawRv) || td_is_bad(rawCv) || td_is_bad(rawDv);
+    float rv = td_is_bad(rawRv) ? 0.0 : rawRv;
+    float cv = td_is_bad(rawCv) ? 0.0 : rawCv;
+    float dv = badAny ? 0.0 : rawDv;
+    float og = rv - cv;
+    float rShifted = rv - dcAnchor;
+    float candShifted = (badAny || dv == 0.0) ? rShifted : (((cv - dcAnchor) + dv) + og);
+    td_sh_r[idx] = rShifted;
+    td_sh_d[idx] = candShifted;
+    if (!sameCleanRec)
+        td_sh_g[idx] = og;
+    if (tx >= TD_RAD_FINE && tx < TD_RAD_FINE + 16 && ty >= TD_RAD_FINE && ty < TD_RAD_FINE + 16)
+    {
+        int ix = (ty - TD_RAD_FINE) * 16 + (tx - TD_RAD_FINE);
+        td_sh_raw_r[ix] = rawRv;
+        if (!sameCleanRec)
+            td_sh_raw_c[ix] = rawCv;
+        td_sh_cov2[ix] = rawDv;
+        td_sh_gbits[ix] = floatBitsToUint(rawDEng);
+    }
+}
+memoryBarrierShared();
+barrier();
+
+// Step 2: Separable horizontal G_fine across 22x16 strip in LDS.
+for (int idx = tid; idx < hN; idx += 256)
+{
+    int ty = idx / 16;
+    int tx = idx - ty * 16;
+    int rowBase = ty * tileDim + (tx + TD_RAD_FINE);
+    float ar = 0.0, ad = 0.0, ag = 0.0;
+    for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+    {
+        float w = TD_TAP_FINE[k + TD_RAD_FINE];
+        ar += w * td_sh_r[rowBase + k];
+        ad += w * td_sh_d[rowBase + k];
+        if (!sameCleanRec)
+            ag += w * td_sh_g[rowBase + k];
+    }
+    td_sh_rh[idx] = ar;
+    td_sh_dh[idx] = ad;
+    if (!sameCleanRec)
+        td_sh_gh[idx] = ag;
+}
+memoryBarrierShared();
+barrier();
+
+float sumOgE = 0.0, sumOgFineE = 0.0, sumInFineE = 0.0, sumOutFineE = 0.0;
+float sumInCovOwn = 0.0, sumOutCovOwn = 0.0, sumCnt = 0.0;
+uint pxBits = 0u;
+
+float regRecY = 0.0;
+float regCandOut = 0.0;
+float regFineDiff = 0.0;
+bool regInCellPx = (p.x < TD_W) && (p.y < TD_H);
+bool regInActive = regInCellPx && validRect && (p.x >= ax0) && (p.x < ax1) && (p.y >= ay0) && (p.y < ay1);
+
+if (regInCellPx)
+{
+    float rawRec = regInActive ? td_sh_raw_r[tid] : texelFetch(rec_y, p, 0).x;
+    float rawClean = sameCleanRec ? rawRec : (regInActive ? td_sh_raw_c[tid] : texelFetch(cur_clean, p, 0).x);
+    bool badRecOrClean = td_is_bad(rawRec) || td_is_bad(rawClean);
+    if (badRecOrClean)
+        pxBits |= 4u;
+    float recV = td_is_bad(rawRec) ? 0.0 : rawRec;
+    float cleanV = td_is_bad(rawClean) ? 0.0 : rawClean;
+    if (!regInActive || cellIsFace)
+    {
+        if (writeDelta)
+            imageStore(delta_out, p, vec4(0.0));
+        if (writeOutClean)
+            imageStore(out_clean, p, vec4(cleanV, 0.0, 0.0, 0.0));
+        imageStore(carry_clean, p, vec4(cleanV, 0.0, 0.0, 0.0));
+        if (deferSmoothGuard && !shadowMode)
+            imageStore(out_y, p, vec4(recV, 0.0, 0.0, 0.0));
+        regRecY = recV;
+        regCandOut = recV;
+        regFineDiff = 0.0;
+    }
+    else
+    {
+        int centerIdx = (ly + TD_RAD_FINE) * tileDim + (lx + TD_RAD_FINE);
+        float rvShifted = td_sh_r[centerIdx];
+        float candShifted = td_sh_d[centerIdx];
+        float og = sameCleanRec ? 0.0 : td_sh_g[centerIdx];
+        float dVal = td_sh_cov2[tid];
+        float dEng = uintBitsToFloat(td_sh_gbits[tid]);
+        if (writeDelta)
+            imageStore(delta_out, p, vec4(dVal, dEng, 0.0, 0.0));
+        int dFlags = int(round(dEng));
+        bool badD = td_is_bad(dVal) || ((dFlags & 2) != 0);
+        if (badD)
+            pxBits |= 4u;
+        if ((dFlags & 1) != 0)
+            pxBits |= 8u;
+        float dRaw = (badRecOrClean || badD) ? 0.0 : dVal;
+        float newClean = cleanV + dRaw;
+        float carryCleanVal = (u_fade_keep < 1.0)
+            ? (u_fade_keep * newClean + (1.0 - u_fade_keep) * cleanV)
+            : newClean;
+
+        if (writeOutClean)
+            imageStore(out_clean, p, vec4(newClean, 0.0, 0.0, 0.0));
+        imageStore(carry_clean, p, vec4(carryCleanVal, 0.0, 0.0, 0.0));
+
+        float gr = 0.0, gd = 0.0, gg = 0.0;
+        int cyBase = ly + TD_RAD_FINE;
+        for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+        {
+            float w = TD_TAP_FINE[k + TD_RAD_FINE];
+            int hIdx = (cyBase + k) * 16 + lx;
+            gr += w * td_sh_rh[hIdx];
+            gd += w * td_sh_dh[hIdx];
+            if (!sameCleanRec)
+                gg += w * td_sh_gh[hIdx];
+        }
+
+        float inFullH = rvShifted - gr;
+        float outFullH = candShifted - gd;
+        float ogFineH = sameCleanRec ? 0.0 : (og - gg);
+
+        sumOgE = og * og;
+        if (hasCleanSplit)
+        {
+            sumOgFineE = ogFineH * ogFineH;
+            sumInCovOwn = inFullH * ogFineH;
+            sumOutCovOwn = outFullH * ogFineH;
+        }
+        sumInFineE = inFullH * inFullH;
+        sumOutFineE = outFullH * outFullH;
+        sumCnt = 1.0;
+
+        float candOutVal = (badRecOrClean || badD || dRaw == 0.0) ? recV : (newClean + (recV - cleanV));
+        float fineDiffVal = inFullH - outFullH;
+        if (deferSmoothGuard && !shadowMode)
+            imageStore(out_y, p, vec4(candOutVal, fineDiffVal, 0.0, 0.0));
+        regRecY = recV;
+        regCandOut = candOutVal;
+        regFineDiff = fineDiffVal;
+    }
+}
+memoryBarrierShared();
+barrier();
+)GLSL";
+
+	constexpr const char* kPass34FusedBlendGuardPart2 = R"GLSL(
+// Step 4: 2-stage 16-way LDS reduction (2 barriers!).
+td_sh_r[tid]    = sumOgE;
+td_sh_d[tid]    = sumOgFineE;
+td_sh_g[tid]    = sumInFineE;
+td_sh_rh[tid]   = sumOutFineE;
+td_sh_dh[tid]   = sumCnt;
+td_sh_gh[tid]   = sumInCovOwn;
+td_sh_cov2[tid] = sumOutCovOwn;
+td_sh_gbits[tid] = pxBits;
+memoryBarrierShared();
+barrier();
+
+if (lx == 0)
+{
+    int ro = ly * 16;
+    float s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0, s5 = 0.0, s6 = 0.0;
+    uint mb = 0u;
+    for (int i = 0; i < 16; ++i)
+    {
+        s0 += td_sh_r[ro + i]; s1 += td_sh_d[ro + i]; s2 += td_sh_g[ro + i];
+        s3 += td_sh_rh[ro + i]; s4 += td_sh_dh[ro + i]; s5 += td_sh_gh[ro + i];
+        s6 += td_sh_cov2[ro + i]; mb |= td_sh_gbits[ro + i];
+    }
+    td_sh_r[ro] = s0; td_sh_d[ro] = s1; td_sh_g[ro] = s2; td_sh_rh[ro] = s3;
+    td_sh_dh[ro] = s4; td_sh_gh[ro] = s5; td_sh_cov2[ro] = s6; td_sh_gbits[ro] = mb;
+}
+memoryBarrierShared();
+barrier();
+
+if (tid == 0)
+{
+    float totOgE = 0.0, totOgFineE = 0.0, totInFineE = 0.0, totOutFineE = 0.0;
+    float totCnt = 0.0, totInCovOwn = 0.0, totOutCovOwn = 0.0;
+    uint totBits = 0u;
+    for (int r = 0; r < 16; ++r)
+    {
+        int ro = r * 16;
+        totOgE += td_sh_r[ro]; totOgFineE += td_sh_d[ro]; totInFineE += td_sh_g[ro];
+        totOutFineE += td_sh_rh[ro]; totCnt += td_sh_dh[ro];
+        totInCovOwn += td_sh_gh[ro]; totOutCovOwn += td_sh_cov2[ro]; totBits |= td_sh_gbits[ro];
+    }
+
+    float addBack = 0.0;
+    int gFlags = int(totBits & 12u);
+
+    if (!cellIsFace && totCnt > 0.5)
+    {
+        float rawGv = texelFetch(cell_prior, cell, 0).x;
+        float cellRetGVar = (!td_is_bad(rawGv) && rawGv > 0.0) ? rawGv : 0.0;
+        float invC = 1.0 / totCnt;
+
+        if (!hasCleanSplit || totOgE * invC > TD_NUM_FLOOR || cellRetGVar > TD_NUM_FLOOR)
+        {
+            float leakedFineE = cellRetGVar * TD_GAIN_FINE;
+            float inFineMean = totInFineE * invC;
+            float ogFineMean = totOgFineE * invC;
+            float targetFineE = inFineMean;
+            if (hasCleanSplit)
+            {
+                float targetStd = sqrt(max(0.0, ogFineMean)) + sqrt(max(0.0, leakedFineE));
+                targetFineE = min(inFineMean, targetStd * targetStd);
+            }
+
+            float curOutFineE = totOutFineE * invC;
+            if (hasCleanSplit && ogFineMean > TD_NUM_FLOOR && cellRetGVar > TD_NUM_FLOOR &&
+                totInCovOwn > TD_NUM_FLOOR)
+            {
+                float covRatio = (totOutCovOwn > 0.0) ? (totOutCovOwn / totInCovOwn) : 0.0;
+                float covImpliedOutE = targetFineE * covRatio * covRatio;
+                if (covImpliedOutE < curOutFineE)
+                    curOutFineE = covImpliedOutE;
+            }
+
+            gFlags |= 2;
+            if (td_is_bad(targetFineE) || td_is_bad(curOutFineE))
+            {
+                gFlags |= 1;
+                addBack = 1.0;
+            }
+            else if (targetFineE > TD_NUM_FLOOR)
+            {
+                float ratio = curOutFineE / targetFineE;
+                if (ratio < TD_MIN_VAR_RETENTION)
+                {
+                    gFlags |= 1;
+                    float targetStd = sqrt(TD_MIN_VAR_RETENTION) * sqrt(targetFineE);
+                    float curStd = (curOutFineE > 0.0) ? sqrt(curOutFineE) : 0.0;
+                    float denom = sqrt(targetFineE) - curStd;
+                    addBack = (denom > TD_NUM_FLOOR) ? clamp((targetStd - curStd) / denom, 0.0, 1.0) : 1.0;
+                }
+            }
+        }
+    }
+
+    imageStore(guard_cell, cell, vec4(addBack, float(gFlags), 0.0, 0.0));
+    td_sh_gout[0] = addBack;
+    td_sh_gout[1] = float(gFlags);
+}
+memoryBarrierShared();
+barrier();
+
+if (shadowMode || deferSmoothGuard)
+    return;
+
+float cellAddBack = td_sh_gout[0];
+int cellGFlags = int(round(td_sh_gout[1]));
+bool applyAddBack = (!cellIsFace) && ((cellGFlags & 1) != 0) && (cellAddBack > 0.0);
+
+if (regInCellPx)
+{
+    float outVal = regRecY;
+    if (regInActive && !cellIsFace)
+    {
+        outVal = regCandOut;
+        if (applyAddBack)
+            outVal += cellAddBack * regFineDiff;
+    }
+    imageStore(out_y, p, vec4(outVal, 0.0, 0.0, 0.0));
+}
+)GLSL";
+
+	inline std::string BuildPass34FusedBlendGuardBody()
+	{
+		return std::string(kPass34FusedBlendGuardPart1) + kPass34FusedBlendGuardPart2;
 	}
 
 	// ---- PASS 4B (Fable L-3 / OPT-2): Zero-Blur Spatially Bilinear Layer-4 Grain-Guard Apply ----
