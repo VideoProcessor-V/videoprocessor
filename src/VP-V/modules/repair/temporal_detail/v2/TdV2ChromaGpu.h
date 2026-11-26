@@ -1353,8 +1353,6 @@ for (int kk = 0; kk < K; ++kk)
     if (texelFetch(motion_gate, ivec2(kk * TD_CW + cell.x, cell.y), 0).z > 0.5)
         cellNonFin = true;
 }
-if ((uint(round(texelFetch(warp_diag, cell, 0).y)) & 16u) != 0u)
-    cellNonFin = true;
 
 for (int chIdx = 0; chIdx < 2; ++chIdx)
 {
@@ -1926,6 +1924,9 @@ vec2 ownGrainVar = (ogCntPool > 0.5) ? max(vec2(0.0), ogSumPool / ogCntPool) : v
             }
         }
         bandW[b] = wOut;
+        // Carry auto rack-focus veto sentinel (-1.0) in cell_diag_cb.w so Pass C3 stays within D3D11 CS 5.0 16-sampler limit!
+        if (focusChange)
+            diagOut.w = -1.0;
         if (chIdx == 0) imageStore(cell_diag_cb, ivec2(b * TD_CW + cell.x, cell.y), diagOut);
         else            imageStore(cell_diag_cr, ivec2(b * TD_CW + cell.x, cell.y), diagOut);
     }
@@ -2041,7 +2042,7 @@ float rawScale = (u_cell_prior_has_step_scale > 0.5) ? priorT.z : 1.0;
 float cellStepScale = (td_is_bad(rawScale) || !(rawScale > 0.0)) ? 0.0 : clamp(rawScale, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX);
 float cellStepScaleSq = cellStepScale * cellStepScale;
 int expFocusBits = int(round(priorT.y));
-bool cellFocusVeto = ((expFocusBits & 1) != 0) || (texelFetch(cell_own_grain, ivec2(cx, cy), 0).w > 0.5);
+bool cellFocusVeto = ((expFocusBits & 1) != 0) || (texelFetch(cell_diag_cb, ivec2(cx, cy), 0).w < -0.5);
 bool cellDefoc = ((expFocusBits & 2) != 0);
 bool bokehAllowL = (u_bokeh_mode > 0.5);
 bool reuseLumaW = (u_reuse_luma_weights > 0.5);
@@ -2090,7 +2091,8 @@ for (int b = 0; b < 3; ++b)
         vec4 ownD = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + cx, cy), 0)
                                  : texelFetch(cell_diag_cr, ivec2(b * TD_CW + cx, cy), 0);
         // CHR-HIGH-2 / RED-BUG-6: Always honor chroma's own A2e/step blockOwnU stored in cell_diag_cb/cr.w!
-        float bandVar = (ownD.w > 0.0) ? ownD.w : fallbackBandVar;
+        float ownU = max(0.0, ownD.w);
+        float bandVar = (ownU > 0.0) ? ownU : fallbackBandVar;
         if (chIdx == 0) sumBandVar.x += bandVar;
         else            sumBandVar.y += bandVar;
         float bound = u_pixel_bound_kappa * sqrt(max(0.0, bandVar));
@@ -4171,7 +4173,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2ebPrepHdr += Shaders::kPass2MergeSolveHeader;
 				c2ebPrepHdr += ChromaShaders::kChromaProjIrHelpers;
 
-				pl_shader_desc d2ebPrep[10] = {
+				pl_shader_desc d2ebPrep[9] = {
 					VpvGpu::Sampled("cell_stats_cb", sc.statsCb),
 					VpvGpu::Sampled("cell_stats_cr", sc.statsCr),
 					VpvGpu::Sampled("motion_gate", sc.motionGate),
@@ -4180,7 +4182,6 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Sampled("face_mask", faceMaskBind),
 					VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
 					VpvGpu::Sampled("proj_ir", chProjIrTex_),
-					VpvGpu::Sampled("warp_diag", dstWarpDiag),
 					VpvGpu::Storage("eb_scratch", ebScratchTex_)
 				};
 				pl_shader_var v2ebPrep[23] = {
@@ -4197,7 +4198,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Var("u_coarse_only", &uCoarseOnly),
 					VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor)
 				};
-				if (!runPass("td_v2_c2eb_prep", c2ebPrepHdr, ChromaShaders::kPassChromaEbPriorPrep, d2ebPrep, 10, v2ebPrep, 23,
+				if (!runPass("td_v2_c2eb_prep", c2ebPrepHdr, ChromaShaders::kPassChromaEbPriorPrep, d2ebPrep, 9, v2ebPrep, 23,
 				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
 					return failVisible("td_v2_c2eb_prep dispatch failed", StandInKind::GpuDispatchFailed);
 
@@ -4377,7 +4378,7 @@ float td_huber_taper(float diffSq, float diagC)
 				pl_tex bindDiagCb = sc.diagCb;
 				pl_tex bindDiagCr = sc.diagCr;
 
-				pl_shader_desc d3[18] = {
+				pl_shader_desc d3[17] = {
 					VpvGpu::Sampled("cur_l", sc.curL), VpvGpu::Sampled("cur_mh", sc.curMH),
 					VpvGpu::Sampled("ref_l_0", sc.refL[0]), VpvGpu::Sampled("ref_l_1", sc.refL[1]), VpvGpu::Sampled("ref_l_2", sc.refL[2]),
 					VpvGpu::Sampled("ref_mh_0", sc.refMH[0]), VpvGpu::Sampled("ref_mh_1", sc.refMH[1]), VpvGpu::Sampled("ref_mh_2", sc.refMH[2]),
@@ -4386,7 +4387,6 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Sampled("cell_weights_cb", bindWeightsCb), VpvGpu::Sampled("cell_weights_cr", bindWeightsCr),
 					VpvGpu::Sampled("cell_diag_cb", bindDiagCb), VpvGpu::Sampled("cell_diag_cr", bindDiagCr),
 					VpvGpu::Sampled("cell_prior", cellPriorTex), VpvGpu::Sampled("face_mask", faceMaskBind),
-					VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
 					VpvGpu::Storage("coded_delta_raw", sc.codedDeltaRaw)
 				};
 				pl_shader_var v3[19] = {
@@ -4406,7 +4406,7 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Var("u_luma_slot_1", &uLumaSlot1),
 					VpvGpu::Var("u_luma_slot_2", &uLumaSlot2)
 				};
-				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 18, v3, 19, cGx, cGy))
+				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 17, v3, 19, cGx, cGy))
 					return failVisible("td_v2_c3_blend_bound dispatch failed", StandInKind::GpuDispatchFailed);
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::TransformUnknownBound);

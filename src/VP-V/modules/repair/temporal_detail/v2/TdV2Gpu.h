@@ -3735,7 +3735,7 @@ namespace Gpu
 				if (needEbPrior)
 				{
 					// 1) Parallel per-cell band-pooled + 2-frame merged c_IV prep -> ebScratchTex_.
-					pl_shader_desc dEbPrep[9] = {
+					pl_shader_desc dEbPrep[8] = {
 						VpvGpu::Sampled("cell_stats", sc.cellStats),
 						VpvGpu::Sampled("prev_cell_stats", prevStatsBind),
 						VpvGpu::Sampled("cell_focus", sc.cellFocus),
@@ -3743,7 +3743,6 @@ namespace Gpu
 						VpvGpu::Sampled("motion_vec", motionVecTex),
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Sampled("cell_drift", cellDriftBind),
-						VpvGpu::Sampled("warp_diag", dstWarpDiag),
 						VpvGpu::Storage("eb_scratch", ebScratchTex_)
 					};
 					pl_shader_var vEbPrep[23] = {
@@ -3771,7 +3770,7 @@ namespace Gpu
 						VpvGpu::Var("u_anchor_ref_idx", &uAnchorRefIdx),
 						VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale)
 					};
-					if (!runPass("td_v2_p2_eb_prep", p2bSharedHdr, Shaders::kPass2EbPriorPrep, dEbPrep, 9, vEbPrep, 23, cellGx8, cellGy8, 8, 8))
+					if (!runPass("td_v2_p2_eb_prep", p2bSharedHdr, Shaders::kPass2EbPriorPrep, dEbPrep, 8, vEbPrep, 23, cellGx8, cellGy8, 8, 8))
 					{
 						resetCarryIfActive();
 						return failCore("td_v2_p2_eb_prep dispatch failed", StandInKind::GpuDispatchFailed);

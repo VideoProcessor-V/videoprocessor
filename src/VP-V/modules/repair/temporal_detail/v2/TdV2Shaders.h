@@ -2422,8 +2422,6 @@ for (int kk = 0; kk < K; ++kk)
     if (texelFetch(motion_gate, ivec2(kk * TD_CW + cell.x, cell.y), 0).z > 0.5)
         cellNonFin = true;
 }
-if ((uint(round(texelFetch(warp_diag, cell, 0).y)) & 16u) != 0u)
-    cellNonFin = true;
 
 float retG = cellNonFin ? 0.0 : max(0.0, priorT.x);
 float mVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z);
